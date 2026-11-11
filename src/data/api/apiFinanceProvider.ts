@@ -1,0 +1,914 @@
+/**
+ * Real API Finance Data Provider
+ * Admin SUN89 — Biro Jasa Management System
+ * 
+ * Implements IFinanceDataProvider connecting to the Express REST API.
+ * Keeps an in-memory cache synchronized with the backend (/api/finance)
+ * and handles optimistic updates with deterministic rollback on failure.
+ */
+
+import {
+  InvoiceBillingRecord,
+  ProfitItem,
+  KasKantorItem,
+  KasMessengerItem,
+  PengeluaranItem,
+} from "../../domain/finance/types";
+import { IFinanceDataProvider } from "../../domain/finance/types";
+import { isFullyPaid, toFinancePaymentStatus, toCanonicalPaymentStatus } from "../../domain/finance/paymentMapping";
+import { APP_CONFIG } from "../../app/config/appConfig";
+import {
+  ActionApiError,
+  fetchWithTimeout,
+  parseApiErrorResponse,
+  sanitizeActionMessage,
+} from "../../app/utils/actionErrorClassifier";
+
+export class ApiFinanceProvider implements IFinanceDataProvider {
+  private baseUrl: string;
+  private invoices: InvoiceBillingRecord[] = [];
+  private kasKantor: KasKantorItem[] = [];
+  private kasMessenger: KasMessengerItem[] = [];
+  private pengeluaran: PengeluaranItem[] = [];
+  private profitData: ProfitItem[] = [];
+  private listeners: Set<() => void> = new Set();
+  private isInitialized = false;
+  private isLoadingState = false;
+  private lastError: Error | null = null;
+
+  constructor(baseUrl = APP_CONFIG.apiBaseUrl) {
+    this.baseUrl = baseUrl.replace(/\/$/, "");
+    if (typeof window === "undefined" || (typeof window !== "undefined" && window.localStorage?.getItem("auth_token"))) {
+      this.initFromApi();
+    }
+  }
+
+  private getAuthHeader(): Record<string, string> {
+    try {
+      if (typeof window !== "undefined" && window.localStorage) {
+        const token = window.localStorage.getItem("auth_token");
+        if (token) {
+          return { Authorization: `Bearer ${token}` };
+        }
+      }
+      if (typeof process !== "undefined" && process.env?.AUTH_TOKEN) {
+        return { Authorization: `Bearer ${process.env.AUTH_TOKEN}` };
+      }
+    } catch {
+      // ignore in non-browser env
+    }
+    return {};
+  }
+
+  private normalizeInvoice(inv: any): InvoiceBillingRecord {
+    const totalTagihan = Number(inv.totalTagihan ?? inv.total_tagihan ?? 0);
+    const dibayar = Number(inv.dibayar ?? inv.terbayar ?? 0);
+    const sisa = inv.sisa !== undefined ? Number(inv.sisa) : Math.max(0, totalTagihan - dibayar);
+    const canonicalStatus = toCanonicalPaymentStatus(inv.status, totalTagihan, dibayar);
+    const financeStatus = toFinancePaymentStatus(canonicalStatus);
+
+    return {
+      id: Number(inv.id),
+      invoiceNo: inv.invoiceNo || inv.invoice_no || inv.invoice || `INV-${inv.id}`,
+      orderNo: inv.orderNo || inv.order_no,
+      customer: inv.customer || "Pelanggan",
+      layanan: inv.layanan || inv.jenisLayanan || "Layanan Samsat",
+      jenisLayanan: inv.jenisLayanan || inv.layanan || "Layanan Samsat",
+      nopol: inv.nopol || "-",
+      totalTagihan,
+      terbayar: dibayar,
+      dibayar,
+      sisa,
+      status: financeStatus,
+      tanggal: inv.tanggal || inv.tanggalInvoice || inv.createdAt || new Date().toLocaleDateString("id-ID"),
+      jatuhTempo: inv.jatuhTempo || "2026-10-15",
+      invoice: inv.invoice || inv.invoiceNo || `INV-${inv.id}`,
+      phone: inv.phone || inv.nomorHp,
+      email: inv.email,
+      alamat: inv.alamat,
+      biayaSamsat: inv.biayaSamsat !== undefined ? Number(inv.biayaSamsat) : (inv.biaya_samsat !== undefined ? Number(inv.biaya_samsat) : 0),
+      profit: inv.profit !== undefined ? Number(inv.profit) : (inv.profit_final !== undefined ? Number(inv.profit_final) : 0),
+      profitStatus: inv.profitStatus || inv.profit_status || (isFullyPaid(financeStatus) && (inv.isCompleted || inv.billingStatus === "COMPLETED") ? "REALIZED" : "PENDING"),
+      cashback: inv.cashback !== undefined ? Number(inv.cashback) : (inv.cashback_nominal !== undefined ? Number(inv.cashback_nominal) : 0),
+      cashbackStatus: inv.cashbackStatus || inv.cashback_status || (isFullyPaid(financeStatus) && (inv.isCompleted || inv.refundStatus === "PROCESSED") ? "REALIZED" : "PENDING"),
+      isCashRealized: dibayar > 0,
+      cashRecordedAmount: dibayar,
+      metodePembayaran: inv.metodePembayaran || (dibayar > 0 ? "Transfer Bank" : "Tempo"),
+      bank: inv.bank || (dibayar > 0 ? "BCA" : "Kas Kantor"),
+      billingStatus: inv.billingStatus || (isFullyPaid(financeStatus) && inv.isCompleted ? "COMPLETED" : "ACTIVE"),
+      settlementCondition: inv.settlementCondition || inv.settlement_condition || (isFullyPaid(financeStatus) ? "BALANCED" : "UNDERPAID"),
+      refundStatus: inv.refundStatus || inv.refund_status || "NONE",
+      overpayment: inv.overpayment !== undefined ? Number(inv.overpayment) : 0,
+      ...(Array.isArray(inv.payoutHistory) ? { payoutHistory: inv.payoutHistory } : {}),
+      ...(inv.payoutVersion !== undefined ? { payoutVersion: Number(inv.payoutVersion) } : {}),
+      ...(inv.refundLiability !== undefined ? { refundLiability: Number(inv.refundLiability) } : {}),
+      ...(inv.refundedAmount !== undefined ? { refundedAmount: Number(inv.refundedAmount) } : {}),
+      ...(inv.remainingRefund !== undefined ? { remainingRefund: Number(inv.remainingRefund) } : {}),
+      ...(inv.cashbackPaidAmount !== undefined ? { cashbackPaidAmount: Number(inv.cashbackPaidAmount) } : {}),
+      ...(inv.alasanPending || inv.alasan_pending ? { alasanPending: inv.alasanPending || inv.alasan_pending } : {}),
+    };
+  }
+
+  public async initFromApi(): Promise<void> {
+    const authHeaders = this.getAuthHeader();
+    if (!authHeaders.Authorization) {
+      this.isLoadingState = false;
+      return;
+    }
+
+    // Role Guard: Messengers only deal with operational field tasks and reimbursements, never office finance
+    let isMessengerUser = false;
+    try {
+      if (typeof window !== "undefined" && window.localStorage) {
+        const raw = window.localStorage.getItem("auth_user");
+        if (raw) {
+          const u = JSON.parse(raw);
+          if (u.role === "messenger") isMessengerUser = true;
+        }
+      }
+    } catch {}
+
+    if (isMessengerUser) {
+      this.isLoadingState = false;
+      return;
+    }
+
+    this.isLoadingState = true;
+    this.lastError = null;
+    try {
+      const invRes = await fetch(`${this.baseUrl}/finance/invoices`, {
+        headers: { "Content-Type": "application/json", ...authHeaders },
+      });
+      if (!invRes.ok) {
+        if (invRes.status === 401 && typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("sun89_auth_unauthorized"));
+        }
+        throw new Error(`Gagal memuat invoice dari server (HTTP ${invRes.status})`);
+      }
+      const payload = await invRes.json();
+      if (payload.success && Array.isArray(payload.data)) {
+        this.invoices = payload.data.map((inv: any) => this.normalizeInvoice(inv));
+        this.deriveProfitFromInvoices();
+      }
+
+      const kasRes = await fetch(`${this.baseUrl}/finance/kas-kantor`, {
+        headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
+      });
+      if (kasRes.ok) {
+        const kasPayload = await kasRes.json();
+        if (kasPayload.success && Array.isArray(kasPayload.data)) {
+          this.kasKantor = kasPayload.data.map((k: any) => ({
+            id: Number(k.id),
+            tanggal: k.tanggal,
+            keterangan: k.keterangan,
+            status: k.status,
+            debit: Number(k.debit || 0),
+            kredit: Number(k.kredit || 0),
+            total: Number(k.total ?? k.saldo ?? 0),
+            saldo: Number(k.saldo ?? k.total ?? 0),
+            penanggungJawab: k.penanggungJawab || k.penanggung_jawab || undefined,
+            orderNo: k.orderNo || k.order_no || undefined,
+            invoiceNo: k.invoiceNo || k.invoice_no || undefined,
+            kategori: k.kategori || undefined,
+            paymentMethodId: k.paymentMethodId || k.payment_method_id || undefined,
+            paymentMethodSnapshot: k.paymentMethodSnapshot || k.payment_method_snapshot || undefined,
+            createdAt: k.createdAt || k.created_at || undefined,
+          }));
+        }
+      }
+
+      const pengeluaranRes = await fetch(`${this.baseUrl}/finance/pengeluaran`, {
+        headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
+      });
+      if (pengeluaranRes.ok) {
+        const pengeluaranPayload = await pengeluaranRes.json();
+        if (pengeluaranPayload.success && Array.isArray(pengeluaranPayload.data)) {
+          this.pengeluaran = pengeluaranPayload.data.map((p: any) => ({
+            id: Number(p.id),
+            tanggal: p.tanggal,
+            keterangan: p.keterangan,
+            nominal: Number(p.nominal || 0),
+            penanggungJawab: p.penanggungJawab || p.penanggung_jawab || undefined,
+          }));
+        }
+      }
+
+      const messengerRes = await fetch(`${this.baseUrl}/finance/kas-messenger`, {
+        headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
+      });
+      if (messengerRes.ok) {
+        const messengerPayload = await messengerRes.json();
+        if (messengerPayload.success && Array.isArray(messengerPayload.data)) {
+          this.kasMessenger = messengerPayload.data.map((m: any) => ({
+            id: Number(m.id),
+            tanggal: m.tanggal,
+            jenis: m.jenis,
+            messenger: m.messenger,
+            keterangan: m.keterangan,
+            in: Number(m.in || m.debit || 0),
+            out: Number(m.out || m.kredit || 0),
+            total: Number(m.total || 0),
+            penanggungJawab: m.penanggungJawab || m.penanggung_jawab || undefined,
+            orderNo: m.orderNo || m.order_no || undefined,
+            reimbursementId: m.reimbursementId || m.reimbursement_id || undefined,
+            receiptUrl: m.receiptUrl || m.receipt_url || undefined,
+            kategori: m.kategori || undefined,
+            messengerId: m.messengerId || m.messenger_id || undefined,
+            paymentMethodId: m.paymentMethodId || m.payment_method_id || undefined,
+            paymentMethodSnapshot: m.paymentMethodSnapshot || m.payment_method_snapshot || undefined,
+            createdAt: m.createdAt || m.created_at || undefined,
+          }));
+        }
+      }
+
+      this.isInitialized = true;
+      this.isLoadingState = false;
+      this.notify();
+    } catch (err: any) {
+      this.isLoadingState = false;
+      this.lastError = err instanceof Error ? err : new Error(String(err));
+      this.notify();
+      // In API mode, do NOT silently inject mock fixtures on error!
+    }
+  }
+
+  private deriveProfitFromInvoices(): void {
+    this.profitData = this.invoices
+      .filter((inv) => isFullyPaid(inv.status))
+      .map((inv, idx) => ({
+        id: idx + 1,
+        tanggal: inv.tanggal,
+        customer: inv.customer,
+        nopol: inv.nopol,
+        pengurusan: inv.jenisLayanan,
+        uangMasuk: inv.totalTagihan,
+        biayaSamsat: inv.biayaSamsat || Math.round(inv.totalTagihan * 0.75),
+        profit: inv.profit || Math.round(inv.totalTagihan * 0.25),
+        namaBerkas: (inv as any).namaBerkas || inv.customer,
+        rekening: inv.bank || "BCA",
+        tanggalTTB: inv.tanggal,
+        ttb: "-",
+        status: "Selesai",
+        invoice: inv.invoice || inv.invoiceNo || "-",
+      }));
+  }
+
+  public subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private notify(): void {
+    this.listeners.forEach((fn) => {
+      try {
+        fn();
+      } catch (err) {
+        console.error("ApiFinanceProvider listener error:", err);
+      }
+    });
+  }
+
+  public isLoading(): boolean {
+    return this.isLoadingState;
+  }
+
+  public getError(): Error | null {
+    return this.lastError;
+  }
+
+  public getInvoices(): InvoiceBillingRecord[] {
+    return this.invoices;
+  }
+
+  public getTagihanList(): InvoiceBillingRecord[] {
+    return this.invoices.filter((inv) => !isFullyPaid(inv.status) && inv.billingStatus !== "COMPLETED");
+  }
+
+  public getCompletedTagihanList(): InvoiceBillingRecord[] {
+    return this.invoices.filter((inv) => isFullyPaid(inv.status) || inv.billingStatus === "COMPLETED");
+  }
+
+  public getInvoiceById(id: number): InvoiceBillingRecord | undefined {
+    return this.invoices.find((inv) => inv.id === id);
+  }
+
+  public getInvoiceByOrderNo(orderNo: string): InvoiceBillingRecord | undefined {
+    return this.invoices.find((inv) => inv.orderNo === orderNo);
+  }
+
+  public getProfitList(): ProfitItem[] {
+    return this.profitData;
+  }
+
+  public getKasKantorList(): KasKantorItem[] {
+    return this.kasKantor;
+  }
+
+  public getKasMessengerList(): KasMessengerItem[] {
+    return this.kasMessenger;
+  }
+
+  public getPengeluaranList(): PengeluaranItem[] {
+    return this.pengeluaran;
+  }
+
+  public async recordPayment(idOrInvoice: number | string, paymentAmount: number, details?: any): Promise<boolean> {
+    if (paymentAmount <= 0) return false;
+
+    const idx = this.invoices.findIndex(
+      (inv) => inv.id === idOrInvoice || inv.invoiceNo === String(idOrInvoice) || (inv as any).invoice === String(idOrInvoice)
+    );
+    if (idx === -1) return false;
+
+    const record = this.invoices[idx];
+
+    // Stable idempotency key: reuse existing key if provided (e.g. on client retry) or generate once
+    const idempotencyKey = details?.idempotencyKey || `idem-${record.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const effectiveDetails = {
+      ...details,
+      idempotencyKey,
+    };
+
+    const res = await fetchWithTimeout(
+      `${this.baseUrl}/finance/invoices/${encodeURIComponent(record.id)}/pay`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+          ...this.getAuthHeader(),
+        },
+        body: JSON.stringify({ amount: paymentAmount, details: effectiveDetails }),
+      },
+      15000
+    );
+
+    if (!res.ok) {
+      throw await parseApiErrorResponse(res, "Gagal mencatat pembayaran tagihan.");
+    }
+
+    const payload = await res.json().catch(() => null);
+    if (!payload || payload.success === false) {
+      throw new ActionApiError(
+        res.status || 400,
+        String(payload?.error?.code || payload?.code || "VALIDATION_ERROR"),
+        sanitizeActionMessage(payload?.error?.message || payload?.message) || "Gagal mencatat pembayaran tagihan."
+      );
+    }
+
+    if (payload.data) {
+      const currentIdx = this.invoices.findIndex((inv) => inv.id === record.id);
+      if (currentIdx !== -1) {
+        this.invoices[currentIdx] = this.normalizeInvoice(payload.data);
+        this.deriveProfitFromInvoices();
+        this.notify();
+      }
+    }
+    return true;
+  }
+
+  public resolveInvoice(id: number, details?: any): boolean {
+    const record = this.getInvoiceById(id);
+    if (!record) return false;
+    void this.recordPayment(id, record.sisa, details);
+    return true;
+  }
+
+  public completeInvoice(id: number, completedBy?: string): boolean {
+    const record = this.getInvoiceById(id);
+    if (!record) return false;
+    record.billingStatus = "COMPLETED";
+    if (completedBy) record.completedBy = completedBy;
+    this.notify();
+
+    fetch(`${this.baseUrl}/finance/invoices/${encodeURIComponent(id)}/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
+      body: JSON.stringify({ completedBy }),
+    })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((payload) => {
+        if (payload?.success && payload.data) {
+          const currentIdx = this.invoices.findIndex((inv) => inv.id === id);
+          if (currentIdx !== -1) {
+            this.invoices[currentIdx] = this.normalizeInvoice(payload.data);
+            this.deriveProfitFromInvoices();
+            this.notify();
+          }
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to persist completeInvoice to server:", err);
+      });
+
+    return true;
+  }
+
+  public async payoutCashback(id: number, payoutData: any): Promise<boolean> {
+    const idempotencyKey = payoutData?.idempotencyKey || (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `IDEMP-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
+    let res: Response;
+    try {
+      res = await fetchWithTimeout(
+        `${this.baseUrl}/finance/invoices/${encodeURIComponent(id)}/cashback-payout`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Idempotency-Key": idempotencyKey,
+            ...(payoutData?.expectedVersion !== undefined ? { "X-Expected-Version": String(payoutData.expectedVersion) } : {}),
+            ...this.getAuthHeader(),
+          },
+          body: JSON.stringify({ ...payoutData, idempotencyKey }),
+        },
+        15000
+      );
+    } catch (networkErr: any) {
+      if (networkErr instanceof ActionApiError) {
+        (networkErr as any).errorCode = networkErr.code;
+        (networkErr as any).isDefinitive = false;
+        (networkErr as any).isNetworkError = networkErr.statusCode === 0;
+        throw networkErr;
+      }
+      const err = new ActionApiError(
+        0,
+        "NETWORK_ERROR",
+        sanitizeActionMessage(networkErr?.message) || "Koneksi jaringan terputus saat menghubungi server."
+      );
+      (err as any).errorCode = "NETWORK_ERROR";
+      (err as any).isDefinitive = false;
+      (err as any).isNetworkError = true;
+      throw err;
+    }
+
+    if (!res.ok) {
+      const apiErr = await parseApiErrorResponse(res, "Gagal mencairkan cashback.");
+      (apiErr as any).errorCode = apiErr.code;
+      (apiErr as any).isDefinitive = res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429;
+      throw apiErr;
+    }
+
+    const payload = await res.json().catch(() => null);
+    if (!payload || payload.success === false) {
+      const apiErr = new ActionApiError(
+        res.status || 400,
+        String(payload?.error?.code || payload?.code || "VALIDATION_ERROR"),
+        sanitizeActionMessage(payload?.error?.message || payload?.message) || "Gagal mencairkan cashback."
+      );
+      (apiErr as any).errorCode = apiErr.code;
+      (apiErr as any).isDefinitive = true;
+      throw apiErr;
+    }
+
+    if (payload.data) {
+      const currentIdx = this.invoices.findIndex((inv) => inv.id === id);
+      if (currentIdx !== -1) {
+        this.invoices[currentIdx] = this.normalizeInvoice(payload.data);
+      }
+
+      try {
+        const kasRes = await fetchWithTimeout(
+          `${this.baseUrl}/finance/kas-kantor`,
+          { headers: { "Content-Type": "application/json", ...this.getAuthHeader() } },
+          10000
+        );
+        if (kasRes.ok) {
+          const kasPayload = await kasRes.json().catch(() => null);
+          if (kasPayload?.success && Array.isArray(kasPayload.data)) {
+            this.kasKantor = kasPayload.data.map((k: any) => ({
+              id: Number(k.id),
+              tanggal: k.tanggal,
+              keterangan: k.keterangan,
+              status: k.status,
+              debit: Number(k.debit || 0),
+              kredit: Number(k.kredit || 0),
+              total: Number(k.total ?? k.saldo ?? 0),
+              saldo: Number(k.saldo ?? k.total ?? 0),
+              penanggungJawab: k.penanggungJawab || k.penanggung_jawab || undefined,
+            }));
+          }
+        }
+      } catch {
+        // Secondary kas-kantor refresh must not falsely fail an already committed payout
+      }
+      this.deriveProfitFromInvoices();
+      this.notify();
+    }
+    return true;
+  }
+
+  public async voidInvoicePayment(id: number, paymentId: number, reason: string): Promise<boolean> {
+    const res = await fetchWithTimeout(
+      `${this.baseUrl}/finance/invoices/${encodeURIComponent(id)}/payments/${encodeURIComponent(paymentId)}/void`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
+        body: JSON.stringify({ reason }),
+      },
+      15000
+    );
+
+    if (!res.ok) {
+      throw await parseApiErrorResponse(res, "Gagal membatalkan pembayaran.");
+    }
+
+    const payload = await res.json().catch(() => null);
+    if (payload?.success && payload.data) {
+      const currentIdx = this.invoices.findIndex((inv) => inv.id === id);
+      if (currentIdx !== -1) {
+        this.invoices[currentIdx] = this.normalizeInvoice(payload.data);
+      }
+
+      try {
+        const kasRes = await fetchWithTimeout(
+          `${this.baseUrl}/finance/kas-kantor`,
+          { headers: { "Content-Type": "application/json", ...this.getAuthHeader() } },
+          10000
+        );
+        if (kasRes.ok) {
+          const kasPayload = await kasRes.json().catch(() => null);
+          if (kasPayload?.success && Array.isArray(kasPayload.data)) {
+            this.kasKantor = kasPayload.data.map((k: any) => ({
+              id: Number(k.id),
+              tanggal: k.tanggal,
+              keterangan: k.keterangan,
+              status: k.status,
+              debit: Number(k.debit || 0),
+              kredit: Number(k.kredit || 0),
+              total: Number(k.total ?? k.saldo ?? 0),
+              saldo: Number(k.saldo ?? k.total ?? 0),
+              penanggungJawab: k.penanggungJawab || k.penanggung_jawab || undefined,
+            }));
+          }
+        }
+      } catch {
+        // Secondary kas-kantor refresh failure should not fail void
+      }
+      this.deriveProfitFromInvoices();
+      this.notify();
+    }
+    return true;
+  }
+
+  public async voidCashbackPayout(id: number, reason: string): Promise<boolean> {
+    const res = await fetchWithTimeout(
+      `${this.baseUrl}/finance/invoices/${encodeURIComponent(id)}/cashback-payout/void`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
+        body: JSON.stringify({ reason }),
+      },
+      15000
+    );
+
+    if (!res.ok) {
+      throw await parseApiErrorResponse(res, "Gagal membatalkan pencairan cashback.");
+    }
+
+    const payload = await res.json().catch(() => null);
+    if (payload?.success && payload.data) {
+      const currentIdx = this.invoices.findIndex((inv) => inv.id === id);
+      if (currentIdx !== -1) {
+        this.invoices[currentIdx] = this.normalizeInvoice(payload.data);
+      }
+
+      try {
+        const kasRes = await fetchWithTimeout(
+          `${this.baseUrl}/finance/kas-kantor`,
+          { headers: { "Content-Type": "application/json", ...this.getAuthHeader() } },
+          10000
+        );
+        if (kasRes.ok) {
+          const kasPayload = await kasRes.json().catch(() => null);
+          if (kasPayload?.success && Array.isArray(kasPayload.data)) {
+            this.kasKantor = kasPayload.data.map((k: any) => ({
+              id: Number(k.id),
+              tanggal: k.tanggal,
+              keterangan: k.keterangan,
+              status: k.status,
+              debit: Number(k.debit || 0),
+              kredit: Number(k.kredit || 0),
+              total: Number(k.total ?? k.saldo ?? 0),
+              saldo: Number(k.saldo ?? k.total ?? 0),
+              penanggungJawab: k.penanggungJawab || k.penanggung_jawab || undefined,
+            }));
+          }
+        }
+      } catch {
+        // Secondary kas-kantor refresh failure should not fail void
+      }
+      this.deriveProfitFromInvoices();
+      this.notify();
+    }
+    return true;
+  }
+
+  public addKasKantor(item: Omit<KasKantorItem, "id">): KasKantorItem | null {
+    const lastTotal = this.kasKantor.length > 0
+      ? (this.kasKantor[0].total ?? (this.kasKantor[0] as any).saldo ?? 0)
+      : 0;
+
+    const newEntry: KasKantorItem = {
+      id: Date.now(),
+      tanggal: item.tanggal,
+      status: item.status,
+      keterangan: item.keterangan,
+      debit: item.debit || 0,
+      kredit: item.kredit || 0,
+      penanggungJawab: item.penanggungJawab,
+      orderNo: (item as any).orderNo,
+      invoiceNo: (item as any).invoiceNo,
+      kategori: (item as any).kategori,
+      paymentMethodId: (item as any).paymentMethodId || (item as any).payment_method_id || null,
+      paymentMethodSnapshot: (item as any).paymentMethodSnapshot || (item as any).payment_method_snapshot || null,
+      total: (item.status === "Debit" || item.status === "Pemasukan") ? lastTotal + (item.debit || 0) : lastTotal - (item.kredit || 0),
+    };
+
+    this.kasKantor.unshift(newEntry);
+    this.notify();
+
+    fetch(`${this.baseUrl}/finance/kas-kantor`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
+      body: JSON.stringify(item),
+    })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((payload) => {
+        if (payload?.success && payload.data) {
+          const idx = this.kasKantor.findIndex((k) => k.id === newEntry.id);
+          if (idx !== -1) {
+            this.kasKantor[idx] = {
+              ...payload.data,
+              total: Number(payload.data.total ?? payload.data.saldo ?? 0),
+              saldo: Number(payload.data.saldo ?? payload.data.total ?? 0),
+              orderNo: payload.data.orderNo || payload.data.order_no || (item as any).orderNo,
+              invoiceNo: payload.data.invoiceNo || payload.data.invoice_no || (item as any).invoiceNo,
+              kategori: payload.data.kategori || (item as any).kategori,
+              paymentMethodId: payload.data.paymentMethodId || payload.data.payment_method_id || (item as any).paymentMethodId || (item as any).payment_method_id || null,
+              paymentMethodSnapshot: payload.data.paymentMethodSnapshot || payload.data.payment_method_snapshot || (item as any).paymentMethodSnapshot || (item as any).payment_method_snapshot || null,
+              createdAt: payload.data.createdAt || payload.data.created_at,
+            };
+            this.notify();
+          }
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to persist kas entry, rolling back:", err);
+        const idx = this.kasKantor.findIndex((k) => k.id === newEntry.id);
+        if (idx !== -1) {
+          this.kasKantor.splice(idx, 1);
+          this.notify();
+        }
+      });
+
+    return newEntry;
+  }
+
+  public addPengeluaran(item: Omit<PengeluaranItem, "id">): PengeluaranItem | null {
+    const nextId = Date.now();
+    const newEntry: PengeluaranItem = {
+      id: nextId,
+      tanggal: item.tanggal,
+      keterangan: item.keterangan,
+      nominal: item.nominal,
+      penanggungJawab: item.penanggungJawab,
+    };
+
+    this.pengeluaran.unshift(newEntry);
+    this.notify();
+
+    fetch(`${this.baseUrl}/finance/pengeluaran`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
+      body: JSON.stringify(item),
+    })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((payload) => {
+        if (payload?.success && payload.data) {
+          const idx = this.pengeluaran.findIndex((p) => p.id === newEntry.id);
+          if (idx !== -1) {
+            this.pengeluaran[idx] = {
+              id: Number(payload.data.id),
+              tanggal: payload.data.tanggal,
+              keterangan: payload.data.keterangan,
+              nominal: Number(payload.data.nominal || 0),
+              penanggungJawab: payload.data.penanggungJawab || payload.data.penanggung_jawab || undefined,
+            };
+            this.notify();
+          }
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to persist pengeluaran entry, rolling back:", err);
+        const idx = this.pengeluaran.findIndex((p) => p.id === newEntry.id);
+        if (idx !== -1) {
+          this.pengeluaran.splice(idx, 1);
+          this.notify();
+        }
+      });
+
+    return newEntry;
+  }
+
+  public async deleteKasKantor(id: number, reason: string, idempotencyKey?: string): Promise<boolean> {
+    const cleanReason = String(reason || "").trim();
+    if (cleanReason.length < 10) {
+      throw new Error("Alasan penghapusan permanen kas kantor wajib diisi minimal 10 karakter.");
+    }
+    const key = idempotencyKey || (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `key-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`);
+
+    const res = await fetch(`${this.baseUrl}/finance/kas-kantor/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": key,
+        ...this.getAuthHeader(),
+      },
+      body: JSON.stringify({ reason: cleanReason }),
+    });
+
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      throw new Error(errorData.message || `Gagal menghapus kas kantor (HTTP ${res.status})`);
+    }
+
+    // Only mutate state after confirmed server success (no optimistic removal)
+    const idx = this.kasKantor.findIndex((k) => k.id === id);
+    if (idx !== -1) {
+      this.kasKantor.splice(idx, 1);
+      this.notify();
+    }
+    return true;
+  }
+
+  public addKasMessenger(item: Omit<KasMessengerItem, "id" | "total"> & { total?: number }): KasMessengerItem | null {
+    const lastTotal = this.kasMessenger.length > 0
+      ? this.kasMessenger[0].total
+      : 0;
+    const runningTotal = item.total !== undefined ? item.total : lastTotal + item.in - item.out;
+
+    const newEntry: KasMessengerItem = {
+      id: Date.now(),
+      tanggal: item.tanggal,
+      jenis: item.jenis,
+      messenger: item.messenger,
+      keterangan: item.keterangan,
+      in: item.in,
+      out: item.out,
+      total: runningTotal,
+      orderNo: (item as any).orderNo,
+      penanggungJawab: (item as any).penanggungJawab,
+      reimbursementId: (item as any).reimbursementId,
+      receiptUrl: (item as any).receiptUrl,
+      kategori: (item as any).kategori,
+      messengerId: (item as any).messengerId || (item as any).messenger_id,
+      paymentMethodId: (item as any).paymentMethodId || (item as any).payment_method_id || null,
+      paymentMethodSnapshot: (item as any).paymentMethodSnapshot || (item as any).payment_method_snapshot || null,
+    };
+
+    this.kasMessenger.unshift(newEntry);
+    this.notify();
+
+    fetch(`${this.baseUrl}/finance/kas-messenger`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
+      body: JSON.stringify(item),
+    })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((payload) => {
+        if (payload?.success && payload.data) {
+          const idx = this.kasMessenger.findIndex((k) => k.id === newEntry.id);
+          if (idx !== -1) {
+            this.kasMessenger[idx] = {
+              id: Number(payload.data.id),
+              tanggal: payload.data.tanggal,
+              jenis: payload.data.jenis,
+              messenger: payload.data.messenger,
+              keterangan: payload.data.keterangan,
+              in: Number(payload.data.in ?? payload.data.debit ?? 0),
+              out: Number(payload.data.out ?? payload.data.kredit ?? 0),
+              total: Number(payload.data.total ?? 0),
+              orderNo: payload.data.orderNo || payload.data.order_no || (item as any).orderNo,
+              penanggungJawab: payload.data.penanggungJawab || payload.data.penanggung_jawab || (item as any).penanggungJawab,
+              reimbursementId: payload.data.reimbursementId || payload.data.reimbursement_id || (item as any).reimbursementId,
+              receiptUrl: payload.data.receiptUrl || payload.data.receipt_url || (item as any).receiptUrl,
+              kategori: payload.data.kategori || (item as any).kategori,
+              messengerId: payload.data.messengerId || payload.data.messenger_id || (item as any).messengerId || (item as any).messenger_id,
+              paymentMethodId: payload.data.paymentMethodId || payload.data.payment_method_id || (item as any).paymentMethodId || (item as any).payment_method_id || null,
+              paymentMethodSnapshot: payload.data.paymentMethodSnapshot || payload.data.payment_method_snapshot || (item as any).paymentMethodSnapshot || (item as any).payment_method_snapshot || null,
+              createdAt: payload.data.createdAt || payload.data.created_at,
+            };
+            this.notify();
+          }
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to persist kas messenger, rolling back:", err);
+        const idx = this.kasMessenger.findIndex((k) => k.id === newEntry.id);
+        if (idx !== -1) {
+          this.kasMessenger.splice(idx, 1);
+          this.notify();
+        }
+      });
+
+    return newEntry;
+  }
+
+  public async deleteKasMessenger(id: number, reason: string, idempotencyKey?: string): Promise<boolean> {
+    const cleanReason = String(reason || "").trim();
+    if (cleanReason.length < 10) {
+      throw new Error("Alasan penghapusan permanen kas messenger wajib diisi minimal 10 karakter.");
+    }
+    const key = idempotencyKey || (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `key-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`);
+
+    const res = await fetch(`${this.baseUrl}/finance/kas-messenger/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": key,
+        ...this.getAuthHeader(),
+      },
+      body: JSON.stringify({ reason: cleanReason }),
+    });
+
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      throw new Error(errorData.message || `Gagal menghapus kas messenger (HTTP ${res.status})`);
+    }
+
+    // Only mutate state after confirmed server success (no optimistic removal)
+    const idx = this.kasMessenger.findIndex((k) => k.id === id);
+    if (idx !== -1) {
+      this.kasMessenger.splice(idx, 1);
+      this.notify();
+    }
+    return true;
+  }
+
+  public async deletePengeluaran(id: number, reason: string, idempotencyKey?: string): Promise<boolean> {
+    const cleanReason = String(reason || "").trim();
+    if (cleanReason.length < 10) {
+      throw new Error("Alasan penghapusan permanen pengeluaran wajib diisi minimal 10 karakter.");
+    }
+    const key = idempotencyKey || (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `key-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`);
+
+    const res = await fetch(`${this.baseUrl}/finance/pengeluaran/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": key,
+        ...this.getAuthHeader(),
+      },
+      body: JSON.stringify({ reason: cleanReason }),
+    });
+
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      throw new Error(errorData.message || `Gagal menghapus pengeluaran (HTTP ${res.status})`);
+    }
+
+    // Only mutate state after confirmed server success (no optimistic removal)
+    const idx = this.pengeluaran.findIndex((p) => p.id === id);
+    if (idx !== -1) {
+      this.pengeluaran.splice(idx, 1);
+      this.notify();
+    }
+    return true;
+  }
+
+  public saveInvoice(invoice: InvoiceBillingRecord): void {
+    const normalized = this.normalizeInvoice(invoice);
+    const idx = this.invoices.findIndex((inv) => inv.id === normalized.id || inv.invoiceNo === normalized.invoiceNo);
+    if (idx !== -1) {
+      this.invoices[idx] = normalized;
+    } else {
+      this.invoices.unshift(normalized);
+    }
+    this.deriveProfitFromInvoices();
+    this.notify();
+  }
+
+  public async getVoidAuditHistory(): Promise<{ payments: any[]; cashbacks: any[] }> {
+    const res = await fetchWithTimeout(
+      `${this.baseUrl}/finance/audit/void-history`,
+      { headers: { "Content-Type": "application/json", ...this.getAuthHeader() } },
+      15000
+    );
+    if (!res.ok) {
+      throw await parseApiErrorResponse(res, "Gagal mengambil riwayat audit void.");
+    }
+    const payload = await res.json();
+    return payload.data || { payments: [], cashbacks: [] };
+  }
+}
