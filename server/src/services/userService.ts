@@ -9,6 +9,7 @@ import { SystemUser } from "../../../src/domain/user/types";
 import { hashPassword } from "../utils/crypto";
 import { ApiError } from "../middleware/errorHandler";
 import { TokenPayload } from "../utils/crypto";
+import { parsePositiveDbUserId } from "../utils/canonicalIdentity";
 
 export class UserService {
   public getAll(): SystemUser[] {
@@ -48,7 +49,7 @@ export class UserService {
       throw new ApiError(400, "VALIDATION_ERROR", "Field nama, email, dan jabatan wajib diisi.");
     }
 
-    const isCallerSvp = user?.role === "administrator" || user?.jabatan === "SVP";
+    const isCallerSvp = user?.role === "administrator";
     const targetJabatan = (payload.jabatan || "").toUpperCase().trim();
     const targetRole = ((payload as any).role || "").toLowerCase().trim();
     if ((targetJabatan === "SVP" || targetRole === "administrator" || targetRole === "svp") && !isCallerSvp) {
@@ -97,7 +98,7 @@ export class UserService {
 
   public updateUser(id: number | string, updates: Partial<{ nama: string; jabatan: string; email: string; status: "Aktif" | "Nonaktif" }>, user?: TokenPayload | null): SystemUser {
     const existing = this.getById(id);
-    const isCallerSvp = user?.role === "administrator" || user?.jabatan === "SVP";
+    const isCallerSvp = user?.role === "administrator";
 
     // Protect existing SVP accounts from being tampered with by non-SVP
     if ((existing.jabatan === "SVP" || (existing as any).role === "administrator" || (existing as any).role === "svp") && !isCallerSvp) {
@@ -140,7 +141,7 @@ export class UserService {
 
   public deleteUser(id: number | string, user?: TokenPayload | null): boolean {
     const existing = this.getById(id);
-    const isCallerSvp = user?.role === "administrator" || user?.jabatan === "SVP";
+    const isCallerSvp = user?.role === "administrator";
 
     // Strictly protect SVP accounts from deletion
     if (existing.jabatan === "SVP" || (existing as any).role === "administrator" || (existing as any).role === "svp") {
@@ -148,8 +149,9 @@ export class UserService {
     }
 
     // Prevent users from deleting their own active account
-    const targetUserId = `usr-${id}`;
-    if (user?.userId === targetUserId || user?.userId === String(id)) {
+    const callerNumericId = parsePositiveDbUserId(user?.userId);
+    const targetNumericId = parsePositiveDbUserId(id);
+    if (callerNumericId !== null && targetNumericId !== null && callerNumericId === targetNumericId) {
       throw new ApiError(400, "FORBIDDEN", "Anda tidak dapat menghapus akun Anda sendiri.");
     }
 
@@ -185,13 +187,16 @@ export class UserService {
   }
 
   public resetPassword(id: number | string, callerUser?: TokenPayload | null): { userId: number; nama: string; email: string } {
-    const rawId = typeof id === "string" ? id.replace(/^usr-/i, "") : id;
+    const rawId = parsePositiveDbUserId(id);
+    if (!rawId) {
+      throw new ApiError(400, "INVALID_USER_ID", `User ID '${id}' tidak valid.`);
+    }
     const targetUser = dbUserRepository.getByIdWithCredentials(rawId);
     if (!targetUser) {
       throw new ApiError(404, "USER_NOT_FOUND", `User ID '${id}' tidak ditemukan.`);
     }
 
-    const isCallerSvp = callerUser?.role === "administrator" || callerUser?.jabatan === "SVP";
+    const isCallerSvp = callerUser?.role === "administrator";
     if ((targetUser.jabatan === "SVP" || targetUser.role === "administrator" || targetUser.role === "svp") && !isCallerSvp) {
       throw new ApiError(403, "FORBIDDEN", "Akun SVP dilindungi oleh sistem dan tidak dapat direset oleh role lain.");
     }

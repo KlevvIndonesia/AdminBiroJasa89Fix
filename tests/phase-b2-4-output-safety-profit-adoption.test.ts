@@ -19,9 +19,11 @@ test("Phase B2.4: Financial Output Safety & Canonical Profit Adoption Test Suite
   };
 
   const spvUser = {
-    userId: "usr-spv-b24",
-    nama: "SPV B2.4",
-    role: "supervisor",
+    id: "usr-1",
+    userId: "usr-1",
+    nama: "SVP B2.4",
+    role: "administrator",
+    jabatan: "SVP",
   };
 
   // ═══════════════════════════════════════════════════════════════════════════════
@@ -325,12 +327,29 @@ test("Phase B2.4: Financial Output Safety & Canonical Profit Adoption Test Suite
     const order = orderService.createOrder(orderPayload, adminUser);
     const inv = dbFinanceRepository.getInvoiceByOrderNo(order.orderNo);
     assert.ok(inv);
+    dbFinanceRepository.updateInvoice(inv.id, {
+      cashback: 75000,
+      cashbackStatus: "PENDING",
+    });
 
     // Overpayment of 400.000 (Paid 1.400.000 on 1.000.000 tagihan)
     financeService.recordPayment(inv.id, 1400000, {
       metodePembayaran: "Transfer Bank",
       bank: "BCA",
+      buktiPembayaran: { fileName: "bukti_bayar_b24.jpg", fileType: "image" },
     }, adminUser);
+
+    const pendingInv = financeService.getInvoiceById(inv.id);
+    assert.strictEqual(pendingInv.overpayment, 0, "Unverified payment must not settle overpayment prior to verification");
+
+    financeService.verifyPayment({
+      invoiceId: inv.id,
+      user: spvUser,
+      proofPayload: { fileName: "bukti_bayar_b24.jpg", fileType: "image" },
+    });
+    dbFinanceRepository.updateInvoice(inv.id, {
+      refundStatus: "PENDING",
+    });
 
     const paidInv = financeService.getInvoiceById(inv.id);
     assert.strictEqual(paidInv.overpayment, 400000);
@@ -347,6 +366,8 @@ test("Phase B2.4: Financial Output Safety & Canonical Profit Adoption Test Suite
       bank: "BCA",
       noRekening: "1234567890",
       namaRekening: "Customer Bpk B24",
+      idempotencyKey: "idem-b24-refund-1",
+      expectedVersion: 0,
     }, adminUser);
 
     // Disburse partner cashback
@@ -358,6 +379,8 @@ test("Phase B2.4: Financial Output Safety & Canonical Profit Adoption Test Suite
       bank: "BCA",
       noRekening: "9876543210",
       namaRekening: "Mitra Biro B24",
+      idempotencyKey: "idem-b24-komisi-1",
+      expectedVersion: 1,
     }, adminUser);
 
     const disbursedInv = financeService.getInvoiceById(inv.id);

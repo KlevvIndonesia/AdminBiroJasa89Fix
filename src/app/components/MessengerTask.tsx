@@ -9,9 +9,8 @@ import { Separator } from "./ui/separator";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 import { Badge, getStatusBadgeClass } from "./ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
-import { Pagination, PaginationContent, PaginationItem, PaginationLink, PaginationNext, PaginationPrevious } from "./ui/pagination";
+import { DataTableShell, DataTableEmptyRow } from "./ui/data-table";
 import { TablePagination } from "./ui/TablePagination";
-import { EmptyState } from "./ui/empty-state";
 import {
   Plus,
   Search,
@@ -55,7 +54,6 @@ import {
   deriveAssignedMessengerTasks,
   isTaskAssignedMessenger,
   calculateOrderTagihan,
-  KNOWN_MESSENGERS,
   MessengerTaskItem,
   resolveMessengerEmployeeId,
   completeMessengerPickup,
@@ -63,8 +61,8 @@ import {
   completeSamsatResultPickup,
   completeMessengerDelivery,
   startMessengerTask,
-  arriveAtSamsat,
-  startSamsatJourney,
+  deriveSingleTaskFromOrder,
+  updateMessengerTaskStatusAction,
   updateMessengerComponent,
   addSamsatComponentToOrder,
   getMasterSamsatComponents,
@@ -72,7 +70,6 @@ import {
   reassignMessengerTaskAction,
 } from "../data/messengerTaskAdapter";
 import { useKaryawanPengguna } from "../data/karyawanPenggunaAdapter";
-import { APP_CONFIG } from "../config/appConfig";
 import { processDocumentUpload, formatFileSize } from "../utils/fileCompressor";
 import { documentRepository } from "../../data/repositories/documentRepository";
 import { formatRupiah } from "../utils/financeFormatters";
@@ -182,6 +179,7 @@ export function MessengerTask() {
     tanggalTerima: "",
   });
   const [editTaskData, setEditTaskData] = useState<MessengerTaskItem | null>(null);
+  const [isUpdatingTask, setIsUpdatingTask] = useState(false);
 
   // Ambil Alih (Takeover) Dialog State
   const [isAmbilAlihOpen, setIsAmbilAlihOpen] = useState(false);
@@ -268,12 +266,10 @@ export function MessengerTask() {
 
   // Available messengers for assignment dropdown in dialogs
   const assignableMessengers = useMemo(() => {
-    const isApi = APP_CONFIG.dataProvider === "api";
     const active = karyawan
-      .filter((k) => k.jabatan === "MESSENGER" && k.status === "Aktif")
+      .filter((k) => (k.jabatan || "").toUpperCase() === "MESSENGER" && k.status === "Aktif")
       .map((k) => k.nama);
-    const baseMessengers = active.length > 0 ? active : (isApi ? [] : [...KNOWN_MESSENGERS]);
-    const set = new Set<string>(["Belum Ditugaskan", ...baseMessengers]);
+    const set = new Set<string>(["Belum Ditugaskan", ...active]);
     taskData.forEach(t => {
       if (t.messenger && t.messenger !== "Belum Ditugaskan") {
         set.add(t.messenger);
@@ -344,7 +340,7 @@ export function MessengerTask() {
     setIsAssignDialogOpen(true);
   };
 
-  const handleConfirmAssign = () => {
+  const handleConfirmAssign = async () => {
     if (!assignTargetTask) return;
     if (!selectedAssignMessenger) {
       toast.error("Pilih kurir terlebih dahulu!");
@@ -376,11 +372,11 @@ export function MessengerTask() {
       },
     };
 
+    let saved = false;
     if (assignTargetTask.keteranganTugas === "Pengantaran Dokumen") {
-      orderStore.updateOrder(orderNo, {
+      saved = await orderStore.updateOrderAsync(orderNo, {
         messengerPengantar: courierName,
-        assignedMessengerName: courierName,
-        assignedMessengerId: courierId,
+        deliveryMessengerId: courierId,
         tanggalPengantaran: targetDate,
         isDeliveryScheduled: true,
         taskAcceptance: updatedAcceptance,
@@ -388,21 +384,28 @@ export function MessengerTask() {
         catatanPengantaran: assignTaskNotes || currentOrder.catatanPengantaran,
       });
     } else if (assignTargetTask.keteranganTugas === "Proses Samsat") {
-      orderStore.updateOrder(orderNo, {
+      saved = await orderStore.updateOrderAsync(orderNo, {
         samsatMessenger: courierName,
         samsatMessengerNama: courierName,
         samsatMessengerId: courierId,
-        assignedMessengerName: courierName,
-        assignedMessengerId: courierId,
         tanggalProsesSamsat: targetDate,
         isSamsatScheduled: true,
         taskAcceptance: updatedAcceptance,
         samsatStatus: "Terjadwal Samsat",
         catatanSamsat: assignTaskNotes || currentOrder.catatanSamsat,
       });
+    } else if (assignTargetTask.keteranganTugas === "Jemput Hasil Samsat") {
+      saved = await orderStore.updateOrderAsync(orderNo, {
+        samsatPickupMessenger: courierName,
+        samsatPickupMessengerNama: courierName,
+        samsatPickupMessengerId: courierId,
+        samsatPickupDate: targetDate,
+        taskAcceptance: updatedAcceptance,
+        samsatPickupStatus: "Terjadwal Jemput Samsat",
+      });
     } else {
       // Jemput Dokumen
-      orderStore.updateOrder(orderNo, {
+      saved = await orderStore.updateOrderAsync(orderNo, {
         messenger: courierName,
         assignedMessengerName: courierName,
         assignedMessengerId: courierId,
@@ -412,6 +415,11 @@ export function MessengerTask() {
         messengerTaskStatus: "Terjadwal Jemput",
         catatanPenjadwalan: assignTaskNotes || currentOrder.catatanPenjadwalan,
       });
+    }
+
+    if (!saved) {
+      toast.error("Gagal menyimpan penugasan kurir ke server. Silakan coba kembali.");
+      return;
     }
 
     setIsAssignDialogOpen(false);
@@ -534,8 +542,8 @@ export function MessengerTask() {
     setIsEditDialogOpen(true);
   };
 
-  const handleUpdateTask = () => {
-    if (!editTaskData) return;
+  const handleUpdateTask = async () => {
+    if (!editTaskData || isUpdatingTask) return;
     if (!editTaskData.customer.trim() || !editTaskData.jenisTugas.trim()) {
       toast.error("Mohon lengkapi nama customer dan jenis pengurusan!");
       return;
@@ -543,62 +551,118 @@ export function MessengerTask() {
 
     const orderNo = editTaskData.noBerkas;
     const currentOrder = orderStore.getOrderByNo(orderNo);
+    if (!currentOrder) {
+      toast.error("Order tidak ditemukan di OrderStore!");
+      return;
+    }
 
-    if (currentOrder) {
-      const assignedMessenger = (editTaskData.messenger && editTaskData.messenger !== "Belum Ditugaskan")
-        ? editTaskData.messenger.trim()
-        : undefined;
-      const assignedMessengerId = resolveMessengerEmployeeId(assignedMessenger);
+    const origTask = deriveSingleTaskFromOrder(currentOrder);
+    const statusChanged = editTaskData.status !== origTask.status;
 
-      const updates: Partial<OperationalOrder> = {
-        customer: editTaskData.customer.trim(),
-        namaPemilik: editTaskData.customer.trim(),
-        layanan: editTaskData.jenisTugas.trim(),
-        wilayahSamsatAsal: editTaskData.lokasi,
-        messengerTaskStatus: editTaskData.status,
-        messengerTaskNotes: editTaskData.keterangan,
-        assignedMessengerId: assignedMessengerId,
-        assignedMessengerName: assignedMessenger,
-      };
+    if (editTaskData.status === "Pending" && !editTaskData.keterangan.trim()) {
+      toast.error("Catatan / alasan menunggu wajib diisi saat mengubah status ke Pending!");
+      return;
+    }
 
-      if (editTaskData.keteranganTugas === "Pengantaran Dokumen") {
-        updates.messengerPengantar = assignedMessenger;
-        if (assignedMessenger) updates.isDeliveryScheduled = true;
-        if (editTaskData.tanggalTerima) {
-          updates.tanggalPengantaran = editTaskData.tanggalTerima;
-        }
-        if (editTaskData.keterangan) {
-          updates.catatanPengantaran = editTaskData.keterangan;
-        }
-      } else {
-        updates.messenger = assignedMessenger;
-        if (assignedMessenger) updates.isScheduled = true;
-        if (editTaskData.tanggalTerima) {
-          updates.tanggalJemput = editTaskData.tanggalTerima;
-        }
-        if (editTaskData.keterangan) {
-          updates.catatanPenjadwalan = editTaskData.keterangan;
-        }
+    if (statusChanged && editTaskData.status === "Selesai" && currentOrder.currentStep !== 2 && currentOrder.currentStep !== 7) {
+      toast.error("Penyelesaian tugas Proses Samsat / Jemput Hasil Samsat wajib melalui alur penyelesaian resmi pada tahap terkait.");
+      return;
+    }
+
+    const assignedMessenger = (editTaskData.messenger && editTaskData.messenger !== "Belum Ditugaskan")
+      ? editTaskData.messenger.trim()
+      : undefined;
+    const assignedMessengerId = resolveMessengerEmployeeId(assignedMessenger);
+
+    const metadataUpdates: Partial<OperationalOrder> = {};
+    if (editTaskData.customer.trim() !== (origTask.customer || "").trim()) {
+      metadataUpdates.customer = editTaskData.customer.trim();
+      metadataUpdates.namaPemilik = editTaskData.customer.trim();
+    }
+    if (editTaskData.jenisTugas.trim() !== (origTask.jenisTugas || "").trim()) {
+      metadataUpdates.layanan = editTaskData.jenisTugas.trim();
+    }
+    if ((editTaskData.lokasi || "").trim() !== (origTask.lokasi || "").trim()) {
+      metadataUpdates.wilayahSamsatAsal = editTaskData.lokasi;
+    }
+
+    const origMessenger = (origTask.messenger && origTask.messenger !== "Belum Ditugaskan")
+      ? origTask.messenger.trim()
+      : undefined;
+    const messengerChanged = assignedMessenger !== origMessenger || assignedMessengerId !== origTask.assignedMessengerId;
+    const dateChanged = (editTaskData.tanggalTerima || "") !== (origTask.tanggalTerima || "");
+    const noteChanged = (editTaskData.keterangan || "").trim() !== (origTask.keterangan || "").trim();
+
+    if (editTaskData.keteranganTugas === "Pengantaran Dokumen") {
+      if (messengerChanged) {
+        metadataUpdates.messengerPengantar = assignedMessenger;
+        metadataUpdates.deliveryMessengerId = assignedMessengerId;
       }
+      if (dateChanged && editTaskData.tanggalTerima) {
+        metadataUpdates.tanggalPengantaran = editTaskData.tanggalTerima;
+      }
+      if (noteChanged && editTaskData.status !== "Pending") {
+        metadataUpdates.catatanPengantaran = editTaskData.keterangan;
+      }
+    } else if (editTaskData.keteranganTugas === "Proses Samsat") {
+      if (messengerChanged) {
+        metadataUpdates.samsatMessenger = assignedMessenger;
+        metadataUpdates.samsatMessengerNama = assignedMessenger;
+        metadataUpdates.samsatMessengerId = assignedMessengerId;
+      }
+      if (dateChanged && editTaskData.tanggalTerima) {
+        metadataUpdates.tanggalProsesSamsat = editTaskData.tanggalTerima;
+      }
+      if (noteChanged && editTaskData.status !== "Pending") {
+        metadataUpdates.catatanSamsat = editTaskData.keterangan;
+      }
+    } else if (editTaskData.keteranganTugas === "Jemput Hasil Samsat") {
+      if (messengerChanged) {
+        metadataUpdates.samsatPickupMessenger = assignedMessenger;
+        metadataUpdates.samsatPickupMessengerNama = assignedMessenger;
+        metadataUpdates.samsatPickupMessengerId = assignedMessengerId;
+      }
+      if (dateChanged && editTaskData.tanggalTerima) {
+        metadataUpdates.samsatPickupDate = editTaskData.tanggalTerima;
+      }
+      if (noteChanged && editTaskData.status !== "Pending") {
+        metadataUpdates.samsatPickupNotes = editTaskData.keterangan;
+      }
+    } else {
+      if (messengerChanged) {
+        metadataUpdates.messenger = assignedMessenger;
+        metadataUpdates.assignedMessengerId = assignedMessengerId;
+        metadataUpdates.assignedMessengerName = assignedMessenger;
+      }
+      if (dateChanged && editTaskData.tanggalTerima) {
+        metadataUpdates.tanggalJemput = editTaskData.tanggalTerima;
+      }
+      if (noteChanged && editTaskData.status !== "Pending") {
+        metadataUpdates.catatanPenjadwalan = editTaskData.keterangan;
+      }
+    }
 
-      // Handle stage transitions if status is explicitly marked "Selesai"
-      if (editTaskData.status === "Selesai") {
+    setIsUpdatingTask(true);
+    try {
+      // Handle official completion stage transitions when status is explicitly changed to "Selesai"
+      if (statusChanged && editTaskData.status === "Selesai") {
         if (currentOrder.currentStep === 7) {
-          // Advance from Stage 7 (Pengantaran) to Stage 8 (Dokumen Telah Diterima)
-          orderStore.advanceOrder(orderNo, "Dokumen Telah Diterima", {
-            ...updates,
+          await orderStore.advanceOrderAsync(orderNo, "Dokumen Telah Diterima", {
+            ...metadataUpdates,
+            deliveryStatus: "Dokumen Diserahkan",
+            messengerTaskStatus: "Selesai",
             tanggalDiterima: editTaskData.tanggalSelesai !== "-" ? editTaskData.tanggalSelesai : new Date().toISOString().split("T")[0],
             isReceived: true,
-            receiverName: editTaskData.customer,
+            receiverName: editTaskData.customer.trim(),
           });
           setIsEditDialogOpen(false);
           setEditTaskData(null);
           toast.success(`Pengantaran order ${orderNo} selesai & dokumen telah diterima klien!`);
           return;
-        } else if (currentOrder.currentStep === 2) {
-          // Advance from Jemput Dokumen to Stage 3 (Verifikasi Dokumen Fisik di Loket)
-          orderStore.advanceOrder(orderNo, "Verifikasi Dokumen", {
-            ...updates,
+        }
+        if (currentOrder.currentStep === 2) {
+          await orderStore.advanceOrderAsync(orderNo, "Verifikasi Dokumen", {
+            ...metadataUpdates,
             pickupCompleted: true,
             messengerTaskStatus: "Dokumen Sudah Tersedia",
           });
@@ -609,13 +673,38 @@ export function MessengerTask() {
         }
       }
 
-      // Mutate order in OrderStore (authoritative SSoT)
-      orderStore.updateOrder(orderNo, updates);
+      if (Object.keys(metadataUpdates).length > 0) {
+        const metaOk = await orderStore.updateOrderAsync(orderNo, metadataUpdates);
+        if (!metaOk) {
+          toast.error("Gagal menyimpan perubahan metadata tugas ke server.");
+          return;
+        }
+      }
+
+      if (statusChanged) {
+        const statusRes = await updateMessengerTaskStatusAction(
+          orderNo,
+          editTaskData.status,
+          {
+            taskType: editTaskData.keteranganTugas,
+            waitingReason: editTaskData.status === "Pending" ? editTaskData.keterangan.trim() : undefined,
+            note: editTaskData.keterangan?.trim() || undefined,
+          },
+          getCurrentAdminUser() as any
+        );
+        if (!statusRes.success) {
+          toast.error(statusRes.error || "Gagal memperbarui status tugas ke server.");
+          return;
+        }
+      }
+
       setIsEditDialogOpen(false);
       setEditTaskData(null);
       toast.success(`Tugas messenger ${orderNo} berhasil diperbarui di sistem!`);
-    } else {
-      toast.error("Order tidak ditemukan di OrderStore!");
+    } catch (err: any) {
+      toast.error(err?.message || "Gagal memperbarui tugas messenger.");
+    } finally {
+      setIsUpdatingTask(false);
     }
   };
 
@@ -795,7 +884,7 @@ export function MessengerTask() {
         );
         if (res.success) {
           if (currentOrder.currentStep === 2) {
-            orderStore.advanceOrder(orderNo, "Verifikasi Dokumen", {
+            await orderStore.advanceOrderAsync(orderNo, "Verifikasi Dokumen", {
               pickupCompleted: true,
               messengerTaskStatus: "Dokumen Sudah Tersedia",
               pickupProof: {
@@ -857,7 +946,7 @@ export function MessengerTask() {
         );
         if (res.success) {
           if (currentOrder.currentStep === 7) {
-            orderStore.advanceOrder(orderNo, "Dokumen Telah Diterima", {
+            await orderStore.advanceOrderAsync(orderNo, "Dokumen Telah Diterima", {
               deliveryStatus: "Dokumen Diserahkan",
               isReceived: true,
               receiverName: recipientName.trim(),
@@ -1094,7 +1183,22 @@ export function MessengerTask() {
             </div>
 
             {/* Table of Active Tasks */}
-            <div className="rounded-lg border border-border bg-card overflow-hidden shadow-2xs flex-1 flex flex-col min-h-0">
+            <DataTableShell
+              footerClassName="px-3.5 pb-2.5 bg-card shrink-0 mt-auto"
+              footer={
+                <TablePagination
+                  currentPage={currentPage}
+                  totalItems={filteredData.length}
+                  itemsPerPage={itemsPerPage}
+                  onPageChange={setCurrentPage}
+                  onItemsPerPageChange={(newSize) => {
+                    setItemsPerPage(newSize);
+                    setCurrentPage(1);
+                  }}
+                  pageSizeOptions={[10, 25, 50, 100]}
+                />
+              }
+            >
               <div className="w-full flex-1 flex flex-col min-h-0">
                 <Table 
                   containerClassName="overflow-y-auto overflow-x-auto max-h-[calc(100vh-320px)] sm:max-h-[calc(100vh-340px)] min-h-[160px]"
@@ -1193,19 +1297,21 @@ export function MessengerTask() {
                             <TableCell className="text-center px-2 py-1.5 min-w-[130px] xl:min-w-[190px]">
                               <div className="flex items-center gap-1 justify-center">
                                 <Button
-                                  size="sm"
+                                  size="icon-sm"
                                   variant="ghost"
-                                  className="h-7 w-7 p-0 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded transition-colors"
+                                  className="h-7 w-7 text-muted-foreground hover:text-primary hover:bg-primary/10"
                                   onClick={() => handleViewDetail(task)}
+                                  aria-label={`Lihat detail tugas ${task.orderNo}`}
                                   title="Lihat Detail"
                                 >
                                   <Eye className="w-3.5 h-3.5" />
                                 </Button>
                                 <Button
-                                  size="sm"
+                                  size="icon-sm"
                                   variant="ghost"
-                                  className="h-7 w-7 p-0 text-muted-foreground hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-500/10 rounded transition-colors"
+                                  className="h-7 w-7 text-muted-foreground hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-500/10"
                                   onClick={() => handleEditTask(task)}
+                                  aria-label={`Edit tugas ${task.orderNo}`}
                                   title="Edit Tugas"
                                 >
                                   <Edit className="w-3.5 h-3.5" />
@@ -1278,34 +1384,16 @@ export function MessengerTask() {
                         );
                       })
                     ) : (
-                      <TableRow className="h-full hover:bg-transparent">
-                        <TableCell colSpan={10} className="text-center py-8 align-middle p-0">
-                          <EmptyState
-                            title="Tidak ada tugas messenger aktif ditemukan"
-                            description="Saat ini tidak ada order yang sedang berada dalam proses kurir aktif (Penjemputan, Samsat, atau Pengantaran)."
-                          />
-                        </TableCell>
-                      </TableRow>
+                      <DataTableEmptyRow
+                        colSpan={10}
+                        title="Tidak ada tugas messenger aktif ditemukan"
+                        description="Saat ini tidak ada order yang sedang berada dalam proses kurir aktif (Penjemputan, Samsat, atau Pengantaran)."
+                      />
                     )}
                   </TableBody>
                 </Table>
               </div>
-
-              {/* Standardized Table Pagination */}
-              <div className="border-t border-border/80 px-3 py-2 bg-card shrink-0 mt-auto">
-                <TablePagination
-                  currentPage={currentPage}
-                  totalItems={filteredData.length}
-                  itemsPerPage={itemsPerPage}
-                  onPageChange={setCurrentPage}
-                  onItemsPerPageChange={(newSize) => {
-                    setItemsPerPage(newSize);
-                    setCurrentPage(1);
-                  }}
-                  pageSizeOptions={[10, 25, 50, 100]}
-                />
-              </div>
-            </div>
+            </DataTableShell>
           </Card>
         </motion.div>
       </>
@@ -1551,11 +1639,11 @@ export function MessengerTask() {
             </div>
           )}
           <DialogFooter className="shrink-0 pt-3 border-t border-border/80 flex flex-col-reverse sm:flex-row justify-end gap-2">
-            <Button variant="outline" size="sm" onClick={() => setIsEditDialogOpen(false)} className="w-full sm:w-auto h-8 text-xs">
+            <Button variant="outline" size="sm" disabled={isUpdatingTask} onClick={() => setIsEditDialogOpen(false)} className="w-full sm:w-auto h-8 text-xs">
               Batal
             </Button>
-            <Button onClick={handleUpdateTask} size="sm" className="w-full sm:w-auto h-8 text-xs bg-primary hover:bg-primary/90 text-primary-foreground shadow-xs">
-              Simpan Perubahan
+            <Button onClick={handleUpdateTask} disabled={isUpdatingTask} size="sm" className="w-full sm:w-auto h-8 text-xs bg-primary hover:bg-primary/90 text-primary-foreground shadow-xs">
+              {isUpdatingTask ? "Menyimpan..." : "Simpan Perubahan"}
             </Button>
           </DialogFooter>
         </DialogContent>

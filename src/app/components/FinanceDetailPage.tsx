@@ -345,8 +345,8 @@ export function FinanceDetailPage({
 
   // Payment channel details
   const tglUangMasuk = item["Tanggal Uang Masuk"] || item["Tanggal Masuk"] || item.tanggalMasuk || item.tanggalBayar || (canonicalOrder?.payment as any)?.tanggal || tanggalMasukBerkas;
-  const metodeBayarMasuk = item["Metode Pembayaran Masuk"] || item.metodeBayarMasuk || "Transfer Bank";
-  const bankMasuk = item["Bank Uang Masuk"] || item.bankMasuk || "BCA";
+  const metodeBayarMasuk = item["Metode Pembayaran Masuk"] || item.metodeBayarMasuk || "-";
+  const bankMasuk = item["Bank Uang Masuk"] || item.bankMasuk || item.namaBank || "-";
   const noRekMasuk = item["Nomor Rekening Pengirim"] || item["Nomor Rekening Masuk"] || item.noRekeningPengirim || "-";
 
   const tglUangKeluar = item["Tanggal Uang Keluar"] || item["Tanggal Keluar"] || item.tanggalKeluar || tanggalMasukBerkas;
@@ -911,7 +911,7 @@ export function FinanceDetailPage({
                 const raw = localStorage.getItem("auth_user");
                 if (raw) {
                   const r = JSON.parse(raw).role;
-                  isSpvOrAdmin = r === "administrator" || r === "supervisor" || r === "spv" || r === "admin";
+                  isSpvOrAdmin = r === "administrator" || r === "admin";
                 }
               } catch {}
               if (isSpvOrAdmin) {
@@ -1169,7 +1169,7 @@ export function FinanceDetailPage({
                               {doc.label}
                             </span>
                             {doc.fileType && (
-                              <span className="px-1.5 py-0.2 rounded bg-muted text-[9px] font-mono text-muted-foreground uppercase">
+                              <span className="px-1.5 py-0.5 rounded bg-muted text-[11px] font-mono text-muted-foreground uppercase">
                                 {doc.fileType}
                               </span>
                             )}
@@ -1199,10 +1199,11 @@ export function FinanceDetailPage({
                           <span>Lihat</span>
                         </Button>
                         <Button
-                          size="sm"
+                          size="icon-sm"
                           variant="ghost"
-                          className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+                          className="h-7 w-7 text-muted-foreground hover:text-foreground"
                           onClick={() => handleDownloadFile(doc.fileUrl, doc.name)}
+                          aria-label={`Unduh berkas ${doc.name}`}
                           title="Unduh Berkas"
                         >
                           <Download className="w-3.5 h-3.5" />
@@ -1248,7 +1249,7 @@ export function FinanceDetailPage({
                               {doc.label}
                             </span>
                             {doc.fileType && (
-                              <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-[9px] font-mono text-emerald-700 dark:text-emerald-300 uppercase">
+                              <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-[11px] font-mono text-emerald-700 dark:text-emerald-300 uppercase">
                                 {doc.fileType}
                               </span>
                             )}
@@ -1278,10 +1279,11 @@ export function FinanceDetailPage({
                           <span>Lihat</span>
                         </Button>
                         <Button
-                          size="sm"
+                          size="icon-sm"
                           variant="ghost"
-                          className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+                          className="h-7 w-7 text-muted-foreground hover:text-foreground"
                           onClick={() => handleDownloadFile(doc.fileUrl, doc.name)}
+                          aria-label={`Unduh berkas ${doc.name}`}
                           title="Unduh Berkas"
                         >
                           <Download className="w-3.5 h-3.5" />

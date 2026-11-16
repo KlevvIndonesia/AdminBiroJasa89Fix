@@ -14,13 +14,16 @@ import { OperationalOrder, StageName, STAGES, getDefaultSamsatProcesses, Service
 import { serviceRepository, ServiceEntity } from "../repositories/dbServiceRepository";
 import { dbWilayahRepository } from "../repositories/dbWilayahRepository";
 import { dbPaymentMethodRepository } from "../repositories/dbPaymentMethodRepository";
+import { dbPermissionRepository } from "../repositories/dbPermissionRepository";
 import { buildServiceRequirementsSnapshot } from "../utils/serviceSnapshot";
+import { normalizeToWibCalendarDate } from "../utils/dateNormalizer";
 import { ApiError } from "../middleware/errorHandler";
 import { TokenPayload } from "../utils/crypto";
 import { db, runInTransaction } from "../database/db";
 import { assertNoProtectedFieldViolations, normalizeOrderPayload } from "../utils/aliasNormalizer";
 import { validateOrderPricingSanity } from "../utils/pricingSanityCheck";
 import { resolveCanonicalActorEmployeeId } from "../utils/actorResolver";
+import { resolveCanonicalSamsatCogs } from "../../../src/domain/finance/samsatCogs";
 import { generateCanonicalPaymentId, formatScopedIdempotencyKey } from "../utils/canonicalHasher";
 import { financeService } from "./financeService";
 
@@ -283,7 +286,7 @@ export function assertMessengerOwnership(
     throw new ApiError(401, "UNAUTHENTICATED", "Autentikasi diperlukan.");
   }
   const role = (user.role || "").toLowerCase();
-  if (role === "admin" || role === "administrator" || role === "svp" || user.jabatan === "SVP") {
+  if (role === "admin" || role === "administrator") {
     const courierName = user.nama || (user as any).userName || "Petugas Operasional";
     const courierId = (user as any).employeeId || user.userId || "EMP-ADMIN";
     return { messengerId: courierId, messengerName: courierName };
@@ -368,6 +371,29 @@ export function assertMessengerOwnership(
   }
 
   return { messengerId, messengerName };
+}
+
+/**
+ * Ensures messenger callers cannot act on tasks whose acceptance record is PENDING, DECLINED, or SUPERSEDED.
+ */
+function assertMessengerTaskAcceptanceValid(
+  order: OperationalOrder,
+  taskType: string,
+  user: TokenPayload
+): void {
+  const role = (user.role || "").toLowerCase();
+  if (role !== "messenger") return;
+  const acc = (order.taskAcceptance || {})[taskType];
+  if (acc?.status === "SUPERSEDED") {
+    throw new ApiError(400, "TASK_SUPERSEDED", `Tugas ${taskType} ini sudah tidak berlaku (superseded).`);
+  }
+  if (acc?.status === "DECLINED" || acc?.status === "PENDING") {
+    throw new ApiError(
+      403,
+      "FORBIDDEN",
+      `Tugas ${taskType} pada order '${order.orderNo}' belum diterima. Terima tugas terlebih dahulu.`
+    );
+  }
 }
 
 /**
@@ -834,9 +860,9 @@ export class OrderService {
       messenger: isDatangLangsung ? "Datang Langsung (Loket)" : (data.messenger || "Belum Ditugaskan"),
       messengerTaskStatus: isDatangLangsung ? "Dokumen Sudah Tersedia" : data.messengerTaskStatus,
       catatanPenjadwalan: isDatangLangsung ? "Klien datang langsung ke loket kantor (Tanpa penjemputan kurir)" : data.catatanPenjadwalan,
-      tanggalJemput: isDatangLangsung ? nowStr.split("T")[0] : data.tanggalJemput,
+      tanggalJemput: isDatangLangsung ? (normalizeToWibCalendarDate(nowStr) || nowStr.split("T")[0]) : data.tanggalJemput,
       catatanOrder: data.catatanOrder || (isDatangLangsung ? "Order Datang Langsung ke Loket (Verifikasi Dokumen Fisik)." : "Order baru dibuat dari API Buat Order."),
-      createdAt: nowStr.split("T")[0],
+      createdAt: normalizeToWibCalendarDate(nowStr) || nowStr.split("T")[0],
 
       namaPemilik: data.namaPemilik ? String(data.namaPemilik).trim() : "",
       kepemilikanKendaraan: data.statusKepemilikan || data.kepemilikanKendaraan || "Pribadi",
@@ -1092,31 +1118,55 @@ export class OrderService {
       }
 
       dbOrderRepository.saveOrder(newOrder);
+      const persistedOrder = dbOrderRepository.getByOrderNo(finalOrderNo) || newOrder;
+      const isPartialEstimateOrder =
+        persistedOrder.costCompletenessStatus === "PARTIAL_ESTIMATE" ||
+        persistedOrder.isCostVerified === false;
 
-      // Save initial invoice to finance
-      const initialPaid = newOrder.payment.dibayar || 0;
-      const totalTagihan = newOrder.payment.totalBiaya;
-      const isLunas = initialPaid >= totalTagihan && totalTagihan > 0;
+      // Save initial invoice to finance (unverified Bayar di Awal MUST NOT count as paid cash or realized profit)
+      const rawInitialPaid = persistedOrder.payment.dibayar || 0;
+      const isInitialPaymentVerified = Boolean(persistedOrder.payment.isPaymentVerified);
+      const initialVerifiedPaid = isInitialPaymentVerified ? rawInitialPaid : 0;
+      const totalTagihan = persistedOrder.payment.totalBiaya;
+      const isLunas = initialVerifiedPaid >= totalTagihan && totalTagihan > 0;
+      const isExplicitZeroOrder = Boolean(
+        (data as any).isExplicitZero ||
+        (data as any).costSnapshot?.isExplicitZero ||
+        (persistedOrder as any).isExplicitZero
+      );
       dbFinanceRepository.saveInvoice({
         invoiceNo: authoritativeInvoiceNo,
         orderNo: finalOrderNo,
         service_id: resolvedServiceId || undefined,
         serviceId: resolvedServiceId || undefined,
-        customer: newOrder.customer,
-        layanan: newOrder.layanan,
-        nopol: newOrder.nopol,
-        status: isLunas ? "PAID" : initialPaid > 0 ? "PARTIAL" : "UNPAID",
+        customer: persistedOrder.customer,
+        layanan: persistedOrder.layanan,
+        nopol: persistedOrder.nopol,
+        metodePembayaran: persistedOrder.payment.metodePembayaran,
+        bank: (persistedOrder.payment as any).bank || (persistedOrder.payment as any).namaBank || "",
+        status: isLunas ? "PAID" : initialVerifiedPaid > 0 ? "PARTIAL" : "UNPAID",
         totalTagihan,
-        dibayar: initialPaid,
-        sisa: Math.max(0, totalTagihan - initialPaid),
+        dibayar: initialVerifiedPaid,
+        sisa: Math.max(0, totalTagihan - initialVerifiedPaid),
         biayaSamsat: pricingSanity.resolvedBiayaSamsat,
         pendapatanJasa: Number(pricingSanity.resolvedBiayaJasa || Math.max(0, totalTagihan - pricingSanity.resolvedBiayaSamsat)),
         biayaJasa: pricingSanity.resolvedBiayaJasa,
         biayaAntarJemput: Number(data.biayaAntarJemput ?? 0),
         namaPenerimaKeluar: (data.namaPenerimaKeluar || data.namaPemilikRekeningKeluar || "").trim(),
-        jatuhTempo: new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
-        tanggalInvoice: resolvedTanggalBerkas || nowStr.split("T")[0],
-        profit: Math.max(0, initialPaid - pricingSanity.resolvedBiayaSamsat - Number((data as any).biayaLainnya || 0)),
+        jatuhTempo: normalizeToWibCalendarDate(new Date(Date.now() + 7 * 86400000)) || new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
+        tanggalInvoice: resolvedTanggalBerkas || normalizeToWibCalendarDate(nowStr) || nowStr.split("T")[0],
+        overpayment: Math.max(0, initialVerifiedPaid - totalTagihan),
+        refundStatus: initialVerifiedPaid > totalTagihan ? "PENDING" : "NONE",
+        profit: initialVerifiedPaid > 0
+          ? Math.max(0, Math.min(initialVerifiedPaid, totalTagihan) - pricingSanity.resolvedBiayaSamsat - Number((data as any).biayaLainnya || 0))
+          : 0,
+        isExplicitZero: isExplicitZeroOrder,
+        costVerificationStatus: isExplicitZeroOrder
+          ? "DEFINITIVE"
+          : (isPartialEstimateOrder ? "PENDING_VERIFICATION" : "VERIFIED"),
+        isDraftEstimate: isPartialEstimateOrder,
+        isCostVerified: Boolean(persistedOrder.isCostVerified),
+        costCompletenessStatus: persistedOrder.costCompletenessStatus,
       } as any);
 
       // Audit Log
@@ -1158,12 +1208,12 @@ export class OrderService {
             );
           }
         } catch {}
-        this.idempotencyCache.set(resolvedKey, { order: newOrder, timestamp: Date.now() });
+        this.idempotencyCache.set(resolvedKey, { order: persistedOrder, timestamp: Date.now() });
       }
 
-      this.linkOrderDocuments(newOrder);
+      this.linkOrderDocuments(persistedOrder);
 
-      return { order: newOrder, isExisting: false };
+      return { order: persistedOrder, isExisting: false };
     });
 
     if (!result.isExisting) {
@@ -1247,24 +1297,23 @@ export class OrderService {
 
         // Pickup (Stage 2)
         "pickupChecklist", "pickupProof", "pickupCompleted", "pickupCompletedAt",
-        "checklistSebelumBerangkat",
-        "messenger", "assignedMessengerName", "assignedMessengerId", "isScheduled", "tanggalJemput",
+        "checklistSebelumBerangkat", "tanggalJemput",
 
         // Samsat (Stage 4)
-        "samsatMessenger", "samsatMessengerId", "isSamsatScheduled", "tanggalProsesSamsat",
+        "tanggalProsesSamsat",
         "samsatJourneyStartedAt", "samsatArrivedAt", "samsatCompletedAt",
         "samsatStatus", "samsatSubstatus", "samsatProcesses", "currentSamsatProcess",
-        "additionalProcesses", "samsatPickupStatus", "samsatPickupMessenger", "samsatPickupMessengerId",
+        "additionalProcesses", "samsatPickupStatus",
         "samsatPickupStartedAt", "samsatPickupCompletedAt", "samsatResultProof",
         "messengerComponentProgress", "customCostItems",
 
         // Delivery (Stage 7)
-        "messengerPengantar", "deliveryMessengerId", "isDeliveryScheduled", "tanggalPengantaran",
+        "tanggalPengantaran",
         "deliveryStartedAt", "deliveryStatus", "deliveryHandover",
         "deliveryProof", "receiverName", "tanggalDiterima", "isReceived",
 
-        // Timeline, Acceptance & Multi-Stage Execution
-        "messengerTimeline", "taskAcceptance", "samsatStageExecutions",
+        // Timeline & Multi-Stage Execution (ownership/acceptance MUST go through dedicated task endpoints)
+        "messengerTimeline", "samsatStageExecutions",
         "estimasiSelesaiOrder", "tanggalSelesaiAktualOrder"
       ]);
 
@@ -1415,7 +1464,8 @@ export class OrderService {
             `Proses Samsat pada order '${orderNo}' belum dimulai. Tekan 'Mulai Proses' sebelum memperbarui komponen atau progres Samsat.`
           );
         }
-      } else if (hasPickupFields) {
+      }
+      if (hasPickupFields) {
         assertMessengerOwnership(existing, user, "PICKUP");
         const isPickupStarted =
           existing.messengerTaskStatus === "Sedang Dijemput" ||
@@ -1428,7 +1478,8 @@ export class OrderService {
             `Tugas penjemputan berkas pada order '${orderNo}' belum dimulai. Tekan 'Mulai Tugas' terlebih dahulu sebelum memperbarui checklist atau progres berkas.`
           );
         }
-      } else if (hasDeliveryFields) {
+      }
+      if (hasDeliveryFields) {
         assertMessengerOwnership(existing, user, "DELIVERY");
         const isDeliveryStarted =
           existing.deliveryStatus === "Sedang Diantar" ||
@@ -1441,9 +1492,11 @@ export class OrderService {
             `Tugas pengantaran berkas pada order '${orderNo}' belum dimulai. Tekan 'Mulai Tugas' terlebih dahulu sebelum memperbarui formulir serah terima.`
           );
         }
-      } else if (hasSamsatPickupFields) {
+      }
+      if (hasSamsatPickupFields) {
         assertMessengerOwnership(existing, user, "SAMSAT_PICKUP");
-      } else {
+      }
+      if (!hasSamsatFields && !hasPickupFields && !hasDeliveryFields && !hasSamsatPickupFields) {
         assertMessengerOwnership(existing, user, "ANY");
       }
     }
@@ -1571,51 +1624,103 @@ export class OrderService {
       const inv = dbFinanceRepository.getInvoiceByOrderNo(orderNo);
       if (inv) {
         const resolvedSvcId = (safeUpdates as any).service_id || (safeUpdates as any).serviceId || inv.service_id || (inv as any).serviceId;
-        const newTotal = incomingTotal > 0
-          ? incomingTotal
-          : Number(inv.totalTagihan ?? inv.total_tagihan ?? 0);
-        const newSamsat = (safeUpdates as any).biayaSamsat !== undefined
-          ? Number((safeUpdates as any).biayaSamsat)
-          : ((safeUpdates as any).uangKeluar !== undefined
-              ? Number((safeUpdates as any).uangKeluar)
-              : Number(inv.biayaSamsat ?? inv.biaya_samsat ?? 0));
-        const newJasa = (safeUpdates as any).biayaJasa !== undefined
-          ? Number((safeUpdates as any).biayaJasa)
-          : ((safeUpdates as any).profit !== undefined
-              ? Number((safeUpdates as any).profit)
-              : Number(inv.biayaJasa ?? inv.biaya_jasa ?? 0));
-        const newAntarJemput = (safeUpdates as any).biayaAntarJemput !== undefined
-          ? Number((safeUpdates as any).biayaAntarJemput)
-          : Number(inv.biayaAntarJemput ?? inv.biaya_antar_jemput ?? 0);
-        const currentDibayar = Number(inv.dibayar ?? 0);
-        const newSisa = Math.max(0, newTotal - currentDibayar);
-        const newStatus = currentDibayar >= newTotal && newTotal > 0 ? "PAID" : currentDibayar > 0 ? "PARTIAL" : "UNPAID";
+        const isTerminalCancelled =
+          Boolean((existing as any).isCancelled) ||
+          existing.currentStageName === "Dibatalkan" ||
+          (existing as any).status === "Dibatalkan" ||
+          String(inv.status || "").trim().toUpperCase() === "CANCELLED" ||
+          String((inv as any).billingStatus || "").trim().toUpperCase() === "CANCELLED";
 
-        dbFinanceRepository.saveInvoice({
-          ...inv,
-          customer: safeUpdates.customer || inv.customer,
-          layanan: safeUpdates.layanan || inv.layanan,
-          service_id: resolvedSvcId || undefined,
-          serviceId: resolvedSvcId || undefined,
-          nopol: safeUpdates.nopol || inv.nopol,
-          totalTagihan: newTotal,
-          biayaSamsat: newSamsat,
-          pendapatanJasa: newJasa,
-          biayaJasa: newJasa,
-          biayaAntarJemput: newAntarJemput,
-          sisa: newSisa,
-          status: newStatus as any,
-          namaPenerimaKeluar: (safeUpdates as any).namaPenerimaKeluar || (safeUpdates as any).namaPemilikRekeningKeluar || (inv as any).namaPenerimaKeluar || undefined,
-          tandaTerima: (safeUpdates as any).tandaTerima || (inv as any).tandaTerima || undefined,
-          ttbBPKB: (safeUpdates as any).ttbBPKB || (inv as any).ttbBPKB || undefined,
-        } as any);
+        if (isTerminalCancelled) {
+          // Preserve terminal CANCELLED invoice state, refund liability, and payout metadata unconditionally
+          dbFinanceRepository.saveInvoice({
+            ...inv,
+            customer: safeUpdates.customer || inv.customer,
+            layanan: safeUpdates.layanan || inv.layanan,
+            service_id: resolvedSvcId || undefined,
+            serviceId: resolvedSvcId || undefined,
+            nopol: safeUpdates.nopol || inv.nopol,
+            status: "CANCELLED" as any,
+            billingStatus: "CANCELLED" as any,
+            namaPenerimaKeluar: (safeUpdates as any).namaPenerimaKeluar || (safeUpdates as any).namaPemilikRekeningKeluar || (inv as any).namaPenerimaKeluar || undefined,
+            tandaTerima: (safeUpdates as any).tandaTerima || (inv as any).tandaTerima || undefined,
+            ttbBPKB: (safeUpdates as any).ttbBPKB || (inv as any).ttbBPKB || undefined,
+          } as any);
+        } else {
+          const newTotal = incomingTotal > 0
+            ? incomingTotal
+            : Number(inv.totalTagihan ?? inv.total_tagihan ?? 0);
+          const hasExplicitSamsatUpdate =
+            (safeUpdates as any).biayaSamsat !== undefined ||
+            (safeUpdates as any).uangKeluar !== undefined;
+          const hasItemizedTaxUpdate =
+            (safeUpdates as any).pkb !== undefined ||
+            (safeUpdates as any).dendaPkb !== undefined ||
+            (safeUpdates as any).swdkllj !== undefined ||
+            (safeUpdates as any).dendaSwdkllj !== undefined ||
+            (safeUpdates as any).costSnapshot !== undefined;
+          const rawIncomingSamsat = hasExplicitSamsatUpdate
+            ? Number((safeUpdates as any).biayaSamsat ?? (safeUpdates as any).uangKeluar ?? 0)
+            : (hasItemizedTaxUpdate ? undefined : Number(inv.biayaSamsat ?? inv.biaya_samsat ?? 0));
+          const updatedCogs = resolveCanonicalSamsatCogs({
+            biayaSamsat: rawIncomingSamsat,
+            biayaJasa: (safeUpdates as any).biayaJasa ?? inv.biayaJasa ?? inv.biaya_jasa,
+            biayaAntarJemput: (safeUpdates as any).biayaAntarJemput ?? inv.biayaAntarJemput ?? inv.biaya_antar_jemput,
+            totalTagihan: newTotal,
+            pkb: (safeUpdates as any).pkb ?? updated?.pkb,
+            dendaPkb: (safeUpdates as any).dendaPkb ?? (updated as any)?.dendaPkb,
+            swdkllj: (safeUpdates as any).swdkllj ?? updated?.swdkllj,
+            dendaSwdkllj: (safeUpdates as any).dendaSwdkllj ?? updated?.dendaSwdkllj,
+            costSnapshot: (safeUpdates as any).costSnapshot ?? updated?.costSnapshot,
+            isCostVerified: Boolean(updated?.isCostVerified),
+            isExplicitZero: Boolean((safeUpdates as any).isExplicitZero ?? (inv as any).isExplicitZero),
+          });
+          const newSamsat = updatedCogs.biayaSamsat;
+          const newJasa = (safeUpdates as any).biayaJasa !== undefined
+            ? Number((safeUpdates as any).biayaJasa)
+            : ((safeUpdates as any).profit !== undefined
+                ? Number((safeUpdates as any).profit)
+                : Number(inv.biayaJasa ?? inv.biaya_jasa ?? 0));
+          const newAntarJemput = (safeUpdates as any).biayaAntarJemput !== undefined
+            ? Number((safeUpdates as any).biayaAntarJemput)
+            : Number(inv.biayaAntarJemput ?? inv.biaya_antar_jemput ?? 0);
+          const currentDibayar = Number(inv.dibayar ?? 0);
+          const newSisa = Math.max(0, newTotal - currentDibayar);
+          const newStatus =
+            currentDibayar > newTotal && newTotal > 0
+              ? "OVERPAID"
+              : currentDibayar >= newTotal && newTotal > 0
+              ? "PAID"
+              : currentDibayar > 0
+              ? "PARTIAL"
+              : "UNPAID";
 
-        // Direct SQL update to ensure immediate persistence in SQLite table
-        db.prepare(`
-          UPDATE finance_invoices
-          SET total_tagihan = ?, biaya_samsat = ?, pendapatan_jasa = ?, biaya_jasa = ?, biaya_antar_jemput = ?, sisa = ?, status = ?, updated_at = datetime('now')
-          WHERE order_no = ?
-        `).run(newTotal, newSamsat, newJasa, newJasa, newAntarJemput, newSisa, newStatus, orderNo);
+          dbFinanceRepository.saveInvoice({
+            ...inv,
+            customer: safeUpdates.customer || inv.customer,
+            layanan: safeUpdates.layanan || inv.layanan,
+            service_id: resolvedSvcId || undefined,
+            serviceId: resolvedSvcId || undefined,
+            nopol: safeUpdates.nopol || inv.nopol,
+            totalTagihan: newTotal,
+            biayaSamsat: newSamsat,
+            pendapatanJasa: newJasa,
+            biayaJasa: newJasa,
+            biayaAntarJemput: newAntarJemput,
+            sisa: newSisa,
+            status: newStatus as any,
+            namaPenerimaKeluar: (safeUpdates as any).namaPenerimaKeluar || (safeUpdates as any).namaPemilikRekeningKeluar || (inv as any).namaPenerimaKeluar || undefined,
+            tandaTerima: (safeUpdates as any).tandaTerima || (inv as any).tandaTerima || undefined,
+            ttbBPKB: (safeUpdates as any).ttbBPKB || (inv as any).ttbBPKB || undefined,
+          } as any);
+
+          // Direct SQL update to ensure immediate persistence in SQLite table
+          db.prepare(`
+            UPDATE finance_invoices
+            SET total_tagihan = ?, biaya_samsat = ?, pendapatan_jasa = ?, biaya_jasa = ?, biaya_antar_jemput = ?, sisa = ?, status = ?, updated_at = datetime('now')
+            WHERE order_no = ?
+          `).run(newTotal, newSamsat, newJasa, newJasa, newAntarJemput, newSisa, newStatus, orderNo);
+        }
       }
 
       // Audit Log with verified actor
@@ -1687,8 +1792,13 @@ export class OrderService {
 
       const isDatangLangsung =
         existing.metodeLayanan === "Datang Langsung" ||
-        updates.metodeLayanan === "Datang Langsung" ||
         existing.costSnapshot?.metodeLayanan === "Datang Langsung";
+
+      const isStage6Authorized = (caller?: TokenPayload | null): boolean => {
+        if (!caller) return false;
+        const callerRole = (caller.role || "").toLowerCase();
+        return callerRole === "administrator";
+      };
 
       // Forward transition guard: sequential enforcement and Datang Langsung shortcut
       if (targetStep > currentStep) {
@@ -1704,22 +1814,24 @@ export class OrderService {
         }
       }
 
-      // Role authority check: Supervisi Stage 6 requires Supervisor / SVP
-      if (existing.currentStageName === "Supervisi" && targetStage !== "Supervisi") {
-        if (user && user.role !== "administrator" && user.jabatan !== "SVP") {
-          throw new ApiError(403, "FORBIDDEN", "Hanya Supervisor / SVP yang berwenang melakukan supervisi Stage 6.");
+      // Role authority check: Supervisi Stage 6 is strictly SVP-only
+      if (existing.currentStageName === "Supervisi" || currentStep === 6) {
+        if (user && !isStage6Authorized(user)) {
+          throw new ApiError(403, "FORBIDDEN", "Stage 6 (Supervisi) bersifat eksklusif untuk SVP.");
         }
       }
 
-      // Gating 2 -> 3: Penjadwalan -> Verifikasi Dokumen (Pickup completed required for non-walk-in orders)
+      // Gating 2 -> 3: Penjadwalan -> Verifikasi Dokumen (Authoritative DB check only)
       if (currentStep === 2 && targetStep === 3) {
+        const hasAssignedMessenger = Boolean(
+          (existing.assignedMessengerId && existing.assignedMessengerId !== "Belum Ditugaskan" && existing.assignedMessengerId !== "-") ||
+          (existing.messenger && existing.messenger !== "Belum Ditugaskan" && existing.messenger !== "-")
+        );
         const isPickupDone =
           isDatangLangsung ||
-          updates.pickupCompleted ||
-          existing.pickupCompleted ||
-          updates.messengerTaskStatus === "Dokumen Sudah Tersedia" ||
+          Boolean(existing.pickupCompleted) ||
           existing.messengerTaskStatus === "Dokumen Sudah Tersedia";
-        if (!isPickupDone) {
+        if (!isPickupDone || (!isDatangLangsung && !hasAssignedMessenger)) {
           throw new ApiError(
             400,
             "PREREQUISITE_NOT_MET",
@@ -1742,14 +1854,21 @@ export class OrderService {
         }
       }
 
-      // Gating 4.5: Stage 4 -> Stage 5 Samsat Components Completion Gating
+      // Gating 4.5: Stage 4 -> Stage 5 Samsat Components & Samsat Pickup Completion Gating (Authoritative DB state only)
       if (currentStep === 4 && targetStep >= 5) {
         const valResult = validateSamsatCompletion(existing);
-        if (!valResult.allowed && valResult.code !== "SAMSAT_COMPONENTS_REQUIRED") {
+        if (!valResult.allowed) {
           throw new ApiError(
             400,
             valResult.code || "SAMSAT_COMPONENTS_INCOMPLETE",
             valResult.error || "Seluruh tahapan komponen loket Samsat wajib berstatus Selesai (COMPLETED) sebelum order dapat dilanjutkan."
+          );
+        }
+        if (existing.samsatPickupStatus !== "Dokumen Samsat Diterima di Kantor") {
+          throw new ApiError(
+            400,
+            "PREREQUISITE_NOT_MET",
+            "Dokumen hasil Samsat belum diserahkan dan diterima di kantor melalui endpoint tugas kurir."
           );
         }
       }
@@ -1770,10 +1889,26 @@ export class OrderService {
         }
       }
 
-      // Sanitize advance updates: prevent non-supervisor callers from forging supervisor identity
-      const isSpvCaller = user && (user.role === "administrator" || user.jabatan === "SVP" || user.role === "svp");
+      // Sanitize advance updates: strip operational workflow status flags so /advance cannot forge completion state,
+      // and prevent unauthorized callers from forging Stage 6 approval metadata.
+      const canApproveStage6 = isStage6Authorized(user);
       const safeAdvanceUpdates: Partial<OperationalOrder> = { ...updates };
-      if (!isSpvCaller) {
+      delete (safeAdvanceUpdates as any).pickupCompleted;
+      delete (safeAdvanceUpdates as any).pickup_completed;
+      delete (safeAdvanceUpdates as any).messengerTaskStatus;
+      delete (safeAdvanceUpdates as any).messenger_task_status;
+      delete (safeAdvanceUpdates as any).isScheduled;
+      delete (safeAdvanceUpdates as any).is_scheduled;
+      delete (safeAdvanceUpdates as any).samsatStatus;
+      delete (safeAdvanceUpdates as any).samsat_status;
+      delete (safeAdvanceUpdates as any).samsatPickupStatus;
+      delete (safeAdvanceUpdates as any).samsat_pickup_status;
+      delete (safeAdvanceUpdates as any).deliveryStatus;
+      delete (safeAdvanceUpdates as any).delivery_status;
+      delete (safeAdvanceUpdates as any).isReceived;
+      delete (safeAdvanceUpdates as any).is_received;
+
+      if (!canApproveStage6) {
         delete (safeAdvanceUpdates as any).approvedBySpv;
         delete (safeAdvanceUpdates as any).spvName;
         delete (safeAdvanceUpdates as any).spvApprovedAt;
@@ -1784,21 +1919,40 @@ export class OrderService {
           delete (safeAdvanceUpdates.documentApproval as any).stage6ApprovedAt;
         }
       } else if (safeAdvanceUpdates.approvedBySpv) {
-        safeAdvanceUpdates.spvName = user.nama;
+        safeAdvanceUpdates.spvName = user!.nama;
         safeAdvanceUpdates.spvApprovedAt = new Date().toISOString();
       }
 
       // Persetujuan dokumen Stage 6 gating (Supervisi -> Pengantaran)
       if (existing.currentStageName === "Supervisi" && targetStage === "Pengantaran") {
         const isApproved =
-          (isSpvCaller && (safeAdvanceUpdates.documentApproval?.stage6Approved || safeAdvanceUpdates.approvedBySpv)) ||
+          (canApproveStage6 && (safeAdvanceUpdates.documentApproval?.stage6Approved || safeAdvanceUpdates.approvedBySpv)) ||
           existing.documentApproval?.stage6Approved ||
           existing.approvedBySpv;
         if (!isApproved) {
           throw new ApiError(
             400,
             "DOCUMENTS_NOT_APPROVED",
-            "Dokumen hasil Samsat wajib disetujui oleh Supervisor / SVP terlebih dahulu melalui persetujuan dokumen resmi sebelum order dilanjutkan ke Pengantaran."
+            "Dokumen hasil Samsat wajib disetujui pada Stage 6 (Supervisi) terlebih dahulu melalui persetujuan dokumen resmi sebelum order dilanjutkan ke Pengantaran."
+          );
+        }
+      }
+
+      // Gating 7 -> 8: Pengantaran -> Dokumen Telah Diterima (Authoritative DB check only)
+      if (currentStep === 7 && targetStep === 8) {
+        const isDeliveryDone =
+          existing.deliveryStatus === "Dokumen Diserahkan" ||
+          Boolean(existing.isReceived);
+        const hasRecipientOrProof = Boolean(
+          (existing.receiverName && String(existing.receiverName).trim()) ||
+          ((existing as any).deliveryHandover?.recipientName && String((existing as any).deliveryHandover.recipientName).trim()) ||
+          (existing.deliveryProof && String(existing.deliveryProof).trim())
+        );
+        if (!isDeliveryDone || !hasRecipientOrProof) {
+          throw new ApiError(
+            400,
+            "PREREQUISITE_NOT_MET",
+            "Pengantaran / serah terima dokumen kepada penerima belum diselesaikan. Selesaikan pengiriman terlebih dahulu."
           );
         }
       }
@@ -2050,14 +2204,15 @@ export class OrderService {
     const nowIso = new Date().toISOString();
 
     if (stage === 6) {
-      const isSpv = user.role === "administrator" || user.jabatan === "SVP" || user.role === "svp";
+      const role = (user.role || "").toLowerCase();
+      const isSpv = role === "administrator";
       if (!isSpv) {
-        throw new ApiError(403, "FORBIDDEN", "Hanya Supervisor / SVP yang berwenang menyetujui dokumen Stage 6.");
+        throw new ApiError(403, "FORBIDDEN", "Stage 6 (Supervisi) hanya dapat disetujui oleh SVP.");
       }
     }
 
     if (stage === 5) {
-      const canVerifyStage5 = user.role === "administrator" || user.role === "admin" || user.jabatan === "SVP" || user.role === "svp";
+      const canVerifyStage5 = user.role === "administrator" || user.role === "admin";
       if (!canVerifyStage5) {
         throw new ApiError(403, "FORBIDDEN", "Hanya Admin dan Supervisor / SVP yang berwenang memverifikasi dokumen Stage 5.");
       }
@@ -2144,8 +2299,38 @@ export class OrderService {
   }
 
   public archiveOrder(orderNo: string, user?: TokenPayload | null): boolean {
-    const existing = this.getByOrderNo(orderNo);
     return runInTransaction(() => {
+      const existing = this.getByOrderNo(orderNo);
+      if ((existing as any).isCancelled || existing.currentStageName === "Dibatalkan" || (existing as any).status === "Dibatalkan") {
+        throw new ApiError(
+          400,
+          "ORDER_CANCELLED",
+          `Order '${orderNo}' sudah dibatalkan dan tidak dapat diarsipkan melalui arsip penyelesaian normal.`
+        );
+      }
+
+      if ((existing as any).isArchived === 2) {
+        throw new ApiError(404, "ORDER_NOT_FOUND", `Order '${orderNo}' telah dihapus dari rekap.`);
+      }
+
+      if ((existing as any).isArchived === true || Number((existing as any).isArchived) === 1) {
+        // Idempotent safe return when order is already archived
+        return true;
+      }
+
+      const resolvedStep = Number(existing.currentStep);
+      const isAtStage8 =
+        resolvedStep === 8 &&
+        existing.currentStageName === "Dokumen Telah Diterima";
+
+      if (!isAtStage8) {
+        throw new ApiError(
+          400,
+          "INVALID_ARCHIVE_STAGE",
+          `Order '${orderNo}' belum mencapai Stage 8 (Dokumen Telah Diterima) dan tidak dapat diarsipkan (saat ini: Stage ${resolvedStep || "-"} - ${existing.currentStageName || "-"}).`
+        );
+      }
+
       const success = dbOrderRepository.archiveOrder(orderNo);
       if (success) {
         dbAuditRepository.save({
@@ -2155,8 +2340,12 @@ export class OrderService {
           userRole: user?.role || "admin",
           action: "ARCHIVE",
           module: "Order Tracking",
-          details: `Mengarsipkan order ${orderNo}`,
-          metadata: { orderNo },
+          details: `Mengarsipkan order ${orderNo} (Stage 8 - Dokumen Telah Diterima)`,
+          metadata: {
+            orderNo,
+            previousStep: resolvedStep,
+            previousStageName: existing.currentStageName,
+          },
           createdAt: new Date().toISOString(),
         });
       }
@@ -2375,7 +2564,70 @@ export class OrderService {
    * Messenger Accepts Task (Tugas Baru -> Tugas Aktif & Terkunci)
    * Enforces race condition protection against double acceptance
    */
+  private normalizeCanonicalTaskType(rawTaskType: string): "Jemput Dokumen" | "Proses Samsat" | "Jemput Hasil Samsat" | "Pengantaran Dokumen" {
+    const clean = String(rawTaskType || "").trim().toLowerCase();
+    if (clean === "jemput dokumen" || clean === "pickup") return "Jemput Dokumen";
+    if (clean === "proses samsat" || clean === "samsat") return "Proses Samsat";
+    if (clean === "jemput hasil samsat" || clean === "jemput hasil" || clean === "samsat_pickup") return "Jemput Hasil Samsat";
+    if (clean === "pengantaran dokumen" || clean === "delivery") return "Pengantaran Dokumen";
+    throw new ApiError(400, "INVALID_TASK_TYPE", `Jenis tugas '${rawTaskType}' tidak dikenali.`);
+  }
+
+  private getTaskAssignedCourierId(order: OperationalOrder, taskType: string): string | undefined {
+    const acc = (order.taskAcceptance || {})[taskType] as any;
+    const isReal = (id?: string, name?: string) => {
+      if (!id) return false;
+      const cid = String(id).trim();
+      const clow = cid.toLowerCase();
+      if (!cid || clow === "-" || clow === "emp-msg" || clow === "emp-samsat" || clow === "belum ditugaskan" || clow === "datang langsung (loket)") {
+        return false;
+      }
+      if (name) {
+        const nlow = String(name).trim().toLowerCase();
+        if (nlow === "belum ditugaskan" || nlow === "-" || nlow === "datang langsung (loket)") {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    const accId = acc?.courierId || acc?.assignedMessengerId;
+    if (isReal(accId, acc?.courierName || acc?.assignedMessengerName)) {
+      return String(accId).trim();
+    }
+
+    if (taskType === "Jemput Dokumen") {
+      return isReal(order.assignedMessengerId, order.assignedMessengerName || order.messenger) ? String(order.assignedMessengerId).trim() : undefined;
+    }
+    if (taskType === "Proses Samsat") {
+      return isReal(order.samsatMessengerId, order.samsatMessengerNama || order.samsatMessenger) ? String(order.samsatMessengerId).trim() : undefined;
+    }
+    if (taskType === "Jemput Hasil Samsat") {
+      return isReal(order.samsatPickupMessengerId, order.samsatPickupMessengerNama || order.samsatPickupMessenger) ? String(order.samsatPickupMessengerId).trim() : undefined;
+    }
+    if (taskType === "Pengantaran Dokumen") {
+      return isReal((order as any).deliveryMessengerId, order.messengerPengantar) ? String((order as any).deliveryMessengerId).trim() : undefined;
+    }
+    return undefined;
+  }
+
+  private assertTaskNotCompleted(order: OperationalOrder, taskType: string): void {
+    if (taskType === "Jemput Dokumen" && (order.pickupCompleted || order.messengerTaskStatus === "Dokumen Sudah Tersedia" || order.messengerTaskStatus === "Selesai")) {
+      throw new ApiError(400, "TASK_ALREADY_COMPLETED", `Tugas Penjemputan pada order '${order.orderNo}' sudah selesai.`);
+    }
+    if (taskType === "Proses Samsat" && order.samsatStatus === "Selesai") {
+      throw new ApiError(400, "TASK_ALREADY_COMPLETED", `Tugas Proses Samsat pada order '${order.orderNo}' sudah selesai.`);
+    }
+    if (taskType === "Jemput Hasil Samsat" && order.samsatPickupStatus === "Dokumen Samsat Diterima di Kantor") {
+      throw new ApiError(400, "TASK_ALREADY_COMPLETED", `Tugas Jemput Hasil Samsat pada order '${order.orderNo}' sudah selesai.`);
+    }
+    if (taskType === "Pengantaran Dokumen" && (order.deliveryStatus === "Dokumen Diserahkan" || order.isReceived)) {
+      throw new ApiError(400, "TASK_ALREADY_COMPLETED", `Tugas Pengantaran Dokumen pada order '${order.orderNo}' sudah selesai.`);
+    }
+  }
+
   public acceptMessengerTask(orderNo: string, taskType: string, user: TokenPayload): OperationalOrder {
+    const canonicalTaskType = this.normalizeCanonicalTaskType(taskType);
     const courierName = user.nama || (user as any).userName || "Messenger Lapangan";
     const role = (user.role || "").toLowerCase();
     const courierId = role === "messenger" ? (user as any).employeeId : ((user as any).employeeId || user.userId);
@@ -2393,35 +2645,61 @@ export class OrderService {
       if (!existing) {
         throw new ApiError(404, "ORDER_NOT_FOUND", `Order '${orderNo}' tidak ditemukan.`);
       }
+      if ((existing as any).isCancelled || existing.currentStageName === "Dibatalkan" || (existing as any).status === "Dibatalkan") {
+        throw new ApiError(400, "ORDER_CANCELLED", `Order '${orderNo}' sudah dibatalkan.`);
+      }
+      if ((existing as any).isArchived) {
+        throw new ApiError(400, "ORDER_ARCHIVED", `Order '${orderNo}' sudah diarsipkan.`);
+      }
 
-      const currentAcceptance = (existing.taskAcceptance || {})[taskType];
+      const currentAcceptance = (existing.taskAcceptance || {})[canonicalTaskType];
 
-      // 1. Idempotency Check: Same courier retrying acceptance
-      if (currentAcceptance?.isLocked && currentAcceptance.courierId && currentAcceptance.courierId === courierId) {
+      // 1. Idempotency Check: Same courier retrying acceptance before completion
+      if (currentAcceptance?.isLocked && currentAcceptance.courierId && currentAcceptance.courierId === courierId && currentAcceptance.status === "ACCEPTED") {
         // Already accepted and locked by the same courier.
         // Return existing order without creating duplicate timeline events or duplicate audit logs.
         return existing;
       }
+
+      this.assertTaskNotCompleted(existing, canonicalTaskType);
 
       // 2. Concurrency Conflict: Task is already locked by a different courier
       if (currentAcceptance?.isLocked && currentAcceptance.courierId && currentAcceptance.courierId !== courierId) {
         throw new ApiError(
           409,
           "TASK_ALREADY_ACCEPTED",
-          `Tugas ${taskType} pada order ${orderNo} sudah diterima dan dikunci oleh kurir lain (${currentAcceptance.courierName || "Petugas lain"}).`
+          `Tugas ${canonicalTaskType} pada order ${orderNo} sudah diterima dan dikunci oleh kurir lain (${currentAcceptance.courierName || "Petugas lain"}).`
+        );
+      }
+
+      // 3. Ownership Check: Specifically assigned PENDING task cannot be stolen by another courier
+      const assignedOwnerId = this.getTaskAssignedCourierId(existing, canonicalTaskType);
+      if (role === "messenger" && assignedOwnerId && assignedOwnerId !== courierId) {
+        throw new ApiError(
+          403,
+          "FORBIDDEN",
+          `Tugas ${canonicalTaskType} pada order ${orderNo} sudah ditugaskan secara khusus kepada kurir lain.`
         );
       }
 
       const nowIso = new Date().toISOString();
+      const prevHistory = Array.isArray((currentAcceptance as any)?.history) ? (currentAcceptance as any).history : [];
 
       const updatedAcceptance = {
         ...(existing.taskAcceptance || {}),
-        [taskType]: {
+        [canonicalTaskType]: {
           status: "ACCEPTED" as const,
           acceptedAt: nowIso,
           courierId,
           courierName,
           isLocked: true,
+          reassignedFrom: currentAcceptance?.reassignedFrom,
+          reassignReason: currentAcceptance?.reassignReason,
+          reassignedAt: currentAcceptance?.reassignedAt,
+          history: [
+            ...prevHistory,
+            { action: "ACCEPTED", courierId, courierName, timestamp: nowIso },
+          ],
         },
       };
 
@@ -2432,7 +2710,7 @@ export class OrderService {
       const timelineEvent: any = {
         id: `tl-acc-${Date.now()}`,
         timestamp: nowIso,
-        title: `Tugas ${taskType} Diterima`,
+        title: `Tugas ${canonicalTaskType} Diterima`,
         note: `Tugas operasional diterima dan dikunci oleh kurir ${courierName}`,
         author: courierName,
         type: "STATUS_CHANGE",
@@ -2446,23 +2724,26 @@ export class OrderService {
       }
 
       // Align order-level courier assignment fields
-      if (taskType === "Jemput Dokumen") {
+      if (canonicalTaskType === "Jemput Dokumen") {
+        if (existing.currentStep !== 2 && existing.currentStageName !== "Penjadwalan") {
+          throw new ApiError(400, "INVALID_STAGE", `Tugas Jemput Dokumen hanya dapat diterima pada Step 2 (Penjadwalan).`);
+        }
         taskUpdates.messenger = courierName;
         taskUpdates.assignedMessengerName = courierName;
         taskUpdates.assignedMessengerId = courierId;
         taskUpdates.isScheduled = true;
-        if (!existing.tanggalJemput) taskUpdates.tanggalJemput = nowIso.split("T")[0];
-      } else if (taskType === "Proses Samsat") {
+        if (!existing.tanggalJemput) taskUpdates.tanggalJemput = normalizeToWibCalendarDate(nowIso) || nowIso.split("T")[0];
+      } else if (canonicalTaskType === "Proses Samsat") {
+        if (existing.currentStep !== 4 && existing.currentStageName !== "Proses Samsat") {
+          throw new ApiError(400, "INVALID_STAGE", `Tugas Proses Samsat hanya dapat diterima pada Step 4 (Proses Samsat).`);
+        }
         taskUpdates.samsatMessenger = courierName;
         taskUpdates.samsatMessengerNama = courierName;
         taskUpdates.samsatMessengerId = courierId;
         taskUpdates.isSamsatScheduled = true;
-        if (!existing.tanggalProsesSamsat) taskUpdates.tanggalProsesSamsat = nowIso.split("T")[0];
-      } else if (taskType === "Jemput Hasil Samsat") {
+        if (!existing.tanggalProsesSamsat) taskUpdates.tanggalProsesSamsat = normalizeToWibCalendarDate(nowIso) || nowIso.split("T")[0];
+      } else if (canonicalTaskType === "Jemput Hasil Samsat") {
         // Validate order stage and Samsat status
-        if ((existing as any).isCancelled || existing.currentStageName === "Dibatalkan" || (existing as any).status === "Dibatalkan") {
-          throw new ApiError(400, "ORDER_CANCELLED", `Order '${orderNo}' sudah dibatalkan.`);
-        }
         if (existing.currentStep !== 4 && existing.currentStageName !== "Proses Samsat") {
           throw new ApiError(400, "INVALID_STAGE", `Tugas Jemput Hasil Samsat hanya dapat diambil pada Step 4 (Proses Samsat).`);
         }
@@ -2490,11 +2771,14 @@ export class OrderService {
         // Ensure updated acceptance has cycle info
         (updatedAcceptance["Jemput Hasil Samsat"] as any).cycle = currentCycle;
         (updatedAcceptance["Jemput Hasil Samsat"] as any).startedAt = nowIso;
-      } else if (taskType === "Pengantaran Dokumen") {
+      } else if (canonicalTaskType === "Pengantaran Dokumen") {
+        if (existing.currentStep !== 7 && existing.currentStageName !== "Pengantaran") {
+          throw new ApiError(400, "INVALID_STAGE", `Tugas Pengantaran Dokumen hanya dapat diterima pada Step 7 (Pengantaran).`);
+        }
         taskUpdates.messengerPengantar = courierName;
         (taskUpdates as any).deliveryMessengerId = courierId;
         taskUpdates.isDeliveryScheduled = true;
-        if (!existing.tanggalPengantaran) taskUpdates.tanggalPengantaran = nowIso.split("T")[0];
+        if (!existing.tanggalPengantaran) taskUpdates.tanggalPengantaran = normalizeToWibCalendarDate(nowIso) || nowIso.split("T")[0];
       }
 
       dbOrderRepository.updateOrder(orderNo, taskUpdates);
@@ -2507,8 +2791,8 @@ export class OrderService {
         userRole: (user.role as any) || "messenger",
         action: "ACCEPT_TASK",
         module: "Messenger Task",
-        details: `Kurir ${courierName} menerima dan mengunci tugas ${taskType} pada order ${orderNo}`,
-        metadata: { orderNo, taskType, courierId, courierName, acceptedAt: nowIso },
+        details: `Kurir ${courierName} menerima dan mengunci tugas ${canonicalTaskType} pada order ${orderNo}`,
+        metadata: { orderNo, taskType: canonicalTaskType, courierId, courierName, acceptedAt: nowIso },
         createdAt: nowIso,
       });
 
@@ -2520,6 +2804,7 @@ export class OrderService {
    * Messenger Declines Task (Tolak Tugas -> Menunggu Penugasan Kembali)
    */
   public declineMessengerTask(orderNo: string, taskType: string, reason: string | undefined, user: TokenPayload): OperationalOrder {
+    const canonicalTaskType = this.normalizeCanonicalTaskType(taskType);
     const courierName = user.nama || (user as any).userName || "Messenger Lapangan";
     const role = (user.role || "").toLowerCase();
     const courierId = (user as any).employeeId || user.userId;
@@ -2539,18 +2824,44 @@ export class OrderService {
       if (!existing) {
         throw new ApiError(404, "ORDER_NOT_FOUND", `Order '${orderNo}' tidak ditemukan.`);
       }
+      if ((existing as any).isCancelled || existing.currentStageName === "Dibatalkan" || (existing as any).status === "Dibatalkan") {
+        throw new ApiError(400, "ORDER_CANCELLED", `Order '${orderNo}' sudah dibatalkan.`);
+      }
+      if ((existing as any).isArchived) {
+        throw new ApiError(400, "ORDER_ARCHIVED", `Order '${orderNo}' sudah diarsipkan.`);
+      }
+
+      this.assertTaskNotCompleted(existing, canonicalTaskType);
+
+      // Ownership Enforcement: Only the assigned courier (or Admin/Administrator) can decline a task
+      const assignedOwnerId = this.getTaskAssignedCourierId(existing, canonicalTaskType);
+      if (role === "messenger") {
+        if (!assignedOwnerId || assignedOwnerId !== courierId) {
+          throw new ApiError(
+            403,
+            "FORBIDDEN",
+            `Anda tidak berwenang menolak tugas ${canonicalTaskType} pada order ${orderNo} karena bukan kurir yang ditugaskan.`
+          );
+        }
+      }
 
       const nowIso = new Date().toISOString();
+      const currentAcceptance = (existing.taskAcceptance || {})[canonicalTaskType];
+      const prevHistory = Array.isArray((currentAcceptance as any)?.history) ? (currentAcceptance as any).history : [];
 
       const updatedAcceptance = {
         ...(existing.taskAcceptance || {}),
-        [taskType]: {
+        [canonicalTaskType]: {
           status: "DECLINED" as const,
           declinedAt: nowIso,
           declineReason: canonicalReason,
           courierId,
           courierName,
           isLocked: false,
+          history: [
+            ...prevHistory,
+            { action: "DECLINED", courierId, courierName, reason: canonicalReason, timestamp: nowIso },
+          ],
         },
       };
 
@@ -2561,8 +2872,8 @@ export class OrderService {
       const timelineEvent: any = {
         id: `tl-dec-${Date.now()}`,
         timestamp: nowIso,
-        title: `Tugas ${taskType} Ditolak`,
-        note: `Tugas ${taskType} ditolak oleh kurir ${courierName}.`,
+        title: `Tugas ${canonicalTaskType} Ditolak`,
+        note: `Tugas ${canonicalTaskType} ditolak oleh kurir ${courierName}.`,
         author: courierName,
         type: "STATUS_CHANGE",
       };
@@ -2570,22 +2881,26 @@ export class OrderService {
       taskUpdates.messengerTimeline = [timelineEvent, ...existingTimeline];
 
       // Reset courier assignment so it returns to unassigned
-      if (taskType === "Jemput Dokumen") {
+      if (canonicalTaskType === "Jemput Dokumen") {
         taskUpdates.messenger = "Belum Ditugaskan";
         taskUpdates.assignedMessengerName = "Belum Ditugaskan";
         taskUpdates.assignedMessengerId = undefined;
-      } else if (taskType === "Proses Samsat") {
+        taskUpdates.messengerTaskStatus = "Belum Diambil";
+      } else if (canonicalTaskType === "Proses Samsat") {
         taskUpdates.samsatMessenger = "Belum Ditugaskan";
         taskUpdates.samsatMessengerNama = "Belum Ditugaskan";
         taskUpdates.samsatMessengerId = undefined;
-      } else if (taskType === "Jemput Hasil Samsat") {
+        taskUpdates.messengerTaskStatus = "Belum Diambil";
+      } else if (canonicalTaskType === "Jemput Hasil Samsat") {
         taskUpdates.samsatPickupMessenger = undefined;
         taskUpdates.samsatPickupMessengerNama = undefined;
         taskUpdates.samsatPickupMessengerId = undefined;
         taskUpdates.samsatPickupStatus = "Belum Dijadwal";
-      } else if (taskType === "Pengantaran Dokumen") {
+      } else if (canonicalTaskType === "Pengantaran Dokumen") {
         taskUpdates.messengerPengantar = "Belum Ditugaskan";
         (taskUpdates as any).deliveryMessengerId = undefined;
+        taskUpdates.deliveryStatus = undefined;
+        taskUpdates.messengerTaskStatus = "Belum Diambil";
       }
 
       dbOrderRepository.updateOrder(orderNo, taskUpdates);
@@ -2598,8 +2913,8 @@ export class OrderService {
         userRole: (user.role as any) || "messenger",
         action: "DECLINE_TASK",
         module: "Messenger Task",
-        details: `Kurir ${courierName} menolak tugas ${taskType} pada order ${orderNo}`,
-        metadata: { orderNo, taskType, courierId, courierName },
+        details: `Kurir ${courierName} menolak tugas ${canonicalTaskType} pada order ${orderNo}`,
+        metadata: { orderNo, taskType: canonicalTaskType, courierId, courierName },
         createdAt: nowIso,
       });
 
@@ -2618,67 +2933,136 @@ export class OrderService {
     reason: string,
     adminUser: TokenPayload
   ): OperationalOrder {
-    const existing = this.getByOrderNo(orderNo);
+    const actorRole = (adminUser?.role || "").toLowerCase();
+    if (actorRole !== "administrator" && actorRole !== "admin") {
+      throw new ApiError(403, "FORBIDDEN", "Hanya Admin atau Administrator yang berwenang mengalihkan tugas.");
+    }
+
+    const canonicalTaskType = this.normalizeCanonicalTaskType(taskType);
     const nowIso = new Date().toISOString();
-    const adminName = adminUser.nama || "Admin Kantor";
+    const adminName = adminUser.nama || (adminUser as any).userName || "Admin Kantor";
     const cleanReason = (reason || "").trim();
+    const cleanCourierId = String(newCourierId || "").trim();
 
     if (!cleanReason) {
       throw new ApiError(400, "REASON_REQUIRED", "Alasan pengalihan tugas wajib diisi.");
     }
-    if (!newCourierName || !newCourierName.trim()) {
+    if (!cleanCourierId || ["-", "emp-msg", "emp-samsat", "belum ditugaskan"].includes(cleanCourierId.toLowerCase())) {
+      throw new ApiError(400, "INVALID_COURIER", "ID kurir pengganti tidak valid.");
+    }
+
+    // Validate replacement courier against authoritative SQLite employees table
+    const targetEmp = db
+      .prepare("SELECT id, nama_lengkap, jabatan, status_karyawan FROM employees WHERE id = ?")
+      .get(cleanCourierId) as { id: string; nama_lengkap: string; jabatan: string; status_karyawan: string } | undefined;
+
+    if (!targetEmp) {
+      throw new ApiError(400, "INVALID_COURIER", `Kurir pengganti '${cleanCourierId}' tidak ditemukan di data karyawan.`);
+    }
+    const normalizedEmpStatus = String(targetEmp.status_karyawan || "").trim().toLowerCase();
+    if (!normalizedEmpStatus || ["nonaktif", "non-aktif", "tidak aktif", "resign", "berhenti", "inactive"].includes(normalizedEmpStatus)) {
+      throw new ApiError(400, "INVALID_COURIER", `Kurir pengganti '${targetEmp.nama_lengkap}' tidak berstatus Aktif.`);
+    }
+    if (!String(targetEmp.jabatan || "").toLowerCase().includes("messenger")) {
+      throw new ApiError(400, "INVALID_COURIER", `Karyawan '${targetEmp.nama_lengkap}' bukan Messenger.`);
+    }
+
+    const resolvedCourierName = (newCourierName && newCourierName.trim()) ? newCourierName.trim() : targetEmp.nama_lengkap;
+    if (!resolvedCourierName) {
       throw new ApiError(400, "COURIER_REQUIRED", "Nama kurir pengganti wajib dipilih.");
     }
 
-    const currentAcceptance = (existing.taskAcceptance || {})[taskType];
-    const oldCourier = currentAcceptance?.courierName || existing.messenger || "Kurir Sebelumnya";
-
-    const updatedAcceptance = {
-      ...(existing.taskAcceptance || {}),
-      [taskType]: {
-        status: "PENDING" as const,
-        courierId: newCourierId,
-        courierName: newCourierName.trim(),
-        isLocked: false,
-        reassignedFrom: oldCourier,
-        reassignReason: cleanReason,
-        reassignedAt: nowIso,
-      },
-    };
-
-    const taskUpdates: Partial<OperationalOrder> = {
-      taskAcceptance: updatedAcceptance,
-    };
-
-    const timelineEvent: any = {
-      id: `tl-reassign-${Date.now()}`,
-      timestamp: nowIso,
-      title: `Tugas ${taskType} Dialihkan`,
-      note: `Tugas dialihkan dari ${oldCourier} ke ${newCourierName.trim()} oleh ${adminName}. Alasan: ${cleanReason}`,
-      author: adminName,
-      type: "ASSIGNMENT",
-    };
-    const existingTimeline = existing.messengerTimeline || [];
-    taskUpdates.messengerTimeline = [timelineEvent, ...existingTimeline];
-
-    if (taskType === "Jemput Dokumen") {
-      taskUpdates.messenger = newCourierName.trim();
-      taskUpdates.assignedMessengerName = newCourierName.trim();
-      taskUpdates.assignedMessengerId = newCourierId;
-    } else if (taskType === "Proses Samsat") {
-      taskUpdates.samsatMessenger = newCourierName.trim();
-      taskUpdates.samsatMessengerNama = newCourierName.trim();
-      taskUpdates.samsatMessengerId = newCourierId;
-    } else if (taskType === "Jemput Hasil Samsat") {
-      taskUpdates.samsatPickupMessenger = newCourierName.trim();
-      taskUpdates.samsatPickupMessengerNama = newCourierName.trim();
-      taskUpdates.samsatPickupMessengerId = newCourierId;
-    } else if (taskType === "Pengantaran Dokumen") {
-      taskUpdates.messengerPengantar = newCourierName.trim();
-      (taskUpdates as any).deliveryMessengerId = newCourierId;
-    }
-
     return runInTransaction(() => {
+      const existing = this.getByOrderNo(orderNo);
+      if (!existing) {
+        throw new ApiError(404, "ORDER_NOT_FOUND", `Order '${orderNo}' tidak ditemukan.`);
+      }
+      if ((existing as any).isCancelled || existing.currentStageName === "Dibatalkan" || (existing as any).status === "Dibatalkan") {
+        throw new ApiError(400, "ORDER_CANCELLED", `Order '${orderNo}' sudah dibatalkan.`);
+      }
+      if ((existing as any).isArchived) {
+        throw new ApiError(400, "ORDER_ARCHIVED", `Order '${orderNo}' sudah diarsipkan.`);
+      }
+
+      this.assertTaskNotCompleted(existing, canonicalTaskType);
+
+      const currentAcceptance = (existing.taskAcceptance || {})[canonicalTaskType];
+      const oldCourierId = this.getTaskAssignedCourierId(existing, canonicalTaskType);
+      const oldCourier =
+        currentAcceptance?.courierName ||
+        (canonicalTaskType === "Proses Samsat"
+          ? existing.samsatMessengerNama || existing.samsatMessenger
+          : canonicalTaskType === "Jemput Hasil Samsat"
+            ? existing.samsatPickupMessengerNama || existing.samsatPickupMessenger
+            : canonicalTaskType === "Pengantaran Dokumen"
+              ? existing.messengerPengantar
+              : existing.assignedMessengerName || existing.messenger) ||
+        "Kurir Sebelumnya";
+
+      const prevHistory = Array.isArray((currentAcceptance as any)?.history) ? (currentAcceptance as any).history : [];
+      const historyEntry = {
+        action: "REASSIGNED",
+        fromCourierId: oldCourierId,
+        fromCourierName: oldCourier,
+        toCourierId: cleanCourierId,
+        toCourierName: resolvedCourierName,
+        previousStatus: currentAcceptance?.status || "UNASSIGNED",
+        reason: cleanReason,
+        actorId: adminUser.userId || "usr-admin",
+        actorName: adminName,
+        actorRole: adminUser.role,
+        timestamp: nowIso,
+      };
+
+      const updatedAcceptance = {
+        ...(existing.taskAcceptance || {}),
+        [canonicalTaskType]: {
+          status: "PENDING" as const,
+          courierId: cleanCourierId,
+          courierName: resolvedCourierName,
+          isLocked: false,
+          reassignedFrom: oldCourier,
+          reassignReason: cleanReason,
+          reassignedAt: nowIso,
+          history: [...prevHistory, historyEntry],
+        },
+      };
+
+      const taskUpdates: Partial<OperationalOrder> = {
+        taskAcceptance: updatedAcceptance,
+      };
+
+      const timelineEvent: any = {
+        id: `tl-reassign-${Date.now()}`,
+        timestamp: nowIso,
+        title: `Tugas ${canonicalTaskType} Dialihkan`,
+        note: `Tugas dialihkan dari ${oldCourier} ke ${resolvedCourierName} oleh ${adminName}. Alasan: ${cleanReason}`,
+        author: adminName,
+        type: "ASSIGNMENT",
+      };
+      const existingTimeline = existing.messengerTimeline || [];
+      taskUpdates.messengerTimeline = [timelineEvent, ...existingTimeline];
+
+      if (canonicalTaskType === "Jemput Dokumen") {
+        taskUpdates.messenger = resolvedCourierName;
+        taskUpdates.assignedMessengerName = resolvedCourierName;
+        taskUpdates.assignedMessengerId = cleanCourierId;
+        taskUpdates.isScheduled = true;
+      } else if (canonicalTaskType === "Proses Samsat") {
+        taskUpdates.samsatMessenger = resolvedCourierName;
+        taskUpdates.samsatMessengerNama = resolvedCourierName;
+        taskUpdates.samsatMessengerId = cleanCourierId;
+        taskUpdates.isSamsatScheduled = true;
+      } else if (canonicalTaskType === "Jemput Hasil Samsat") {
+        taskUpdates.samsatPickupMessenger = resolvedCourierName;
+        taskUpdates.samsatPickupMessengerNama = resolvedCourierName;
+        taskUpdates.samsatPickupMessengerId = cleanCourierId;
+      } else if (canonicalTaskType === "Pengantaran Dokumen") {
+        taskUpdates.messengerPengantar = resolvedCourierName;
+        (taskUpdates as any).deliveryMessengerId = cleanCourierId;
+        taskUpdates.isDeliveryScheduled = true;
+      }
+
       dbOrderRepository.updateOrder(orderNo, taskUpdates);
       const updated = this.getByOrderNo(orderNo);
 
@@ -2689,8 +3073,20 @@ export class OrderService {
         userRole: (adminUser.role as any) || "admin",
         action: "REASSIGN_TASK",
         module: "Messenger Task",
-        details: `Admin ${adminName} mengalihkan tugas ${taskType} order ${orderNo} dari ${oldCourier} ke ${newCourierName}. Alasan: ${cleanReason}`,
-        metadata: { orderNo, taskType, oldCourier, newCourier: newCourierName, reason: cleanReason },
+        details: `Admin ${adminName} mengalihkan tugas ${canonicalTaskType} order ${orderNo} dari ${oldCourier} ke ${resolvedCourierName}. Alasan: ${cleanReason}`,
+        metadata: {
+          orderNo,
+          taskType: canonicalTaskType,
+          oldCourier,
+          oldCourierId,
+          newCourier: resolvedCourierName,
+          newCourierId: cleanCourierId,
+          previousStatus: currentAcceptance?.status || "UNASSIGNED",
+          reason: cleanReason,
+          actorName: adminName,
+          actorRole: adminUser.role,
+          timestamp: nowIso,
+        },
         createdAt: nowIso,
       });
 
@@ -2763,8 +3159,9 @@ export class OrderService {
       // Check Stage and Cancellation
       assertValidSamsatStageAndStatus(existing);
 
-      // Verify Messenger Assignment Ownership
+      // Verify Messenger Assignment Ownership & Task Acceptance
       assertMessengerOwnership(existing, user, "SAMSAT");
+      assertMessengerTaskAcceptanceValid(existing, "Proses Samsat", user);
 
       // 3. Completed Cycle Guard: Prevent restarting a completed cycle without new cycle (DEFECT-P2-01)
       const currentCycle = (existing as any).samsatCycle || 1;
@@ -2860,8 +3257,9 @@ export class OrderService {
       // Check Stage and Cancellation
       assertValidSamsatStageAndStatus(existing);
 
-      // Verify Messenger Assignment Ownership
+      // Verify Messenger Assignment Ownership & Task Acceptance
       assertMessengerOwnership(existing, user, "SAMSAT");
+      assertMessengerTaskAcceptanceValid(existing, "Proses Samsat", user);
 
       // Track Samsat Cycle
       const currentCycle = (existing as any).samsatCycle || 1;
@@ -3295,6 +3693,8 @@ export class OrderService {
       }
 
       const nowIso = new Date().toISOString();
+      const currentDeliveryAcc = (existing.taskAcceptance || {})["Pengantaran Dokumen"] as any;
+      const prevDeliveryHistory = Array.isArray(currentDeliveryAcc?.history) ? currentDeliveryAcc.history : [];
       const timelineEvent: any = {
         id: `tl-delivery-done-${Date.now()}`,
         timestamp: nowIso,
@@ -3304,6 +3704,7 @@ export class OrderService {
         type: "STATUS_CHANGE",
       };
 
+      const resolvedPhoto = payload.photoUrl || existing.deliveryProof;
       const updatedAcceptance = {
         ...(existing.taskAcceptance || {}),
         ["Pengantaran Dokumen"]: {
@@ -3312,16 +3713,28 @@ export class OrderService {
           courierId: messengerId,
           courierName: messengerName,
           isLocked: true,
+          history: [
+            ...prevDeliveryHistory,
+            { action: "COMPLETED", courierId: messengerId, courierName: messengerName, receiverName: cleanReceiver, timestamp: nowIso },
+          ],
         },
       };
 
       const updates: Partial<OperationalOrder> = {
         deliveryStatus: "Dokumen Diserahkan",
+        messengerTaskStatus: "Selesai",
         deliveryCompletedAt: existing.deliveryCompletedAt || nowIso,
         receiverName: cleanReceiver,
-        tanggalDiterima: existing.tanggalDiterima || nowIso.split("T")[0],
+        tanggalDiterima: existing.tanggalDiterima || normalizeToWibCalendarDate(nowIso) || nowIso.split("T")[0],
         isReceived: true,
-        deliveryProof: payload.photoUrl || existing.deliveryProof,
+        deliveryProof: resolvedPhoto,
+        deliveryHandover: {
+          ...(existing.deliveryHandover || {}),
+          recipientName: cleanReceiver,
+          relationship: existing.deliveryHandover?.relationship || (payload as any).relationship || "Pemilik Langsung",
+          photoProofUrl: resolvedPhoto,
+          completedAt: existing.deliveryCompletedAt || nowIso,
+        },
         taskAcceptance: updatedAcceptance,
         messengerTimeline: [timelineEvent, ...(existing.messengerTimeline || [])],
       };
@@ -3386,6 +3799,8 @@ export class OrderService {
         type: "ASSIGNMENT",
       };
 
+      const currentDelivAcc = (existing.taskAcceptance || {})["Pengantaran Dokumen"] as any;
+      const prevDelivReleaseHistory = Array.isArray(currentDelivAcc?.history) ? currentDelivAcc.history : [];
       const updatedAcceptance = {
         ...(existing.taskAcceptance || {}),
         ["Pengantaran Dokumen"]: {
@@ -3393,6 +3808,10 @@ export class OrderService {
           isLocked: false,
           releasedAt: nowIso,
           releasedBy: messengerName,
+          history: [
+            ...prevDelivReleaseHistory,
+            { action: "RELEASED", courierId: messengerId, courierName: messengerName, timestamp: nowIso },
+          ],
         },
       };
 
@@ -3400,6 +3819,7 @@ export class OrderService {
         messengerPengantar: undefined,
         deliveryMessengerId: undefined,
         deliveryStatus: undefined,
+        messengerTaskStatus: "Belum Diambil",
         taskAcceptance: updatedAcceptance,
         messengerTimeline: [timelineEvent, ...(existing.messengerTimeline || [])],
       };
@@ -3415,7 +3835,99 @@ export class OrderService {
         action: "RELEASE_TASK",
         module: "Pengantaran Dokumen",
         details: `Tugas pengantaran berkas order ${orderNo} diserahkan ke tim oleh ${messengerName}`,
-        metadata: { orderNo, taskType: "Pengantaran Dokumen" },
+        metadata: { orderNo, taskType: "Pengantaran Dokumen", releasedById: messengerId, releasedByName: messengerName },
+        createdAt: nowIso,
+      });
+
+      return updated;
+    });
+  }
+
+  /**
+   * Releases Samsat Task back to Team Pool (Scope C Handover)
+   */
+  public releaseSamsatTask(
+    orderNo: string,
+    user: TokenPayload,
+    notes?: string
+  ): OperationalOrder {
+    const role = (user.role || "").toLowerCase();
+    const cleanNotes = (notes || "").trim();
+    if (role === "messenger" && cleanNotes.length > 0) {
+      throw new ApiError(
+        400,
+        "MESSENGER_NOTES_NOT_ALLOWED",
+        "Catatan operasional bebas (free-text notes) tidak diizinkan pada penyerahan tugas."
+      );
+    }
+
+    return runInTransaction(() => {
+      const existing = this.getByOrderNo(orderNo);
+      if (!existing) {
+        throw new ApiError(404, "ORDER_NOT_FOUND", `Order '${orderNo}' tidak ditemukan.`);
+      }
+      if ((existing as any).isCancelled || existing.currentStageName === "Dibatalkan" || (existing as any).status === "Dibatalkan") {
+        throw new ApiError(400, "ORDER_CANCELLED", `Order '${orderNo}' sudah dibatalkan.`);
+      }
+      if ((existing as any).isArchived) {
+        throw new ApiError(400, "ORDER_ARCHIVED", `Order '${orderNo}' sudah diarsipkan.`);
+      }
+      if (existing.samsatStatus === "Selesai") {
+        throw new ApiError(400, "TASK_ALREADY_COMPLETED", `Proses Samsat untuk order '${orderNo}' sudah selesai dan tidak dapat diserahkan.`);
+      }
+
+      const { messengerId, messengerName } = assertMessengerOwnership(existing, user, "SAMSAT");
+      const nowIso = new Date().toISOString();
+
+      const timelineEvent: any = {
+        id: `tl-samsat-release-${Date.now()}`,
+        timestamp: nowIso,
+        title: "Tugas Samsat Diserahkan ke Tim",
+        note: `Tugas pengurusan Samsat dikembalikan ke pool antrean oleh kurir ${messengerName}. Progres komponen tetap tersimpan.`,
+        author: messengerName,
+        type: "ASSIGNMENT",
+      };
+
+      const currentSamsatAcc = (existing.taskAcceptance || {})["Proses Samsat"] as any;
+      const prevSamsatHistory = Array.isArray(currentSamsatAcc?.history) ? currentSamsatAcc.history : [];
+      const updatedAcceptance = {
+        ...(existing.taskAcceptance || {}),
+        ["Proses Samsat"]: {
+          status: "PENDING" as const,
+          isLocked: false,
+          releasedAt: nowIso,
+          releasedBy: messengerName,
+          history: [
+            ...prevSamsatHistory,
+            { action: "RELEASED", courierId: messengerId, courierName: messengerName, timestamp: nowIso },
+          ],
+        },
+      };
+
+      const updates: Partial<OperationalOrder> = {
+        samsatMessenger: "Belum Ditugaskan",
+        samsatMessengerNama: "Belum Ditugaskan",
+        samsatMessengerId: undefined,
+        samsatStatus: existing.samsatStatus === "Sedang Proses Samsat" || existing.samsatStatus === "Menuju Samsat" || existing.samsatStatus === "Di Lokasi Samsat"
+          ? "Terjadwal Samsat"
+          : existing.samsatStatus,
+        messengerTaskStatus: "Belum Diambil",
+        taskAcceptance: updatedAcceptance,
+        messengerTimeline: [timelineEvent, ...(existing.messengerTimeline || [])],
+      };
+
+      dbOrderRepository.updateOrder(orderNo, updates);
+      const updated = this.getByOrderNo(orderNo)!;
+
+      dbAuditRepository.save({
+        id: `log-samsat-release-${Date.now()}`,
+        userId: messengerId,
+        userName: messengerName,
+        userRole: (user.role as any) || "messenger",
+        action: "RELEASE_TASK",
+        module: "Proses Samsat",
+        details: `Tugas Proses Samsat order ${orderNo} diserahkan ke tim oleh ${messengerName}`,
+        metadata: { orderNo, taskType: "Proses Samsat", releasedById: messengerId, releasedByName: messengerName },
         createdAt: nowIso,
       });
 
@@ -3543,7 +4055,7 @@ export class OrderService {
       }
 
       const role = (user.role || "").toLowerCase();
-      const isAdmin = role === "administrator" || role === "admin" || role === "svp" || user.jabatan === "SVP";
+      const isAdmin = role === "administrator" || role === "admin";
       if (!isAdmin) {
         throw new ApiError(403, "FORBIDDEN", "Hanya Admin atau Supervisor yang berwenang memulihkan status Kendala Jemput Hasil.");
       }
@@ -3746,7 +4258,7 @@ export class OrderService {
     }
 
     const role = (user?.role || "").toLowerCase();
-    const isAuthorized = role === "administrator" || role === "admin" || role === "svp" || user?.jabatan === "SVP";
+    const isAuthorized = role === "administrator" || role === "admin";
     if (!isAuthorized) {
       throw new ApiError(403, "FORBIDDEN", "Hanya Administrator atau Supervisor yang berwenang memverifikasi biaya order.");
     }
@@ -3763,6 +4275,18 @@ export class OrderService {
       const existing = this.getByOrderNo(orderNo);
       if (!existing) {
         throw new ApiError(404, "ORDER_NOT_FOUND", `Order '${orderNo}' tidak ditemukan.`);
+      }
+
+      if (
+        existing.isCancelled ||
+        existing.currentStageName === "Dibatalkan" ||
+        (existing as any).status === "Dibatalkan"
+      ) {
+        throw new ApiError(
+          400,
+          "ORDER_CANCELLED",
+          `Order '${orderNo}' telah dibatalkan dan tidak dapat dilakukan verifikasi biaya.`
+        );
       }
 
       const expectedTotal = (existing.biayaJasa || 0) + (existing.biayaAntarJemput || 0) + payload.finalBiayaSamsat;
@@ -3848,6 +4372,493 @@ export class OrderService {
       });
 
       return this.getByOrderNo(orderNo)!;
+    });
+  }
+
+  /**
+   * Dedicated Samsat Subprogress & Component Start Endpoint Service (Phase 2 Remediation)
+   * Eliminates generic PUT /orders/:orderNo mutation containing protected `samsatStatus`.
+   * Enforces Stage 4, active Samsat process, ownership, idempotency, and audit trail.
+   */
+  public updateSamsatSubprogress(
+    orderNo: string,
+    payload: {
+      subprogress?: string;
+      componentId?: string;
+      componentUpdate?: {
+        name?: string;
+        category?: string;
+        masterPrice?: number;
+        nominal?: number;
+        actualOrderPrice?: number;
+        isCustom?: boolean;
+        status?: string;
+        estimatedDurationMinutes?: number;
+        isCustomDuration?: boolean;
+        customDurationDays?: number;
+        startedAt?: string;
+        waitingReason?: string;
+        note?: string;
+      };
+      note?: string;
+      notes?: string;
+    },
+    user: TokenPayload
+  ): OperationalOrder {
+    const role = (user.role || "").toLowerCase();
+    const courierName = user.nama || (user as any).userName || "Messenger Lapangan";
+    const courierId = role === "messenger" ? (user as any).employeeId : ((user as any).employeeId || user.userId);
+
+    if (role === "messenger") {
+      if (!courierId || courierId === "EMP-MSG" || courierId === "EMP-SAMSAT" || courierId === "Belum Ditugaskan" || courierId === "-") {
+        throw new ApiError(403, "FORBIDDEN", "Identitas kurir tidak valid atau tidak memiliki employeeId kanonikal.");
+      }
+      const freeNote = (payload.note || payload.notes || payload.componentUpdate?.note || "").trim();
+      if (freeNote.length > 0) {
+        throw new ApiError(
+          400,
+          "MESSENGER_NOTES_NOT_ALLOWED",
+          "Catatan operasional bebas (free-text notes) tidak diizinkan pada progres komponen Samsat."
+        );
+      }
+    } else if (!courierId) {
+      throw new ApiError(403, "FORBIDDEN", "Identitas pengguna tidak valid.");
+    }
+
+    return runInTransaction(() => {
+      const existing = this.getByOrderNo(orderNo);
+      if (!existing) {
+        throw new ApiError(404, "ORDER_NOT_FOUND", `Order '${orderNo}' tidak ditemukan.`);
+      }
+
+      assertValidSamsatStageAndStatus(existing);
+      assertMessengerOwnership(existing, user, "SAMSAT");
+      assertMessengerTaskAcceptanceValid(existing, "Proses Samsat", user);
+
+      const currentCycle = (existing as any).samsatCycle || 1;
+      if (existing.samsatStatus === "Selesai" && (existing as any).samsatCompletedCycle === currentCycle) {
+        throw new ApiError(
+          400,
+          "SAMSAT_ALREADY_COMPLETED",
+          `Proses Samsat siklus ${currentCycle} untuk order '${orderNo}' sudah selesai.`
+        );
+      }
+
+      const isSamsatStarted =
+        existing.samsatStatus === "Sedang Proses Samsat" ||
+        existing.samsatStatus === "Menuju Samsat" ||
+        existing.samsatStatus === "Di Lokasi Samsat";
+      if (!isSamsatStarted) {
+        throw new ApiError(
+          400,
+          "SAMSAT_NOT_STARTED",
+          `Proses Samsat pada order '${orderNo}' belum dimulai. Tekan 'Mulai Proses Samsat' terlebih dahulu.`
+        );
+      }
+
+      const rawSubprogress = (payload.subprogress || payload.componentUpdate?.name || "").trim();
+      if (!rawSubprogress) {
+        throw new ApiError(400, "VALIDATION_ERROR", "Nama subprogress atau komponen Samsat wajib diisi.");
+      }
+      const formattedSubstatus = rawSubprogress.startsWith("Sedang ")
+        ? rawSubprogress
+        : `Sedang ${rawSubprogress}`;
+
+      const nowIso = new Date().toISOString();
+      const updates: Partial<OperationalOrder> = {
+        samsatSubstatus: formattedSubstatus,
+        currentSamsatProcess: formattedSubstatus,
+      };
+      const timelineEvents: any[] = [];
+
+      let componentChanged = false;
+      if (payload.componentId && payload.componentUpdate) {
+        const compUpd = payload.componentUpdate;
+        if (compUpd.status === "WAITING" && (!compUpd.waitingReason || !compUpd.waitingReason.trim())) {
+          throw new ApiError(
+            400,
+            "VALIDATION_ERROR",
+            "Alasan menunggu wajib diisi saat mengubah status komponen ke Menunggu."
+          );
+        }
+
+        const currentMap: Record<string, any> = { ...((existing as any).messengerComponentProgress || {}) };
+        const matchedSamsatProc = (existing.samsatProcesses || []).find((p: any) => p.id === payload.componentId);
+        const existingComp = currentMap[payload.componentId] || {
+          componentId: payload.componentId,
+          name: compUpd.name || matchedSamsatProc?.name || rawSubprogress,
+          category: compUpd.category || matchedSamsatProc?.category,
+          masterPrice: compUpd.masterPrice ?? matchedSamsatProc?.basePrice,
+          nominal: compUpd.nominal ?? matchedSamsatProc?.basePrice ?? 0,
+          actualOrderPrice: compUpd.actualOrderPrice ?? matchedSamsatProc?.basePrice ?? 0,
+          status: "NOT_STARTED",
+        };
+
+        const targetStatus = compUpd.status || existingComp.status || "IN_PROGRESS";
+        const resolvedDurationMinutes =
+          compUpd.isCustomDuration && compUpd.customDurationDays && compUpd.customDurationDays > 0
+            ? compUpd.customDurationDays * 1440
+            : (compUpd.estimatedDurationMinutes ?? existingComp.estimatedDurationMinutes);
+
+        const isSameCompState =
+          existingComp.status === targetStatus &&
+          existingComp.estimatedDurationMinutes === resolvedDurationMinutes &&
+          existingComp.waitingReason === compUpd.waitingReason;
+
+        if (!isSameCompState || existing.samsatSubstatus !== formattedSubstatus) {
+          const startedAt =
+            targetStatus === "IN_PROGRESS"
+              ? (existingComp.startedAt || compUpd.startedAt || nowIso)
+              : existingComp.startedAt;
+          let estimatedCompletedAt = existingComp.estimatedCompletedAt;
+          if (resolvedDurationMinutes && Number(resolvedDurationMinutes) > 0) {
+            const baseStartMs = new Date(startedAt || nowIso).getTime();
+            const resolvedMs = isNaN(baseStartMs) ? Date.now() : baseStartMs;
+            estimatedCompletedAt = new Date(resolvedMs + Number(resolvedDurationMinutes) * 60000).toISOString();
+          }
+          const completedAt =
+            targetStatus === "COMPLETED"
+              ? (existingComp.completedAt || new Date().toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }))
+              : existingComp.completedAt;
+
+          currentMap[payload.componentId] = {
+            ...existingComp,
+            ...(compUpd.name ? { name: compUpd.name } : {}),
+            ...(compUpd.category ? { category: compUpd.category } : {}),
+            ...(compUpd.isCustom !== undefined ? { isCustom: compUpd.isCustom } : {}),
+            ...(compUpd.isCustomDuration !== undefined ? { isCustomDuration: compUpd.isCustomDuration } : {}),
+            ...(compUpd.customDurationDays !== undefined ? { customDurationDays: compUpd.customDurationDays } : {}),
+            ...(resolvedDurationMinutes !== undefined ? { estimatedDurationMinutes: resolvedDurationMinutes } : {}),
+            ...(compUpd.waitingReason ? { waitingReason: compUpd.waitingReason.trim() } : {}),
+            status: targetStatus,
+            startedAt,
+            completedAt,
+            estimatedCompletedAt,
+          };
+
+          updates.messengerComponentProgress = currentMap;
+          componentChanged = true;
+
+          timelineEvents.push({
+            id: `tl-comp-${Date.now()}`,
+            timestamp: nowIso,
+            title: `Update Komponen: ${currentMap[payload.componentId].name}`,
+            note: `Status: ${currentMap[payload.componentId].status}.`,
+            author: courierName,
+            type: "COMPONENT_UPDATE",
+          });
+        }
+      }
+
+      // Idempotency: Already on same subprogress and no component state change
+      if (existing.samsatSubstatus === formattedSubstatus && !componentChanged) {
+        return existing;
+      }
+
+      if (existing.samsatSubstatus !== formattedSubstatus) {
+        timelineEvents.unshift({
+          id: `tl-subprog-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          timestamp: nowIso,
+          title: `Progres Samsat: ${formattedSubstatus}`,
+          note: `Tahapan pengurusan diperbarui oleh ${courierName}`,
+          author: courierName,
+          type: "STATUS_CHANGE",
+        });
+      }
+
+      updates.messengerTimeline = [...timelineEvents, ...(existing.messengerTimeline || [])];
+
+      dbOrderRepository.updateOrder(orderNo, updates);
+      const updated = this.getByOrderNo(orderNo)!;
+
+      dbAuditRepository.save({
+        id: `log-samsat-subprog-${Date.now()}`,
+        userId: courierId,
+        userName: courierName,
+        userRole: (user.role as any) || "messenger",
+        action: "UPDATE_SAMSAT_SUBPROGRESS",
+        module: "Proses Samsat",
+        details: `Petugas ${courierName} memperbarui progres loket Samsat order ${orderNo}: ${formattedSubstatus}`,
+        metadata: {
+          orderNo,
+          previousSubstatus: existing.samsatSubstatus || null,
+          newSubstatus: formattedSubstatus,
+          componentId: payload.componentId || null,
+        },
+        createdAt: nowIso,
+      });
+
+      return updated;
+    });
+  }
+
+  /**
+   * Dedicated Messenger Task Status Transition Endpoint Service (Phase 3 Remediation)
+   * Replaces generic PUT /orders/:orderNo modification of protected `messengerTaskStatus`.
+   * Enforces role/ownership, transition lifecycle rules, stage consistency, idempotency & audit log.
+   */
+  public updateMessengerTaskStatus(
+    orderNo: string,
+    taskType: string,
+    payload: {
+      status?: string;
+      newStatus?: string;
+      waitingReason?: string;
+      reason?: string;
+      note?: string;
+      notes?: string;
+      keterangan?: string;
+    },
+    user: TokenPayload
+  ): OperationalOrder {
+    const validTaskTypes = new Set([
+      "Jemput Dokumen",
+      "Proses Samsat",
+      "Jemput Hasil Samsat",
+      "Pengantaran Dokumen",
+    ]);
+    const cleanTaskType = (taskType || "").trim();
+    if (!validTaskTypes.has(cleanTaskType)) {
+      throw new ApiError(400, "INVALID_TASK_TYPE", `Jenis tugas '${taskType}' tidak valid.`);
+    }
+
+    const role = (user.role || "").toLowerCase().trim();
+    if (!["administrator", "admin", "messenger"].includes(role)) {
+      throw new ApiError(403, "FORBIDDEN", "Role Anda tidak berwenang memperbarui status tugas kurir.");
+    }
+
+    const rawTarget = (payload.newStatus ?? payload.status ?? "").trim();
+    if (!rawTarget) {
+      throw new ApiError(400, "VALIDATION_ERROR", "Status tugas target wajib diisi.");
+    }
+
+    const normalizedKey = rawTarget.toUpperCase().replace(/\s+/g, "_");
+    // Terminal / cancel shortcuts are strictly rejected so completion/cancel workflows cannot be bypassed
+    const forbiddenShortcutSet = new Set([
+      "SELESAI",
+      "COMPLETED",
+      "DOKUMEN_SUDAH_TERSEDIA",
+      "DOKUMEN_DISERAHKAN",
+      "DOKUMEN_SAMSAT_DITERIMA_DI_KANTOR",
+      "DIBATALKAN",
+      "CANCELLED",
+    ]);
+    if (forbiddenShortcutSet.has(normalizedKey)) {
+      throw new ApiError(
+        400,
+        "INVALID_STATUS_TRANSITION",
+        `Transisi status ke '${rawTarget}' tidak diizinkan melalui endpoint status tugas. Gunakan endpoint penyelesaian atau pembatalan resmi.`
+      );
+    }
+
+    let mappedDisplayStatus: "Belum Diambil" | "Dalam Proses" | "Pending";
+    if (normalizedKey === "BELUM_DIAMBIL" || normalizedKey === "PENDING_PICKUP") {
+      mappedDisplayStatus = "Belum Diambil";
+    } else if (
+      normalizedKey === "DALAM_PROSES" ||
+      normalizedKey === "IN_PROGRESS" ||
+      normalizedKey === "SEDANG_DIJEMPUT" ||
+      normalizedKey === "SEDANG_DIANTAR" ||
+      normalizedKey === "SEDANG_PROSES_SAMSAT"
+    ) {
+      mappedDisplayStatus = "Dalam Proses";
+    } else if (normalizedKey === "PENDING" || normalizedKey === "WAITING") {
+      mappedDisplayStatus = "Pending";
+    } else {
+      throw new ApiError(
+        400,
+        "INVALID_STATUS_TRANSITION",
+        `Status tugas '${rawTarget}' tidak dikenali atau tidak valid.`
+      );
+    }
+
+    if (role === "messenger") {
+      const freeNote = (payload.note || payload.notes || payload.keterangan || "").trim();
+      if (freeNote.length > 0) {
+        throw new ApiError(
+          400,
+          "MESSENGER_NOTES_NOT_ALLOWED",
+          "Catatan operasional bebas (free-text notes) tidak diizinkan bagi Messenger."
+        );
+      }
+      if (mappedDisplayStatus === "Belum Diambil") {
+        throw new ApiError(
+          403,
+          "FORBIDDEN",
+          "Messenger tidak dapat mengembalikan status tugas ke 'Belum Diambil' secara langsung. Gunakan endpoint tolak atau serahkan tugas."
+        );
+      }
+    }
+
+    const cleanWaitingReason = (payload.waitingReason || payload.reason || "").trim();
+    const cleanAdminNote = role === "messenger" ? "" : (payload.note || payload.notes || payload.keterangan || "").trim();
+
+    if (mappedDisplayStatus === "Pending") {
+      if (role === "messenger" && !cleanWaitingReason) {
+        throw new ApiError(
+          400,
+          "VALIDATION_ERROR",
+          "Alasan menunggu (waitingReason) wajib diisi saat memilih status Menunggu (Pending)."
+        );
+      }
+      if (!cleanWaitingReason && !cleanAdminNote) {
+        throw new ApiError(
+          400,
+          "VALIDATION_ERROR",
+          "Alasan menunggu wajib diisi saat memilih status Pending."
+        );
+      }
+    }
+
+    const ownershipContext =
+      cleanTaskType === "Jemput Dokumen"
+        ? "PICKUP"
+        : cleanTaskType === "Proses Samsat"
+        ? "SAMSAT"
+        : cleanTaskType === "Jemput Hasil Samsat"
+        ? "SAMSAT_PICKUP"
+        : "DELIVERY";
+
+    return runInTransaction(() => {
+      const existing = this.getByOrderNo(orderNo);
+      if (!existing) {
+        throw new ApiError(404, "ORDER_NOT_FOUND", `Order '${orderNo}' tidak ditemukan.`);
+      }
+      if ((existing as any).isCancelled || existing.currentStageName === "Dibatalkan" || (existing as any).status === "Dibatalkan") {
+        throw new ApiError(400, "ORDER_CANCELLED", `Order '${orderNo}' sudah dibatalkan.`);
+      }
+      if ((existing as any).isArchived === 1 || (existing as any).isArchived === true || (existing as any).isArchived === 2) {
+        throw new ApiError(400, "ORDER_ARCHIVED", `Order '${orderNo}' sudah diarsipkan dan status tugas tidak dapat diubah.`);
+      }
+
+      const { messengerId: actorId, messengerName: actorName } = assertMessengerOwnership(existing, user, ownershipContext);
+      assertMessengerTaskAcceptanceValid(existing, cleanTaskType, user);
+
+      // Stage & completion transition validation
+      const step = Number(existing.currentStep || 0);
+      if (cleanTaskType === "Jemput Dokumen") {
+        if (step > 2 || existing.pickupCompleted || existing.messengerTaskStatus === "Dokumen Sudah Tersedia") {
+          throw new ApiError(
+            400,
+            "INVALID_STATUS_TRANSITION",
+            `Tugas Jemput Dokumen order '${orderNo}' sudah selesai atau melewati tahap Penjadwalan.`
+          );
+        }
+      } else if (cleanTaskType === "Proses Samsat") {
+        if (step !== 4 && existing.currentStageName !== "Proses Samsat") {
+          throw new ApiError(
+            400,
+            "INVALID_STATUS_TRANSITION",
+            `Order '${orderNo}' saat ini berada di Step ${step}, bukan pada tahap Proses Samsat.`
+          );
+        }
+        const currentCycle = (existing as any).samsatCycle || 1;
+        if (existing.samsatStatus === "Selesai" && (existing as any).samsatCompletedCycle === currentCycle) {
+          throw new ApiError(
+            400,
+            "INVALID_STATUS_TRANSITION",
+            `Proses Samsat order '${orderNo}' sudah selesai pada siklus saat ini.`
+          );
+        }
+      } else if (cleanTaskType === "Jemput Hasil Samsat") {
+        if (
+          (step !== 4 && existing.currentStageName !== "Proses Samsat") ||
+          existing.samsatStatus !== "Selesai" ||
+          existing.samsatPickupStatus === "Dokumen Samsat Diterima di Kantor"
+        ) {
+          throw new ApiError(
+            400,
+            "INVALID_STATUS_TRANSITION",
+            `Tugas Jemput Hasil Samsat order '${orderNo}' tidak dalam status aktif yang dapat diubah.`
+          );
+        }
+      } else if (cleanTaskType === "Pengantaran Dokumen") {
+        if (
+          (step !== 7 && existing.currentStageName !== "Pengantaran") ||
+          existing.deliveryStatus === "Dokumen Diserahkan" ||
+          existing.isReceived
+        ) {
+          throw new ApiError(
+            400,
+            "INVALID_STATUS_TRANSITION",
+            `Tugas Pengantaran Dokumen order '${orderNo}' sudah selesai atau tidak berada pada Step 7 (Pengantaran).`
+          );
+        }
+      }
+
+      const effectiveReasonOrNote =
+        mappedDisplayStatus === "Pending"
+          ? (cleanWaitingReason || cleanAdminNote)
+          : (cleanAdminNote || existing.messengerTaskNotes || "");
+
+      const isAlreadyAtStatus =
+        existing.messengerTaskStatus === mappedDisplayStatus &&
+        (mappedDisplayStatus !== "Pending" || existing.messengerTaskNotes === effectiveReasonOrNote);
+
+      if (isAlreadyAtStatus && !cleanAdminNote && !cleanWaitingReason) {
+        return existing;
+      }
+
+      const nowIso = new Date().toISOString();
+      const statusLabel =
+        mappedDisplayStatus === "Pending"
+          ? "Menunggu"
+          : mappedDisplayStatus;
+      const timelineNote = cleanWaitingReason
+        ? `Alasan: ${cleanWaitingReason}.${cleanAdminNote ? ` Catatan: ${cleanAdminNote}` : ""}`
+        : cleanAdminNote || `Status tugas ${cleanTaskType} diperbarui menjadi ${statusLabel}.`;
+
+      const timelineEvent: any = {
+        id: `tl-status-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: nowIso,
+        title: `Ubah Status: ${statusLabel}`,
+        note: timelineNote,
+        author: actorName,
+        type: "STATUS_CHANGE",
+      };
+
+      const updates: Partial<OperationalOrder> = {
+        messengerTaskStatus: mappedDisplayStatus,
+        messengerTimeline: [timelineEvent, ...(existing.messengerTimeline || [])],
+      };
+
+      if (mappedDisplayStatus === "Pending") {
+        updates.messengerTaskNotes = effectiveReasonOrNote;
+      } else if (cleanAdminNote) {
+        updates.messengerTaskNotes = cleanAdminNote;
+      }
+
+      if (cleanTaskType === "Proses Samsat" && mappedDisplayStatus === "Dalam Proses" && existing.samsatStatus !== "Sedang Proses Samsat") {
+        updates.samsatStatus = "Sedang Proses Samsat";
+        updates.samsatStartedAt = existing.samsatStartedAt || nowIso;
+        updates.samsatJourneyStartedAt = existing.samsatJourneyStartedAt || nowIso;
+      } else if (cleanTaskType === "Pengantaran Dokumen" && mappedDisplayStatus === "Dalam Proses" && existing.deliveryStatus !== "Sedang Diantar") {
+        updates.deliveryStatus = "Sedang Diantar";
+        updates.deliveryStartedAt = existing.deliveryStartedAt || nowIso;
+      }
+
+      dbOrderRepository.updateOrder(orderNo, updates);
+      const updated = this.getByOrderNo(orderNo)!;
+
+      dbAuditRepository.save({
+        id: `log-task-status-${Date.now()}`,
+        userId: actorId,
+        userName: actorName,
+        userRole: (user.role as any) || "messenger",
+        action: "UPDATE_TASK_STATUS",
+        module: "Messenger Task",
+        details: `Mengubah status tugas ${cleanTaskType} pada order ${orderNo} dari '${existing.messengerTaskStatus || "-"}' menjadi '${mappedDisplayStatus}'`,
+        metadata: {
+          orderNo,
+          taskType: cleanTaskType,
+          previousStatus: existing.messengerTaskStatus || null,
+          newStatus: mappedDisplayStatus,
+          waitingReason: cleanWaitingReason || null,
+        },
+        createdAt: nowIso,
+      });
+
+      return updated;
     });
   }
 

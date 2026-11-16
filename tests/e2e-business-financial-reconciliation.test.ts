@@ -58,25 +58,41 @@ function advanceOrderThroughStages(orderNo: string, targetStep: number, isWalkIn
   }
 
   if (step < 3 && targetStep >= 3 && !isWalkIn) {
-    orderService.advanceOrder(orderNo, "Verifikasi Dokumen", {
-      pickupCompleted: true,
-      messengerTaskStatus: "Dokumen Sudah Tersedia"
-    }, adminUser);
+    orderService.acceptMessengerTask(orderNo, "Jemput Dokumen", courierUser);
+    orderService.startPickupTask(orderNo, courierUser);
+    orderService.completePickupTask(orderNo, { checklist: { stnkAsli: true } }, courierUser);
+    orderService.advanceOrder(orderNo, "Verifikasi Dokumen", {}, adminUser);
     step = 3;
   }
 
   if (step < 4 && targetStep >= 4) {
     orderService.advanceOrder(orderNo, "Proses Samsat", {
-      documentsVerified: true
+      documentsVerified: true,
+      samsatMessengerId: "EMP-0004",
+      samsatMessengerName: "Ahmad Kurir",
+      samsatProcesses: [{ id: "comp-1", name: "Cek Fisik", status: "COMPLETED" }],
     }, adminUser);
     step = 4;
   }
 
   if (step < 5 && targetStep >= 5) {
     const o = orderService.getByOrderNo(orderNo);
-    const updatedSamsat = (o.samsatProcesses || []).map((p: any) => ({ ...p, status: "Selesai" }));
-    orderService.advanceOrder(orderNo, "Verifikasi Ulang", {
+    const updatedSamsat = (o.samsatProcesses && o.samsatProcesses.length > 0
+      ? o.samsatProcesses
+      : [{ id: "comp-1", name: "Cek Fisik", status: "COMPLETED" }]
+    ).map((p: any) => ({ ...p, status: "COMPLETED", isCompleted: true }));
+    dbOrderRepository.updateOrder(orderNo, {
       samsatProcesses: updatedSamsat,
+      samsatMessengerId: o.samsatMessengerId || "EMP-0004",
+      samsatMessengerName: o.samsatMessengerName || "Ahmad Kurir",
+      samsatPickupMessengerId: "EMP-0004",
+      samsatPickupMessengerName: "Ahmad Kurir",
+    });
+    orderService.acceptMessengerTask(orderNo, "Proses Samsat", courierUser);
+    orderService.completeSamsatProcess(orderNo, {}, courierUser);
+    orderService.acceptMessengerTask(orderNo, "Jemput Hasil Samsat", courierUser);
+    orderService.completeSamsatPickupTask(orderNo, courierUser, {});
+    orderService.advanceOrder(orderNo, "Verifikasi Ulang", {
       samsatCompletedAt: new Date().toISOString()
     }, adminUser);
     step = 5;
@@ -107,9 +123,12 @@ function advanceOrderThroughStages(orderNo: string, targetStep: number, isWalkIn
 
   if (step < 8 && targetStep >= 8) {
     const o = orderService.getByOrderNo(orderNo);
+    const receiverName = o.customer + " (Penerima Asli)";
+    orderService.acceptMessengerTask(orderNo, "Pengantaran Dokumen", courierUser);
+    orderService.completeDeliveryTask(orderNo, { receiverName }, courierUser);
     orderService.advanceOrder(orderNo, "Dokumen Telah Diterima", {
-      penerimaDokumen: o.customer + " (Penerima Asli)",
-      recipientName: o.customer + " (Penerima Asli)"
+      penerimaDokumen: receiverName,
+      recipientName: receiverName
     }, adminUser);
     step = 8;
   }
@@ -119,6 +138,17 @@ function advanceOrderThroughStages(orderNo: string, targetStep: number, isWalkIn
 
 test("E2E BUSINESS WORKFLOW & FINANCIAL RECONCILIATION SUITE", async (t) => {
   const db = getDb();
+
+  // Ensure active "Transfer BCA" method exists in the isolated sandbox DB
+  const existingPm = db.prepare("SELECT id FROM payment_methods WHERE LOWER(nama_metode) = LOWER('Transfer BCA')").get() as { id: string } | undefined;
+  if (existingPm) {
+    db.prepare("UPDATE payment_methods SET status = 'Aktif' WHERE id = ?").run(existingPm.id);
+  } else {
+    const nowIso = new Date().toISOString();
+    db.prepare(
+      "INSERT INTO payment_methods (id, nama_metode, bank, nama_rekening, nomor_rekening, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    ).run("pm-test-bca", "Transfer BCA", "BCA", "PT Biro Jasa SUN89 Abadi", "772-019-2831", "Aktif", nowIso, nowIso);
+  }
 
   let orderNoScenarioC = "";
 
@@ -354,25 +384,36 @@ test("E2E BUSINESS WORKFLOW & FINANCIAL RECONCILIATION SUITE", async (t) => {
     assert.ok(created, "Order C must be created");
     orderNoScenarioC = created.orderNo;
 
-    // 1. Verify Invoice state: PARTIAL, sisa = 600.000, no cashback/refund
+    // 1. Verify pre-verification Invoice state: unverified Bayar di Awal stays UNPAID (dibayar=0, sisa=1.000.000)
     const inv = dbFinanceRepository.getInvoiceByOrderNo(orderNoScenarioC)!;
     assert.ok(inv, "Invoice C must exist");
     assert.strictEqual(inv.totalTagihan, 1000000);
-    assert.strictEqual(inv.dibayar, 400000);
-    assert.strictEqual(inv.sisa, 600000);
-    assert.strictEqual(inv.status, "PARTIAL");
-    assert.strictEqual(inv.settlementCondition, "UNDERPAID");
+    assert.strictEqual(inv.dibayar, 0, "Pending Bayar di Awal payment must NOT enter verified dibayar before verifyPayment");
+    assert.strictEqual(inv.sisa, 1000000, "Sisa must stay full totalTagihan until Finance verifies initial payment");
+    assert.strictEqual(inv.status, "UNPAID");
     assert.strictEqual(inv.overpayment, 0);
     assert.strictEqual(inv.refundStatus, "NONE");
     assert.strictEqual(inv.cashbackStatus, "APPROVED");
 
-    // 2. Verify Data Penjualan Projection
+    // 1b. Verify initial payment record on order carries status MENUNGGU_VERIFIKASI & zero Kas Kantor / Profit impact
+    const persistedOrderC = orderService.getByOrderNo(orderNoScenarioC)!;
+    const pendingRecordsC = persistedOrderC.payment?.paymentRecords || [];
+    assert.ok(pendingRecordsC.length >= 1, "Order C must persist initial pending payment record");
+    assert.strictEqual(pendingRecordsC[0].statusVerifikasi, "MENUNGGU_VERIFIKASI");
+
+    const preVerifyKasRows = db
+      .prepare("SELECT * FROM kas_kantor WHERE order_no = ? AND status = 'Debit'")
+      .all(orderNoScenarioC) as any[];
+    assert.strictEqual(preVerifyKasRows.length, 0, "Pending payment must NOT enter Kas Kantor before verifyPayment");
+
+    const preVerifyProfit = dbFinanceRepository.getProfitList().find((r) => r.orderNo === orderNoScenarioC);
+    assert.ok(!preVerifyProfit || preVerifyProfit.uangMasuk === 0, "Pending payment must NOT enter realized Profit/Revenue");
+
+    // 2. Verify Data Penjualan Projection metadata matches order C
     const contractRow = projectOrderToContractRow(created, inv, false);
     assert.strictEqual(contractRow["Nama Customer"], "Ahmad Fauzi (E2E-C)");
     assert.strictEqual(contractRow["Plat No"], "B 3003 E2E");
-    assert.strictEqual(contractRow["Uang Masuk dari Konsumen"], 400000);
-    assert.strictEqual(contractRow["Sisa Tagihan"], 600000);
-    assert.strictEqual(contractRow["Status Pembayaran"], "Kurang Bayar");
+    assert.strictEqual(contractRow["Total Tagihan Konsumen"], 1000000);
 
     // 3. Verify Belum Bayar list presence
     const allInvoices = dbFinanceRepository.getAllInvoices();
@@ -386,7 +427,8 @@ test("E2E BUSINESS WORKFLOW & FINANCIAL RECONCILIATION SUITE", async (t) => {
   await t.test("SCENARIO D: Pelunasan Kurang Bayar (Staged Payments -> Underpayment -> Full Settlement -> Anti-Double Payment)", () => {
     assert.ok(orderNoScenarioC, "Order C must have been created in Scenario C");
     const inv = dbFinanceRepository.getInvoiceByOrderNo(orderNoScenarioC)!;
-    assert.strictEqual(inv.sisa, 600000);
+    assert.strictEqual(inv.dibayar, 0);
+    assert.strictEqual(inv.sisa, 1000000);
 
     // 1. Test Payment Gating at Step 1 (Early Payment Attempt)
     assert.throws(
@@ -402,7 +444,49 @@ test("E2E BUSINESS WORKFLOW & FINANCIAL RECONCILIATION SUITE", async (t) => {
     // 2. Advance to Step 7 so payment gating is satisfied
     advanceOrderThroughStages(orderNoScenarioC, 7, false, 1000000);
 
-    // 3. Staged Payment Part 1: Underpayment (Add Rp200.000 -> sisa becomes 400.000)
+    // 2b. Verify initial 400.000 DP payment through official workflow -> single Kas Kantor debit + TERVERIFIKASI + audit
+    const pendingOrderBeforeVerify = orderService.getByOrderNo(orderNoScenarioC)!;
+    const initialPayId = pendingOrderBeforeVerify.payment?.paymentRecords?.[0]?.paymentId ||
+      pendingOrderBeforeVerify.payment?.paymentRecords?.[0]?.id;
+
+    const verifyDpOrder = orderService.verifyPayment(orderNoScenarioC, "Finance User", adminUser, 400000, "Verifikasi DP awal", {
+      fileName: "bukti-dp.png",
+      fileUrl: "/uploads/bukti-dp.png"
+    });
+    assert.strictEqual(verifyDpOrder.payment?.isPaymentVerified, true);
+    const verifiedDbPaysAfterDp = dbFinanceRepository.getPaymentsByOrderNo(orderNoScenarioC);
+    assert.ok(verifiedDbPaysAfterDp.some((p: any) => p.status_verifikasi === "TERVERIFIKASI" && Number(p.nominal) === 400000));
+
+    const invAfterDp = dbFinanceRepository.getInvoiceById(inv.id)!;
+    assert.strictEqual(invAfterDp.dibayar, 400000);
+    assert.strictEqual(invAfterDp.sisa, 600000);
+    assert.strictEqual(invAfterDp.status, "PARTIAL");
+
+    const dpKasEntries = db
+      .prepare("SELECT * FROM kas_kantor WHERE order_no = ? AND status = 'Debit'")
+      .all(orderNoScenarioC) as any[];
+    assert.strictEqual(dpKasEntries.length, 1, "Initial verification must post exactly one Debit entry in kas_kantor");
+    assert.strictEqual(Number(dpKasEntries[0].debit), 400000);
+
+    const verifyAuditRows = db
+      .prepare("SELECT * FROM audit_logs WHERE action = 'VERIFY_PAYMENT' AND details LIKE ?")
+      .all(`%${inv.invoiceNo}%`) as any[];
+    assert.ok(verifyAuditRows.length >= 1, "VERIFY_PAYMENT audit event must be recorded");
+
+    // Repeated verification on same payment must be rejected (zero double counting)
+    assert.throws(
+      () => financeService.verifyPayment({
+        orderNo: orderNoScenarioC,
+        paymentId: initialPayId,
+        confirmedAmount: 400000,
+        user: adminUser,
+        proofPayload: { fileName: "bukti-dp.png", fileUrl: "/uploads/bukti-dp.png" },
+      }),
+      (err: any) => err.code === "PAYMENT_ALREADY_VERIFIED" || err.code === "NO_PENDING_PAYMENT",
+      "Repeated verification of already verified payment must be rejected"
+    );
+
+    // 3. Staged Payment Part 1: Underpayment (Add Rp200.000 -> total dibayar becomes 600.000, sisa becomes 400.000)
     const pay1Key = `IDEMP-PAY-PART1-${Date.now()}`;
     financeService.recordPayment(inv.id, 200000, {
       idempotencyKey: pay1Key,
@@ -410,8 +494,8 @@ test("E2E BUSINESS WORKFLOW & FINANCIAL RECONCILIATION SUITE", async (t) => {
       buktiBayar: { fileName: "bukti1.png", fileUrl: "/uploads/bukti1.png" }
     }, adminUser);
 
-    // Confirm verification in order & invoice via orderService.verifyPayment
-    orderService.verifyPayment(orderNoScenarioC, "Finance User", adminUser, 600000, "Pelunasan tahap 1", {
+    // Confirm verification of staged payment 1 (200.000) via orderService.verifyPayment
+    orderService.verifyPayment(orderNoScenarioC, "Finance User", adminUser, 200000, "Pelunasan tahap 1", {
       fileName: "bukti1.png",
       fileUrl: "/uploads/bukti1.png"
     });
@@ -420,7 +504,7 @@ test("E2E BUSINESS WORKFLOW & FINANCIAL RECONCILIATION SUITE", async (t) => {
     assert.strictEqual(invAfterPay1.dibayar, 600000);
     assert.strictEqual(invAfterPay1.sisa, 400000);
 
-    // 4. Staged Payment Part 2: Full Pelunasan (Add Rp400.000 -> sisa becomes 0)
+    // 4. Staged Payment Part 2: Full Pelunasan (Add Rp400.000 -> total dibayar becomes 1.000.000, sisa becomes 0)
     const pay2Key = `IDEMP-PAY-PART2-${Date.now()}`;
     financeService.recordPayment(inv.id, 400000, {
       idempotencyKey: pay2Key,
@@ -428,8 +512,8 @@ test("E2E BUSINESS WORKFLOW & FINANCIAL RECONCILIATION SUITE", async (t) => {
       buktiBayar: { fileName: "bukti2.png", fileUrl: "/uploads/bukti2.png" }
     }, adminUser);
 
-    // Confirm full verification in order & invoice via orderService.verifyPayment
-    orderService.verifyPayment(orderNoScenarioC, "Finance User", adminUser, 1000000, "Pelunasan lunas", {
+    // Confirm verification of staged payment 2 (400.000) via orderService.verifyPayment
+    orderService.verifyPayment(orderNoScenarioC, "Finance User", adminUser, 400000, "Pelunasan lunas", {
       fileName: "bukti2.png",
       fileUrl: "/uploads/bukti2.png"
     });
@@ -648,23 +732,39 @@ test("E2E BUSINESS WORKFLOW & FINANCIAL RECONCILIATION SUITE", async (t) => {
     }, adminUser);
     assert.strictEqual(s2.currentStep, 2);
 
-    // 3. Step 2 -> Step 3: Verifikasi Dokumen
-    const s3 = orderService.advanceOrder(orderNo, "Verifikasi Dokumen", {
-      pickupCompleted: true,
-      messengerTaskStatus: "Dokumen Sudah Tersedia"
-    }, adminUser);
+    // 3. Step 2 -> Step 3: Verifikasi Dokumen (requires courier pickup completion)
+    orderService.acceptMessengerTask(orderNo, "Jemput Dokumen", courierUser);
+    orderService.startPickupTask(orderNo, courierUser);
+    orderService.completePickupTask(orderNo, { checklist: { stnkAsli: true } }, courierUser);
+    const s3 = orderService.advanceOrder(orderNo, "Verifikasi Dokumen", {}, adminUser);
     assert.strictEqual(s3.currentStep, 3);
 
     // 4. Step 3 -> Step 4: Proses Samsat
     const s4 = orderService.advanceOrder(orderNo, "Proses Samsat", {
-      documentsVerified: true
+      documentsVerified: true,
+      samsatMessengerId: "EMP-0004",
+      samsatMessengerName: "Ahmad Kurir",
+      samsatProcesses: [{ id: "comp-1", name: "Cek Fisik", status: "COMPLETED" }],
     }, adminUser);
     assert.strictEqual(s4.currentStep, 4);
 
-    // 5. Step 4 -> Step 5: Verifikasi Ulang
-    const updatedSamsat = (s4.samsatProcesses || []).map((p: any) => ({ ...p, status: "Selesai" }));
-    const s5 = orderService.advanceOrder(orderNo, "Verifikasi Ulang", {
+    // 5. Step 4 -> Step 5: Verifikasi Ulang (requires samsat + pickup completion)
+    const updatedSamsat = (s4.samsatProcesses && s4.samsatProcesses.length > 0
+      ? s4.samsatProcesses
+      : [{ id: "comp-1", name: "Cek Fisik", status: "COMPLETED" }]
+    ).map((p: any) => ({ ...p, status: "COMPLETED", isCompleted: true }));
+    dbOrderRepository.updateOrder(orderNo, {
       samsatProcesses: updatedSamsat,
+      samsatMessengerId: "EMP-0004",
+      samsatMessengerName: "Ahmad Kurir",
+      samsatPickupMessengerId: "EMP-0004",
+      samsatPickupMessengerName: "Ahmad Kurir",
+    });
+    orderService.acceptMessengerTask(orderNo, "Proses Samsat", courierUser);
+    orderService.completeSamsatProcess(orderNo, {}, courierUser);
+    orderService.acceptMessengerTask(orderNo, "Jemput Hasil Samsat", courierUser);
+    orderService.completeSamsatPickupTask(orderNo, courierUser, {});
+    const s5 = orderService.advanceOrder(orderNo, "Verifikasi Ulang", {
       samsatCompletedAt: new Date().toISOString()
     }, adminUser);
     assert.strictEqual(s5.currentStep, 5);
@@ -711,7 +811,9 @@ test("E2E BUSINESS WORKFLOW & FINANCIAL RECONCILIATION SUITE", async (t) => {
       documentApproval: { stage6Approved: true, stage6ApprovedAt: new Date().toISOString() } as any
     }, spvUser);
 
-    // 10. Step 7 -> Step 8: Dokumen Telah Diterima (Terminal State)
+    // 10. Step 7 -> Step 8: Dokumen Telah Diterima (Terminal State — requires delivery completion)
+    orderService.acceptMessengerTask(orderNo, "Pengantaran Dokumen", courierUser);
+    orderService.completeDeliveryTask(orderNo, { receiverName: "Maya Kusuma (Penerima Asli)" }, courierUser);
     const s8 = orderService.advanceOrder(orderNo, "Dokumen Telah Diterima", {
       penerimaDokumen: "Maya Kusuma (Penerima Asli)",
       recipientName: "Maya Kusuma (Penerima Asli)"

@@ -13,7 +13,7 @@ import { toast } from "sonner";
 import { auditLog, AuditLogEntry } from "../utils/auditLog";
 import { exportToCSV, exportToPrintablePDF } from "../utils/exportUtils";
 import { TablePagination } from "./ui/TablePagination";
-import { EmptyState } from "./ui/empty-state";
+import { DataTableShell, DataTableEmptyRow } from "./ui/data-table";
 
 interface AuditLogProps {
   currentUserRole: 'administrator' | 'finance' | 'admin' | 'messenger' | 'svp' | string;
@@ -361,94 +361,8 @@ export function AuditLog({ currentUserRole }: AuditLogProps) {
         </div>
 
         {/* Standardized Table View */}
-        <div className="rounded-lg border border-border bg-card overflow-hidden shadow-2xs flex-1 flex flex-col min-h-0">
-          <div className="w-full flex-1 flex flex-col min-h-0">
-            <Table 
-              containerClassName="overflow-y-auto overflow-x-auto max-h-[calc(100vh-270px)] sm:max-h-[calc(100vh-280px)] min-h-[160px]"
-              className={`w-full min-w-[780px] ${paginatedLogs.length === 0 ? "h-full" : ""}`}
-            >
-              <TableHeader className="sticky top-0 z-10 bg-card border-b border-border shadow-2xs">
-                <TableRow className="hover:bg-transparent">
-                  <TableHead className="w-[50px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-2">No</TableHead>
-                  <TableHead className="w-[135px] text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Waktu</TableHead>
-                  <TableHead className="w-[145px] text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Pengguna</TableHead>
-                  <TableHead className="w-[105px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Jabatan</TableHead>
-                  <TableHead className="w-[95px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Jenis Aksi</TableHead>
-                  <TableHead className="w-[125px] text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Modul</TableHead>
-                  <TableHead className="min-w-[220px] text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Detail</TableHead>
-                  <TableHead className="w-[65px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-2">Aksi</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {paginatedLogs.length > 0 ? (
-                  paginatedLogs.map((log, idx) => {
-                    const globalIndex = startIndex + idx + 1;
-                    const logDate = log.timestamp instanceof Date ? log.timestamp : new Date(log.timestamp);
-                    return (
-                      <TableRow key={log.id} className="hover:bg-muted/30 transition-colors border-b border-border/60 last:border-0 h-10">
-                        <TableCell className="w-[50px] text-center text-xs text-muted-foreground font-mono px-2 py-2 align-middle">
-                          {globalIndex}
-                        </TableCell>
-                        <TableCell className="w-[135px] px-3.5 py-2 text-xs text-muted-foreground whitespace-nowrap align-middle">
-                          <span className="font-normal text-foreground/90">
-                            {logDate.toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' })}
-                          </span>
-                          {" "}
-                          <span className="text-[11px] text-muted-foreground/75 font-mono">
-                            {logDate.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
-                          </span>
-                        </TableCell>
-                        <TableCell className="w-[145px] px-3.5 py-2 text-xs font-normal text-foreground/90 align-middle">
-                          {log.userName}
-                        </TableCell>
-                        <TableCell className="w-[105px] px-3.5 py-2 text-xs text-center align-middle">
-                          {getRoleBadge(log.userRole)}
-                        </TableCell>
-                        <TableCell className="w-[95px] px-3.5 py-2 text-xs text-center align-middle">
-                          {getActionBadge(log.action)}
-                        </TableCell>
-                        <TableCell className="w-[125px] px-3.5 py-2 text-xs font-normal text-foreground/90 align-middle">
-                          {log.module}
-                        </TableCell>
-                        <TableCell className="min-w-[220px] px-3.5 py-2 text-xs text-foreground/80 align-middle break-words">
-                          {log.details}
-                        </TableCell>
-                        <TableCell className="w-[65px] px-2 py-1.5 text-center align-middle">
-                          <div className="flex items-center justify-center">
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded transition-colors"
-                              onClick={() => {
-                                setSelectedLog(log);
-                                setIsViewDialogOpen(true);
-                              }}
-                              title="Lihat Detail"
-                              aria-label="Lihat detail aktivitas"
-                            >
-                              <Eye className="w-3.5 h-3.5" />
-                            </Button>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })
-                ) : (
-                  <TableRow className="h-full hover:bg-transparent">
-                    <TableCell colSpan={8} className="text-center py-8 align-middle p-0">
-                      <EmptyState
-                        title="Tidak ada data aktivitas"
-                        description="Belum ada riwayat aktivitas yang cocok dengan pencarian atau filter saat ini."
-                      />
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
-          </div>
-
-          {/* Standardized Table Pagination */}
-          <div className="border-t border-border/80 p-3 bg-card shrink-0 mt-auto">
+        <DataTableShell
+          footer={
             <TablePagination
               currentPage={currentPage}
               totalItems={filteredLogs.length}
@@ -460,8 +374,88 @@ export function AuditLog({ currentUserRole }: AuditLogProps) {
               }}
               pageSizeOptions={[10, 25, 50, 100]}
             />
-          </div>
-        </div>
+          }
+        >
+          <Table 
+            containerClassName="overflow-y-auto overflow-x-auto max-h-[calc(100vh-270px)] sm:max-h-[calc(100vh-280px)] min-h-[160px]"
+            className={`w-full min-w-[780px] ${paginatedLogs.length === 0 ? "h-full" : ""}`}
+          >
+            <TableHeader className="sticky top-0 z-10 bg-card border-b border-border shadow-2xs">
+              <TableRow className="hover:bg-transparent">
+                <TableHead className="w-[50px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-2">No</TableHead>
+                <TableHead className="w-[135px] text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Waktu</TableHead>
+                <TableHead className="w-[145px] text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Pengguna</TableHead>
+                <TableHead className="w-[105px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Jabatan</TableHead>
+                <TableHead className="w-[95px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Jenis Aksi</TableHead>
+                <TableHead className="w-[125px] text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Modul</TableHead>
+                <TableHead className="min-w-[220px] text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Detail</TableHead>
+                <TableHead className="w-[65px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-2">Aksi</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {paginatedLogs.length > 0 ? (
+                paginatedLogs.map((log, idx) => {
+                  const globalIndex = startIndex + idx + 1;
+                  const logDate = log.timestamp instanceof Date ? log.timestamp : new Date(log.timestamp);
+                  return (
+                    <TableRow key={log.id} className="hover:bg-muted/30 transition-colors border-b border-border/60 last:border-0 h-10">
+                      <TableCell className="w-[50px] text-center text-xs text-muted-foreground font-mono px-2 py-2 align-middle">
+                        {globalIndex}
+                      </TableCell>
+                      <TableCell className="w-[135px] px-3.5 py-2 text-xs text-muted-foreground whitespace-nowrap align-middle">
+                        <span className="font-normal text-foreground/90">
+                          {logDate.toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' })}
+                        </span>
+                        {" "}
+                        <span className="text-[11px] text-muted-foreground/75 font-mono">
+                          {logDate.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      </TableCell>
+                      <TableCell className="w-[145px] px-3.5 py-2 text-xs font-normal text-foreground/90 align-middle">
+                        {log.userName}
+                      </TableCell>
+                      <TableCell className="w-[105px] px-3.5 py-2 text-xs text-center align-middle">
+                        {getRoleBadge(log.userRole)}
+                      </TableCell>
+                      <TableCell className="w-[95px] px-3.5 py-2 text-xs text-center align-middle">
+                        {getActionBadge(log.action)}
+                      </TableCell>
+                      <TableCell className="w-[125px] px-3.5 py-2 text-xs font-normal text-foreground/90 align-middle">
+                        {log.module}
+                      </TableCell>
+                      <TableCell className="min-w-[220px] px-3.5 py-2 text-xs text-foreground/80 align-middle break-words">
+                        {log.details}
+                      </TableCell>
+                      <TableCell className="w-[65px] px-2 py-1.5 text-center align-middle">
+                        <div className="flex items-center justify-center">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded transition-colors"
+                            onClick={() => {
+                              setSelectedLog(log);
+                              setIsViewDialogOpen(true);
+                            }}
+                            title="Lihat Detail"
+                            aria-label="Lihat detail aktivitas"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })
+              ) : (
+                <DataTableEmptyRow
+                  colSpan={8}
+                  title="Tidak ada data aktivitas"
+                  description="Belum ada riwayat aktivitas yang cocok dengan pencarian atau filter saat ini."
+                />
+              )}
+            </TableBody>
+          </Table>
+        </DataTableShell>
       </Card>
 
       {/* Clear History Dialog Removed per BD-RBAC-01 (Immutable Audit Trail) */}

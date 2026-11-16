@@ -201,8 +201,8 @@ export function Dashboard() {
               <AreaChart data={chartData}>
                 <defs>
                   <linearGradient id="colorProfit" x1="0" y1="0" x2="0" y2="1">
-                    <stop key="stop-top" offset="5%" stopColor="#2563eb" stopOpacity={0.2}/>
-                    <stop key="stop-bottom" offset="95%" stopColor="#2563eb" stopOpacity={0}/>
+                    <stop key="stop-top" offset="5%" stopColor="var(--primary)" stopOpacity={0.2}/>
+                    <stop key="stop-bottom" offset="95%" stopColor="var(--primary)" stopOpacity={0}/>
                   </linearGradient>
                 </defs>
                 <CartesianGrid key="grid" strokeDasharray="3 3" stroke="currentColor" className="text-border/50" />
@@ -219,17 +219,17 @@ export function Dashboard() {
                   contentStyle={{
                     backgroundColor: 'var(--popover)',
                     borderColor: 'var(--border)',
-                    borderRadius: '8px',
+                    borderRadius: 'var(--radius-lg)',
                     color: 'var(--popover-foreground)',
                     fontSize: '12px',
-                    boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'
+                    boxShadow: 'var(--shadow-md)'
                   }}
                 />
                 <Area
                   key="area-profit"
                   type="monotone"
                   dataKey="profit"
-                  stroke="#2563eb"
+                  stroke="var(--primary)"
                   strokeWidth={2}
                   fillOpacity={1}
                   fill="url(#colorProfit)"

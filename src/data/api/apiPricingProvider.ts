@@ -9,6 +9,7 @@
 import { SamsatCostItem } from "../../domain/pricing/types";
 import { IPricingDataProvider } from "../../domain/pricing/types";
 import { APP_CONFIG } from "../../app/config/appConfig";
+import { permissionStore } from "../../app/data/permissionStore";
 
 export class ApiPricingProvider implements IPricingDataProvider {
   private baseUrl: string;
@@ -19,12 +20,38 @@ export class ApiPricingProvider implements IPricingDataProvider {
   private isInitialized = false;
   private isLoadingState = false;
   private lastError: Error | null = null;
+  private lastFetchedAuthKey: string | null = null;
+  private activeFetchPromise: Promise<void> | null = null;
+  private permissionUnsubscribe: (() => void) | null = null;
 
   constructor(baseUrl = APP_CONFIG.apiBaseUrl) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
-    if (typeof window === "undefined" || (typeof window !== "undefined" && window.localStorage?.getItem("auth_token"))) {
-      this.initFromApi();
+    this.permissionUnsubscribe = permissionStore.subscribe(() => {
+      const authStatus = permissionStore.getSessionAuthStatus();
+      if (authStatus === "unauthenticated" || authStatus === "forbidden") {
+        this.samsatItems = [];
+        this.serviceConfigs = [];
+        this.samsatOffices = [];
+        this.isInitialized = false;
+        this.lastFetchedAuthKey = null;
+        this.notify();
+        return;
+      }
+      if (authStatus === "authenticated" && typeof window !== "undefined" && this.canFetchFromApi()) {
+        const key = `${this.getAuthHeader().Authorization || ""}::${permissionStore.getSessionRole() || ""}`;
+        if (!this.isInitialized || this.lastFetchedAuthKey !== key) {
+          void this.initFromApi();
+        }
+      }
+    });
+    if (typeof window !== "undefined" && this.canFetchFromApi()) {
+      void this.initFromApi();
     }
+  }
+
+  private canFetchFromApi(): boolean {
+    if (!this.getAuthHeader().Authorization) return false;
+    return permissionStore.getSessionAuthStatus() === "authenticated";
   }
 
   private getAuthHeader(): Record<string, string> {
@@ -46,66 +73,78 @@ export class ApiPricingProvider implements IPricingDataProvider {
 
   public async initFromApi(): Promise<void> {
     const authHeaders = this.getAuthHeader();
-    if (!authHeaders.Authorization) {
+    if (!authHeaders.Authorization || (typeof window !== "undefined" && permissionStore.getSessionAuthStatus() !== "authenticated")) {
       this.isLoadingState = false;
       return;
     }
+    if (this.activeFetchPromise) return this.activeFetchPromise;
+
+    const capturedKey = `${authHeaders.Authorization || ""}::${permissionStore.getSessionRole() || ""}`;
     this.isLoadingState = true;
     this.lastError = null;
-    try {
-      const res = await fetch(`${this.baseUrl}/pricing/samsat`, {
-        headers: { "Content-Type": "application/json", ...authHeaders },
-      });
-      if (!res.ok) {
-        if (res.status === 401 && typeof window !== "undefined") {
-          window.dispatchEvent(new CustomEvent("sun89_auth_unauthorized"));
-        }
-        throw new Error(`Gagal memuat master pricing dari server (HTTP ${res.status})`);
-      }
-      const payload = await res.json();
-      if (payload.success && Array.isArray(payload.data)) {
-        this.samsatItems = payload.data;
-      }
-
-      // Load Service Pricing configs
+    this.activeFetchPromise = (async () => {
       try {
-        const serviceRes = await fetch(`${this.baseUrl}/pricing/services`, {
+        const res = await fetch(`${this.baseUrl}/pricing/samsat`, {
           headers: { "Content-Type": "application/json", ...authHeaders },
         });
-        if (serviceRes.ok) {
-          const servicePayload = await serviceRes.json();
-          if (servicePayload.success && Array.isArray(servicePayload.data)) {
-            this.serviceConfigs = servicePayload.data;
+        if (!this.canFetchFromApi()) return;
+        if (!res.ok) {
+          if (res.status === 401 && typeof window !== "undefined") {
+            window.dispatchEvent(new CustomEvent("sun89_auth_unauthorized"));
           }
+          throw new Error(`Gagal memuat master pricing dari server (HTTP ${res.status})`);
         }
-      } catch (err) {
-        console.warn("Could not load service pricing configs from backend:", err);
-      }
+        const payload = await res.json();
+        if (!this.canFetchFromApi()) return;
+        if (payload.success && Array.isArray(payload.data)) {
+          this.samsatItems = payload.data;
+        }
 
-      // Load Samsat offices from backend
-      try {
-        const officeRes = await fetch(`${this.baseUrl}/samsat/offices`, {
-          headers: { "Content-Type": "application/json", ...authHeaders },
-        });
-        if (officeRes.ok) {
-          const officePayload = await officeRes.json();
-          if (officePayload.success && Array.isArray(officePayload.data)) {
-            this.samsatOffices = officePayload.data;
+        // Load Service Pricing configs
+        try {
+          const serviceRes = await fetch(`${this.baseUrl}/pricing/services`, {
+            headers: { "Content-Type": "application/json", ...authHeaders },
+          });
+          if (serviceRes.ok) {
+            const servicePayload = await serviceRes.json();
+            if (servicePayload.success && Array.isArray(servicePayload.data)) {
+              this.serviceConfigs = servicePayload.data;
+            }
           }
+        } catch (err) {
+          console.warn("Could not load service pricing configs from backend:", err);
         }
-      } catch (err) {
-        console.warn("Could not load samsat offices from backend:", err);
-      }
 
-      this.isInitialized = true;
-      this.isLoadingState = false;
-      this.notify();
-    } catch (err: any) {
-      this.isLoadingState = false;
-      this.lastError = err instanceof Error ? err : new Error(String(err));
-      this.notify();
-      // In API mode, do not inject mock items silently on failure
-    }
+        // Load Samsat offices from backend
+        try {
+          const officeRes = await fetch(`${this.baseUrl}/samsat/offices`, {
+            headers: { "Content-Type": "application/json", ...authHeaders },
+          });
+          if (officeRes.ok) {
+            const officePayload = await officeRes.json();
+            if (officePayload.success && Array.isArray(officePayload.data)) {
+              this.samsatOffices = officePayload.data;
+            }
+          }
+        } catch (err) {
+          console.warn("Could not load samsat offices from backend:", err);
+        }
+
+        this.isInitialized = true;
+        this.lastFetchedAuthKey = capturedKey;
+        this.isLoadingState = false;
+        this.notify();
+      } catch (err: any) {
+        this.isLoadingState = false;
+        this.lastError = err instanceof Error ? err : new Error(String(err));
+        this.notify();
+        // In API mode, do not inject mock items silently on failure
+      } finally {
+        this.activeFetchPromise = null;
+      }
+    })();
+
+    return this.activeFetchPromise;
   }
 
   public subscribe(listener: () => void): () => void {
@@ -349,9 +388,13 @@ export class ApiPricingProvider implements IPricingDataProvider {
   // ─── SAMSAT OPERATIONAL TARIFFS (PER-SAMSAT PRICING) ─────────────────────────
 
   public async getSamsatOperationalTariffs(samsatId?: string): Promise<any[]> {
+    const authHeaders = this.getAuthHeader();
+    if (!authHeaders.Authorization) {
+      return [];
+    }
     const query = samsatId ? `?samsatId=${encodeURIComponent(samsatId)}` : "";
     const res = await fetch(`${this.baseUrl}/pricing/samsat-tariffs${query}`, {
-      headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
+      headers: { "Content-Type": "application/json", ...authHeaders },
     });
     if (!res.ok) {
       const errJson = await res.json().catch(() => ({}));

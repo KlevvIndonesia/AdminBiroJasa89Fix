@@ -34,7 +34,6 @@ import {
   ReimbursementCategory,
   ReimbursementStatus,
   ReimbursementRequest,
-  KNOWN_MESSENGERS,
   WAITING_REASONS,
   SAMSAT_WAITING_REASONS,
   SamsatWaitingReason,
@@ -66,7 +65,6 @@ export type {
 };
 
 export {
-  KNOWN_MESSENGERS,
   WAITING_REASONS,
   SAMSAT_WAITING_REASONS,
   getStatusDisplayLabel,
@@ -158,6 +156,8 @@ export function deriveSingleTaskFromOrder(order: OperationalOrder): MessengerTas
       } else if (step === 2) {
         if (order.pickupCompleted || order.messengerTaskStatus === "Dokumen Sudah Tersedia") {
           defaultStatus = "Selesai";
+        } else if (order.messengerTaskStatus === "Pending") {
+          defaultStatus = "Pending";
         } else if (order.messengerTaskStatus === "Sedang Dijemput" || order.messengerTaskStatus === "Dalam Proses") {
           defaultStatus = "Dalam Proses";
         } else {
@@ -194,7 +194,9 @@ export function deriveSingleTaskFromOrder(order: OperationalOrder): MessengerTas
         keteranganTugas = "Proses Samsat";
         messenger = order.samsatMessenger?.trim() || order.samsatMessengerNama?.trim() || "Belum Ditugaskan";
         assignedMessengerId = order.samsatMessengerId;
-        if (
+        if (order.messengerTaskStatus === "Pending") {
+          defaultStatus = "Pending";
+        } else if (
           order.samsatStatus === "Menuju Samsat" ||
           order.samsatStatus === "Sedang Proses Samsat" ||
           (order.samsatSubstatus && order.samsatSubstatus.startsWith("Sedang")) ||
@@ -232,6 +234,8 @@ export function deriveSingleTaskFromOrder(order: OperationalOrder): MessengerTas
     if (step === 7) {
       if (order.deliveryStatus === "Dokumen Diserahkan" || order.isReceived) {
         defaultStatus = "Selesai";
+      } else if (order.messengerTaskStatus === "Pending") {
+        defaultStatus = "Pending";
       } else if (order.deliveryStatus === "Sedang Diantar" || order.messengerTaskStatus === "Dalam Proses") {
         defaultStatus = "Dalam Proses";
       } else {
@@ -1152,7 +1156,7 @@ export interface UserContext {
 }
 
 function toAuditRole(role: string): "administrator" | "finance" | "admin" | "messenger" {
-  if (role === "administrator" || role === "svp") return "administrator";
+  if (role === "administrator") return "administrator";
   if (role === "finance") return "finance";
   if (role === "messenger") return "messenger";
   return "admin";
@@ -1164,7 +1168,7 @@ export function checkTaskOwnership(
   taskType?: MessengerTaskType
 ): { allowed: boolean; error?: string } {
   // Admin and SVP have global operational supervision
-  if (user.role === "admin" || user.role === "administrator" || user.role === "svp") {
+  if (user.role === "admin" || user.role === "administrator") {
     return { allowed: true };
   }
 
@@ -1428,7 +1432,7 @@ export function completePickupTaskAction(
     order.messengerTaskStatus === "Dalam Proses" ||
     (order as any).status === "Dalam Proses" ||
     Boolean(order.startedAt);
-  if (!isStarted) {
+  if (!isStarted && user.role !== "admin" && user.role !== "administrator") {
     const err = "Penjemputan berkas belum dimulai. Tekan 'Mulai Tugas' terlebih dahulu.";
     return createActionResult(Promise.resolve({ success: false, error: err }), { success: false, error: err });
   }
@@ -1742,7 +1746,7 @@ export function completeDeliveryTaskAction(
     order.messengerTaskStatus === "Dalam Proses" ||
     (order as any).status === "Dalam Proses" ||
     Boolean((order as any).deliveryStartedAt);
-  if (!isStarted) {
+  if (!isStarted && user.role !== "admin" && user.role !== "administrator") {
     const err = "Pengantaran berkas belum dimulai. Tekan 'Mulai Tugas' terlebih dahulu.";
     return createActionResult(Promise.resolve({ success: false, error: err }), { success: false, error: err });
   }
@@ -2222,29 +2226,37 @@ export async function reassignMessengerTaskAction(
   const currentAcceptance = (order.taskAcceptance || {})[taskType];
   const oldCourier = currentAcceptance?.courierName || order.messenger || "Kurir Sebelumnya";
 
-  // Backend API call
-  try {
-    const authHeaders = getAuthHeader();
-    if (authHeaders.Authorization) {
-      const res = await fetch(
-        `${APP_CONFIG.apiBaseUrl}/orders/${orderNo}/tasks/${encodeURIComponent(taskType)}/reassign`,
+  // Backend API call (Authoritative in authenticated API mode — NEVER mask failure with local fallback)
+  const authHeaders = getAuthHeader();
+  if (typeof fetch !== "undefined" && authHeaders.Authorization) {
+    try {
+      const res = await fetchWithTimeout(
+        `${APP_CONFIG.apiBaseUrl}/orders/${encodeURIComponent(orderNo)}/tasks/${encodeURIComponent(taskType)}/reassign`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json", ...authHeaders },
           body: JSON.stringify({
             newCourierName: newCourierName.trim(),
-            newCourierId,
+            newCourierId: newCourierId.trim(),
             reason: cleanReason,
           }),
         }
       );
       if (!res.ok) {
-        const payload = await res.json().catch(() => ({}));
-        return { success: false, error: payload.message || `Gagal mengalihkan tugas (${res.status})` };
+        const parsedErr = await parseApiErrorResponse(res, `Gagal mengalihkan tugas (${res.status})`);
+        return { success: false, error: parsedErr?.message || `Gagal mengalihkan tugas (${res.status})` };
       }
+      const data = await res.json().catch(() => ({}));
+      if (data?.data && typeof data.data === "object") {
+        applyServerSnapshot(orderNo, data.data);
+      }
+      return { success: true };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.message || "Gagal menghubungi server untuk pengalihan tugas.",
+      };
     }
-  } catch (err) {
-    console.warn("API reassign error, falling back to local store update:", err);
   }
 
   const updatedAcceptance = {
@@ -2296,14 +2308,47 @@ export async function reassignMessengerTaskAction(
   return { success, error: success ? undefined : "Gagal mengalihkan tugas di store" };
 }
 
+const inFlightSamsatSubprogress = new Map<string, Promise<{ success: boolean; error?: string }>>();
+const inFlightSamsatStart = new Map<string, Promise<{ success: boolean; error?: string }>>();
+
+export interface SamsatSubprogressOptions {
+  subprogress: string;
+  componentId?: string;
+  componentUpdate?: {
+    name?: string;
+    category?: string;
+    masterPrice?: number;
+    nominal?: number;
+    actualOrderPrice?: number;
+    isCustom?: boolean;
+    status?: MessengerComponentProgress["status"];
+    estimatedDurationMinutes?: number;
+    isCustomDuration?: boolean;
+    customDurationDays?: number;
+    startedAt?: string;
+    waitingReason?: string;
+  };
+}
+
 /**
  * Messenger departs to Samsat (Menuju Samsat)
+ * Routes through dedicated Samsat start endpoint in API mode so generic PUT never carries `samsatStatus`.
  */
-export function startSamsatJourney(orderNo: string, user: UserContext): { success: boolean; error?: string } {
+export function startSamsatJourney(orderNo: string, user: UserContext): TaskActionResult {
+  const authHeaders = getAuthHeader();
+  if (typeof fetch !== "undefined" && authHeaders.Authorization) {
+    return startSamsatProcessAction(orderNo, user);
+  }
+
   const order = orderStore.getOrderByNo(orderNo);
-  if (!order) return { success: false, error: `Order ${orderNo} tidak ditemukan` };
+  if (!order) {
+    const err = `Order ${orderNo} tidak ditemukan`;
+    return createActionResult(Promise.resolve({ success: false, error: err }), { success: false, error: err });
+  }
   const authCheck = checkTaskOwnership(order, user);
-  if (!authCheck.allowed) return { success: false, error: authCheck.error };
+  if (!authCheck.allowed) {
+    return createActionResult(Promise.resolve({ success: false, error: authCheck.error }), { success: false, error: authCheck.error });
+  }
 
   const nowIso = new Date().toISOString();
   const timelineEvent: MessengerTimelineEvent = {
@@ -2321,17 +2366,29 @@ export function startSamsatJourney(orderNo: string, user: UserContext): { succes
     samsatJourneyStartedAt: nowIso,
     messengerTimeline: [timelineEvent, ...existingTimeline],
   });
-  return { success, error: success ? undefined : "Gagal memperbarui status ke Menuju Samsat" };
+  const syncResult = { success, error: success ? undefined : "Gagal memperbarui status ke Menuju Samsat" };
+  return createActionResult(Promise.resolve(syncResult), syncResult);
 }
 
 /**
  * Messenger arrives at Samsat (Tiba di Samsat / Mulai Proses Samsat)
+ * Routes through dedicated Samsat start endpoint in API mode so generic PUT never carries `samsatStatus`.
  */
-export function arriveAtSamsat(orderNo: string, user: UserContext): { success: boolean; error?: string } {
+export function arriveAtSamsat(orderNo: string, user: UserContext): TaskActionResult {
+  const authHeaders = getAuthHeader();
+  if (typeof fetch !== "undefined" && authHeaders.Authorization) {
+    return startSamsatProcessAction(orderNo, user);
+  }
+
   const order = orderStore.getOrderByNo(orderNo);
-  if (!order) return { success: false, error: `Order ${orderNo} tidak ditemukan` };
+  if (!order) {
+    const err = `Order ${orderNo} tidak ditemukan`;
+    return createActionResult(Promise.resolve({ success: false, error: err }), { success: false, error: err });
+  }
   const authCheck = checkTaskOwnership(order, user);
-  if (!authCheck.allowed) return { success: false, error: authCheck.error };
+  if (!authCheck.allowed) {
+    return createActionResult(Promise.resolve({ success: false, error: authCheck.error }), { success: false, error: authCheck.error });
+  }
 
   const nowIso = new Date().toISOString();
   const timelineEvent: MessengerTimelineEvent = {
@@ -2349,7 +2406,129 @@ export function arriveAtSamsat(orderNo: string, user: UserContext): { success: b
     samsatArrivedAt: nowIso,
     messengerTimeline: [timelineEvent, ...existingTimeline],
   });
-  return { success, error: success ? undefined : "Gagal memperbarui status ke Sedang Proses Samsat" };
+  const syncResult = { success, error: success ? undefined : "Gagal memperbarui status ke Sedang Proses Samsat" };
+  return createActionResult(Promise.resolve(syncResult), syncResult);
+}
+
+/**
+ * Dedicated Samsat Subprogress & Component Start Action (Final Patch).
+ * Persists `samsatSubstatus`, `currentSamsatProcess`, and optional `componentUpdate` via
+ * `POST /api/orders/:orderNo/samsat/subprogress` without sending protected `samsatStatus` via PUT.
+ */
+export function updateSamsatSubprogressAction(
+  orderNo: string,
+  options: SamsatSubprogressOptions,
+  user: UserContext
+): TaskActionResult {
+  const order = orderStore.getOrderByNo(orderNo);
+  if (!order) {
+    const err = `Order ${orderNo} tidak ditemukan`;
+    return createActionResult(Promise.resolve({ success: false, error: err }), { success: false, error: err });
+  }
+
+  const authCheck = checkTaskOwnership(order, user, "Proses Samsat");
+  if (!authCheck.allowed) {
+    return createActionResult(Promise.resolve({ success: false, error: authCheck.error }), { success: false, error: authCheck.error });
+  }
+
+  const isSamsatStarted =
+    order.samsatStatus === "Sedang Proses Samsat" ||
+    order.samsatStatus === "Menuju Samsat" ||
+    order.samsatStatus === "Di Lokasi Samsat";
+  if (!isSamsatStarted) {
+    const err = "Proses Samsat belum dimulai. Tekan 'Mulai Proses Samsat' terlebih dahulu.";
+    return createActionResult(Promise.resolve({ success: false, error: err }), { success: false, error: err });
+  }
+
+  const cleanSubprogress = (options.subprogress || options.componentUpdate?.name || "").trim();
+  if (!cleanSubprogress) {
+    const err = "Nama subprogress atau komponen Samsat wajib diisi.";
+    return createActionResult(Promise.resolve({ success: false, error: err }), { success: false, error: err });
+  }
+
+  const applyLocal = (): { success: boolean; error?: string } => {
+    if (options.componentId && options.componentUpdate) {
+      const compRes = updateMessengerComponent(orderNo, options.componentId, options.componentUpdate, user);
+      if (!compRes.success) {
+        return compRes;
+      }
+    }
+
+    const latestOrder = orderStore.getOrderByNo(orderNo) || order;
+    const formattedSubstatus = cleanSubprogress.startsWith("Sedang ") ? cleanSubprogress : `Sedang ${cleanSubprogress}`;
+    const nowIso = new Date().toISOString();
+    const timelineEvent: MessengerTimelineEvent = {
+      id: `tl-${Date.now()}`,
+      timestamp: nowIso,
+      title: `Progres Samsat: ${formattedSubstatus}`,
+      note: `Tahapan pengurusan diperbarui oleh ${user.userName}`,
+      author: user.userName,
+      type: "STATUS_CHANGE",
+    };
+    const existingTimeline = latestOrder.messengerTimeline || [];
+
+    const success = orderStore.updateOrder(orderNo, {
+      samsatSubstatus: formattedSubstatus,
+      currentSamsatProcess: formattedSubstatus,
+      messengerTimeline: [timelineEvent, ...existingTimeline],
+    });
+    return { success, error: success ? undefined : "Gagal memperbarui subprogress Samsat" };
+  };
+
+  const authHeaders = getAuthHeader();
+  if (typeof fetch !== "undefined" && authHeaders.Authorization) {
+    const dedupeKey = `${orderNo}::${options.componentId || cleanSubprogress}`;
+    const existingInFlight = inFlightSamsatSubprogress.get(dedupeKey);
+    if (existingInFlight) {
+      return createActionResult(existingInFlight);
+    }
+
+    const promise = (async () => {
+      try {
+        const res = await fetchWithTimeout(
+          `${APP_CONFIG.apiBaseUrl}/orders/${encodeURIComponent(orderNo)}/samsat/subprogress`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...authHeaders,
+            },
+            body: JSON.stringify({
+              subprogress: cleanSubprogress,
+              componentId: options.componentId,
+              componentUpdate: options.componentUpdate,
+            }),
+          }
+        );
+        if (!res.ok) {
+          const apiErr = await parseApiErrorResponse(
+            res,
+            `Gagal memperbarui subprogress Samsat (${res.status})`
+          );
+          return { success: false, error: apiErr.message };
+        }
+        const data = await res.json().catch(() => ({}));
+        if (data?.data && typeof data.data === "object") {
+          applyServerSnapshot(orderNo, data.data);
+          return { success: true };
+        }
+        return { success: false, error: "Respons server untuk subprogress Samsat tidak valid." };
+      } catch (err: any) {
+        return {
+          success: false,
+          error: err?.message || "Gagal menghubungi server untuk memperbarui subprogress Samsat",
+        };
+      } finally {
+        inFlightSamsatSubprogress.delete(dedupeKey);
+      }
+    })();
+
+    inFlightSamsatSubprogress.set(dedupeKey, promise);
+    return createActionResult(promise);
+  }
+
+  const syncResult = applyLocal();
+  return createActionResult(Promise.resolve(syncResult), syncResult);
 }
 
 /**
@@ -2359,31 +2538,8 @@ export function updateSamsatSubprogress(
   orderNo: string,
   subprogress: string,
   user: UserContext
-): { success: boolean; error?: string } {
-  const order = orderStore.getOrderByNo(orderNo);
-  if (!order) return { success: false, error: `Order ${orderNo} tidak ditemukan` };
-  const authCheck = checkTaskOwnership(order, user);
-  if (!authCheck.allowed) return { success: false, error: authCheck.error };
-
-  const formattedSubstatus = subprogress.startsWith("Sedang ") ? subprogress : `Sedang ${subprogress}`;
-  const nowIso = new Date().toISOString();
-  const timelineEvent: MessengerTimelineEvent = {
-    id: `tl-${Date.now()}`,
-    timestamp: nowIso,
-    title: `Progres Samsat: ${formattedSubstatus}`,
-    note: `Tahapan pengurusan diperbarui oleh ${user.userName}`,
-    author: user.userName,
-    type: "STATUS_CHANGE",
-  };
-  const existingTimeline = order.messengerTimeline || [];
-
-  const success = orderStore.updateOrder(orderNo, {
-    samsatStatus: "Sedang Proses Samsat",
-    samsatSubstatus: formattedSubstatus,
-    currentSamsatProcess: formattedSubstatus,
-    messengerTimeline: [timelineEvent, ...existingTimeline],
-  });
-  return { success, error: success ? undefined : "Gagal memperbarui subprogress Samsat" };
+): TaskActionResult {
+  return updateSamsatSubprogressAction(orderNo, { subprogress }, user);
 }
 
 /**
@@ -2618,7 +2774,7 @@ export async function recoverSamsatPickupKendalaAction(
   }
 
   const role = (user.role || "").toLowerCase();
-  const isAdmin = role === "administrator" || role === "admin" || role === "svp";
+  const isAdmin = role === "administrator" || role === "admin";
   if (!isAdmin) {
     const errObj = new ActionApiError(
       403,
@@ -2654,123 +2810,77 @@ export async function recoverSamsatPickupKendalaAction(
   }
 
   const authHeaders = getAuthHeader();
-  const shouldCallApi = Boolean(authHeaders.Authorization);
 
-  if (shouldCallApi) {
-    try {
-      const res = await fetchWithTimeout(
-        `${APP_CONFIG.apiBaseUrl}/orders/${encodeURIComponent(orderNo)}/samsat-pickup/recover`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...authHeaders,
-          },
+  try {
+    const res = await fetchWithTimeout(
+      `${APP_CONFIG.apiBaseUrl}/orders/${encodeURIComponent(orderNo)}/samsat-pickup/recover`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders,
         },
-        15000
-      );
-      if (!res.ok) {
-        const apiErr = await parseApiErrorResponse(
-          res,
-          `Gagal memulihkan kendala order ${orderNo}.`
-        );
-        return {
-          success: false,
-          error: apiErr.message,
-          code: apiErr.code,
-          statusCode: apiErr.statusCode,
-          errorObj: apiErr,
-        };
-      }
-
-      const data = await res.json().catch(() => ({}));
-      const backendOrder: OperationalOrder | undefined = data?.data;
-      if (backendOrder && typeof backendOrder === "object") {
-        const provider: any = (orderStore as any).repository?.getProvider?.();
-        if (provider && typeof provider.applyServerOrderSnapshot === "function") {
-          provider.applyServerOrderSnapshot(orderNo, backendOrder);
-        } else {
-          orderStore.updateOrder(orderNo, backendOrder);
-        }
-        return { success: true };
-      }
-
-      return { success: true };
-    } catch (apiErr: any) {
-      if (apiErr instanceof ActionApiError || apiErr?.isActionApiError) {
-        const normalizedErr =
-          apiErr instanceof ActionApiError
-            ? apiErr
-            : new ActionApiError(
-                apiErr.statusCode ?? 500,
-                apiErr.code || "INTERNAL_SERVER_ERROR",
-                apiErr.message || `Gagal memulihkan kendala order ${orderNo}.`
-              );
-        return {
-          success: false,
-          error: normalizedErr.message,
-          code: normalizedErr.code,
-          statusCode: normalizedErr.statusCode,
-          errorObj: normalizedErr,
-        };
-      }
-      const netErr = new ActionApiError(
-        0,
-        "NETWORK_ERROR",
-        apiErr?.message || "Tidak dapat terhubung ke server untuk memulihkan kendala."
+      },
+      15000
+    );
+    if (!res.ok) {
+      const apiErr = await parseApiErrorResponse(
+        res,
+        `Gagal memulihkan kendala order ${orderNo}.`
       );
       return {
         success: false,
-        error: netErr.message,
-        code: netErr.code,
-        statusCode: netErr.statusCode,
-        errorObj: netErr,
+        error: apiErr.message,
+        code: apiErr.code,
+        statusCode: apiErr.statusCode,
+        errorObj: apiErr,
       };
     }
-  }
 
-  // Offline / standalone mock-mode fallback
-  const nowIso = new Date().toISOString();
-  const timelineEvent: MessengerTimelineEvent = {
-    id: `tl-recover-pickup-${Date.now()}`,
-    timestamp: nowIso,
-    title: "Kendala Jemput Hasil Dipulihkan",
-    note: "Status kendala penjemputan berkas hasil Samsat telah diselesaikan dan dipulihkan oleh Admin/Supervisor. Penjemputan dilanjutkan.",
-    author: user.userName,
-    type: "STATUS_CHANGE",
-  };
+    const data = await res.json().catch(() => ({}));
+    const backendOrder: OperationalOrder | undefined = data?.data;
+    if (backendOrder && typeof backendOrder === "object") {
+      const provider: any = (orderStore as any).repository?.getProvider?.();
+      if (provider && typeof provider.applyServerOrderSnapshot === "function") {
+        provider.applyServerOrderSnapshot(orderNo, backendOrder);
+      } else {
+        orderStore.updateOrder(orderNo, backendOrder);
+      }
+      return { success: true };
+    }
 
-  const pickupTaskAcc = (order.taskAcceptance || {})["Jemput Hasil Samsat"] || {};
-  const success = orderStore.updateOrder(orderNo, {
-    samsatPickupStatus: "Sedang Jemput Dokumen Samsat",
-    taskAcceptance: {
-      ...(order.taskAcceptance || {}),
-      ["Jemput Hasil Samsat"]: {
-        ...pickupTaskAcc,
-        hasKendala: false,
-        recoveredAt: nowIso,
-        recoveredBy: user.userName,
-      },
-    },
-    messengerTimeline: [timelineEvent, ...(order.messengerTimeline || [])],
-  } as any);
-
-  if (!success) {
-    const errObj = new ActionApiError(
-      500,
-      "INTERNAL_SERVER_ERROR",
-      "Gagal memulihkan kendala penjemputan hasil Samsat."
+    return { success: true };
+  } catch (apiErr: any) {
+    if (apiErr instanceof ActionApiError || apiErr?.isActionApiError) {
+      const normalizedErr =
+        apiErr instanceof ActionApiError
+          ? apiErr
+          : new ActionApiError(
+              apiErr.statusCode ?? 500,
+              apiErr.code || "INTERNAL_SERVER_ERROR",
+              apiErr.message || `Gagal memulihkan kendala order ${orderNo}.`
+            );
+      return {
+        success: false,
+        error: normalizedErr.message,
+        code: normalizedErr.code,
+        statusCode: normalizedErr.statusCode,
+        errorObj: normalizedErr,
+      };
+    }
+    const netErr = new ActionApiError(
+      0,
+      "NETWORK_ERROR",
+      apiErr?.message || "Tidak dapat terhubung ke server untuk memulihkan kendala."
     );
     return {
       success: false,
-      error: errObj.message,
-      code: errObj.code,
-      statusCode: errObj.statusCode,
-      errorObj: errObj,
+      error: netErr.message,
+      code: netErr.code,
+      statusCode: netErr.statusCode,
+      errorObj: netErr,
     };
   }
-
-  return { success: true };
 }
 
 /**
@@ -2877,89 +2987,166 @@ export function completeSamsatPickupTaskAction(
 }
 
 /**
+ * Dedicated Task Status Update Action (Final Patch).
+ * Calls `POST /api/orders/:orderNo/tasks/:taskType/status` in API mode so protected
+ * `messengerTaskStatus` is never sent via generic `PUT /api/orders/:orderNo`.
+ */
+export function updateMessengerTaskStatusAction(
+  orderNo: string,
+  newStatus: MessengerTaskStatusCode | MessengerTaskStatus,
+  options: { taskType?: MessengerTaskType; waitingReason?: string; note?: string },
+  user: UserContext
+): TaskActionResult {
+  const order = orderStore.getOrderByNo(orderNo);
+  if (!order) {
+    const err = `Order ${orderNo} tidak ditemukan`;
+    return createActionResult(Promise.resolve({ success: false, error: err }), { success: false, error: err });
+  }
+
+  const task = deriveSingleTaskFromOrder(order);
+  const resolvedTaskType = options.taskType || task.keteranganTugas;
+
+  const authCheck = checkTaskOwnership(order, user, resolvedTaskType);
+  if (!authCheck.allowed) {
+    return createActionResult(
+      Promise.resolve({ success: false, error: authCheck.error }),
+      { success: false, error: authCheck.error }
+    );
+  }
+
+  // Validation: WAITING / Pending status requires reason
+  const isWaiting = newStatus === "WAITING" || newStatus === "Pending";
+  const cleanWaitingReason = (options.waitingReason || "").trim();
+  const cleanNote = (options.note || "").trim();
+  if (isWaiting) {
+    if (user.role === "messenger" && !cleanWaitingReason) {
+      const err = "Alasan menunggu wajib diisi saat memilih status Menunggu (WAITING).";
+      return createActionResult(Promise.resolve({ success: false, error: err }), { success: false, error: err });
+    }
+    if (!cleanWaitingReason && !cleanNote) {
+      const err = "Alasan menunggu wajib diisi saat memilih status Menunggu (Pending).";
+      return createActionResult(Promise.resolve({ success: false, error: err }), { success: false, error: err });
+    }
+  }
+
+  const applyLocal = (): { success: boolean; error?: string } => {
+    // Map to legacy display status for order store
+    let mappedDisplayStatus: MessengerTaskStatus;
+    switch (newStatus) {
+      case "WAITING":
+      case "Pending":
+        mappedDisplayStatus = "Pending";
+        break;
+      case "IN_PROGRESS":
+      case "Dalam Proses":
+        mappedDisplayStatus = "Dalam Proses";
+        break;
+      case "COMPLETED":
+      case "Selesai":
+        mappedDisplayStatus = "Selesai";
+        break;
+      default:
+        mappedDisplayStatus = "Belum Diambil";
+    }
+
+    const wasUnassigned = isTaskAvailableUnassigned(task);
+    const rawEmpId = typeof user.employeeId === "string" ? user.employeeId.trim() : "";
+    const rawUserId = typeof user.userId === "string" ? user.userId.trim() : "";
+    const resolvedEmpId = rawEmpId || rawUserId;
+    if (
+      user.role === "messenger" &&
+      (!resolvedEmpId || resolvedEmpId === "EMP-MSG" || resolvedEmpId === "Belum Ditugaskan" || resolvedEmpId === "-")
+    ) {
+      return { success: false, error: "Identitas kurir tidak valid atau tidak terverifikasi." };
+    }
+
+    const nowIso = new Date().toISOString();
+    const timelineEvent: MessengerTimelineEvent = {
+      id: `tl-${Date.now()}`,
+      timestamp: nowIso,
+      title: `Ubah Status: ${getStatusDisplayLabel(newStatus)}`,
+      note: cleanWaitingReason
+        ? `Alasan: ${cleanWaitingReason}.${cleanNote ? ` Catatan: ${cleanNote}` : ""}`
+        : cleanNote,
+      author: user.userName,
+      type: "STATUS_CHANGE",
+    };
+
+    const existingTimeline = order.messengerTimeline || [];
+
+    const updates: Partial<OperationalOrder> = {
+      messengerTaskStatus: mappedDisplayStatus,
+      messengerTaskNotes: cleanNote || cleanWaitingReason || order.messengerTaskNotes,
+      messengerTimeline: [timelineEvent, ...existingTimeline],
+    };
+
+    if (wasUnassigned && user.role === "messenger") {
+      updates.messenger = user.userName;
+      updates.assignedMessengerName = user.userName;
+      updates.assignedMessengerId = resolvedEmpId;
+    }
+
+    const success = orderStore.updateOrder(orderNo, updates);
+    return { success, error: success ? undefined : "Gagal memperbarui status tugas di store" };
+  };
+
+  const authHeaders = getAuthHeader();
+  if (typeof fetch !== "undefined" && authHeaders.Authorization) {
+    const promise = (async () => {
+      try {
+        const res = await fetchWithTimeout(
+          `${APP_CONFIG.apiBaseUrl}/orders/${encodeURIComponent(orderNo)}/tasks/${encodeURIComponent(resolvedTaskType)}/status`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...authHeaders,
+            },
+            body: JSON.stringify({
+              status: newStatus,
+              waitingReason: cleanWaitingReason || undefined,
+              note: cleanNote || undefined,
+            }),
+          }
+        );
+        if (!res.ok) {
+          const apiErr = await parseApiErrorResponse(
+            res,
+            `Gagal memperbarui status tugas (${res.status})`
+          );
+          return { success: false, error: apiErr.message };
+        }
+        const data = await res.json().catch(() => ({}));
+        if (data?.data && typeof data.data === "object") {
+          applyServerSnapshot(orderNo, data.data);
+          return { success: true };
+        }
+        return { success: false, error: "Respons server untuk pembaruan status tugas tidak valid." };
+      } catch (err: any) {
+        return {
+          success: false,
+          error: err?.message || "Gagal menghubungi server untuk memperbarui status tugas",
+        };
+      }
+    })();
+    return createActionResult(promise);
+  }
+
+  const syncResult = applyLocal();
+  return createActionResult(Promise.resolve(syncResult), syncResult);
+}
+
+/**
  * Update task status
  * Validates mandatory waiting reason when selecting WAITING / Pending
  */
 export function updateMessengerTaskStatus(
   orderNo: string,
   newStatus: MessengerTaskStatusCode | MessengerTaskStatus,
-  options: { waitingReason?: string; note?: string },
+  options: { taskType?: MessengerTaskType; waitingReason?: string; note?: string },
   user: UserContext
-): { success: boolean; error?: string } {
-  const order = orderStore.getOrderByNo(orderNo);
-  if (!order) {
-    return { success: false, error: `Order ${orderNo} tidak ditemukan` };
-  }
-
-  const authCheck = checkTaskOwnership(order, user);
-  if (!authCheck.allowed) {
-    return { success: false, error: authCheck.error };
-  }
-
-  // Validation: WAITING status requires reason
-  const isWaiting = newStatus === "WAITING" || newStatus === "Pending";
-  if (isWaiting && (!options.waitingReason || !options.waitingReason.trim())) {
-    return {
-      success: false,
-      error: "Alasan menunggu wajib diisi saat memilih status Menunggu (WAITING).",
-    };
-  }
-
-  // Map to legacy display status for order store
-  let mappedDisplayStatus: MessengerTaskStatus;
-  switch (newStatus) {
-    case "WAITING":
-    case "Pending":
-      mappedDisplayStatus = "Pending";
-      break;
-    case "IN_PROGRESS":
-    case "Dalam Proses":
-      mappedDisplayStatus = "Dalam Proses";
-      break;
-    case "COMPLETED":
-    case "Selesai":
-      mappedDisplayStatus = "Selesai";
-      break;
-    default:
-      mappedDisplayStatus = "Belum Diambil";
-  }
-
-  const task = deriveSingleTaskFromOrder(order);
-  const wasUnassigned = isTaskAvailableUnassigned(task);
-  const rawEmpId = typeof user.employeeId === "string" ? user.employeeId.trim() : "";
-  const rawUserId = typeof user.userId === "string" ? user.userId.trim() : "";
-  const resolvedEmpId = rawEmpId || rawUserId;
-  if (!resolvedEmpId || resolvedEmpId === "EMP-MSG" || resolvedEmpId === "Belum Ditugaskan" || resolvedEmpId === "-") {
-    return { success: false, error: "Identitas kurir tidak valid atau tidak terverifikasi." };
-  }
-
-  const nowIso = new Date().toISOString();
-  const timelineEvent: MessengerTimelineEvent = {
-    id: `tl-${Date.now()}`,
-    timestamp: nowIso,
-    title: `Ubah Status: ${getStatusDisplayLabel(newStatus)}`,
-    note: options.waitingReason ? `Alasan: ${options.waitingReason}. Catatan: ${options.note || "-"}` : (options.note || ""),
-    author: user.userName,
-    type: "STATUS_CHANGE",
-  };
-
-  const existingTimeline = order.messengerTimeline || [];
-
-  const updates: Partial<OperationalOrder> = {
-    messengerTaskStatus: mappedDisplayStatus,
-    messengerTaskNotes: options.note || options.waitingReason || order.messengerTaskNotes,
-    messengerTimeline: [timelineEvent, ...existingTimeline],
-  };
-
-  if (wasUnassigned) {
-    updates.messenger = user.userName;
-    updates.assignedMessengerName = user.userName;
-    updates.assignedMessengerId = resolvedEmpId;
-  }
-
-  const success = orderStore.updateOrder(orderNo, updates);
-
-  return { success, error: success ? undefined : "Gagal memperbarui status tugas di store" };
+): TaskActionResult {
+  return updateMessengerTaskStatusAction(orderNo, newStatus, options, user);
 }
 
 /**
@@ -3948,6 +4135,11 @@ export function startSamsatProcessAction(
 
   const authHeaders = getAuthHeader();
   if (typeof fetch !== "undefined" && authHeaders.Authorization) {
+    const existingInFlight = inFlightSamsatStart.get(orderNo);
+    if (existingInFlight) {
+      return createActionResult(existingInFlight);
+    }
+
     const promise = (async () => {
       try {
         const res = await fetchWithTimeout(
@@ -3961,19 +4153,23 @@ export function startSamsatProcessAction(
           }
         );
         if (!res.ok) {
-          const errorMsg = await parseApiErrorResponse(res, `Gagal memulai proses Samsat (${res.status})`);
-          return { success: false, error: errorMsg };
+          const apiErr = await parseApiErrorResponse(res, `Gagal memulai proses Samsat (${res.status})`);
+          return { success: false, error: apiErr.message };
         }
         const data = await res.json().catch(() => ({}));
         if (data?.data && typeof data.data === "object") {
           applyServerSnapshot(orderNo, data.data);
           return { success: true };
         }
+        return { success: false, error: "Respons server untuk memulai proses Samsat tidak valid." };
       } catch (err: any) {
         return { success: false, error: err?.message || "Gagal menghubungi server untuk memulai proses Samsat" };
+      } finally {
+        inFlightSamsatStart.delete(orderNo);
       }
-      return applyLocal();
     })();
+
+    inFlightSamsatStart.set(orderNo, promise);
     return createActionResult(promise);
   }
 
@@ -4132,55 +4328,102 @@ export function releaseSamsatTaskAction(
   orderNo: string,
   user: UserContext,
   notes?: string
-): { success: boolean; error?: string } {
+): TaskActionResult {
   const order = orderStore.getOrderByNo(orderNo);
-  if (!order) return { success: false, error: "Order tidak ditemukan" };
+  if (!order) {
+    const err = "Order tidak ditemukan";
+    return createActionResult(Promise.resolve({ success: false, error: err }), { success: false, error: err });
+  }
 
-  const authCheck = checkTaskOwnership(order, user);
+  const authCheck = checkTaskOwnership(order, user, "Proses Samsat");
   if (!authCheck.allowed) {
-    return { success: false, error: authCheck.error };
+    return createActionResult(
+      Promise.resolve({ success: false, error: authCheck.error }),
+      { success: false, error: authCheck.error }
+    );
   }
 
-  const nowIso = new Date().toISOString();
-  const timelineEvent: MessengerTimelineEvent = {
-    id: `tl-rel-${Date.now()}`,
-    timestamp: nowIso,
-    title: "Tugas Samsat Dikembalikan ke Daftar Tugas",
-    note: notes || `Kurir ${user.userName} menyimpan progres dan mengembalikan sisa pengurusan Samsat ke pool untuk dilanjutkan rekan kurir.`,
-    author: user.userName,
-    type: "STATUS_CHANGE",
+  const applyLocal = (): { success: boolean; error?: string } => {
+    const nowIso = new Date().toISOString();
+    const timelineEvent: MessengerTimelineEvent = {
+      id: `tl-rel-${Date.now()}`,
+      timestamp: nowIso,
+      title: "Tugas Samsat Diserahkan ke Tim",
+      note:
+        user.role === "messenger"
+          ? `Kurir ${user.userName} menyimpan progres dan mengembalikan sisa pengurusan Samsat ke pool untuk dilanjutkan rekan kurir.`
+          : notes || `Tugas Samsat dikembalikan ke pool antrean oleh ${user.userName}.`,
+      author: user.userName,
+      type: "ASSIGNMENT",
+    };
+
+    const updatedAcceptance = {
+      ...(order.taskAcceptance || {}),
+      ["Proses Samsat"]: {
+        status: "PENDING" as const,
+        isLocked: false,
+        releasedAt: nowIso,
+        releasedBy: user.userName,
+      },
+    };
+
+    const success = orderStore.updateOrder(orderNo, {
+      samsatMessenger: "Belum Ditugaskan",
+      samsatMessengerNama: "Belum Ditugaskan",
+      samsatMessengerId: undefined,
+      messengerTaskStatus: "Belum Diambil",
+      taskAcceptance: updatedAcceptance,
+      messengerTimeline: [timelineEvent, ...(order.messengerTimeline || [])],
+    });
+
+    if (success) {
+      try {
+        auditLog.log({
+          userId: user.employeeId || "emp-messenger",
+          userName: user.userName,
+          userRole: toAuditRole(user.role),
+          action: "UPDATE",
+          module: "Proses Samsat",
+          details: `Tugas Samsat untuk order ${orderNo} dikembalikan ke Daftar Tugas oleh ${user.userName}`,
+          metadata: { orderNo },
+        });
+      } catch {}
+    }
+
+    return { success, error: success ? undefined : "Gagal melepaskan tugas" };
   };
 
-  const updatedAcceptance = {
-    ...(order.taskAcceptance || {}),
-    ["Proses Samsat"]: {
-      status: "PENDING" as const,
-      isLocked: false,
-    },
-  };
-
-  const success = orderStore.updateOrder(orderNo, {
-    samsatMessenger: "Belum Ditugaskan",
-    samsatMessengerNama: "Belum Ditugaskan",
-    samsatMessengerId: undefined,
-    taskAcceptance: updatedAcceptance,
-    messengerTimeline: [timelineEvent, ...(order.messengerTimeline || [])],
-  });
-
-  if (success) {
-    try {
-      auditLog.log({
-        userId: user.employeeId || "emp-messenger",
-        userName: user.userName,
-        userRole: toAuditRole(user.role),
-        action: "UPDATE",
-        module: "Proses Samsat",
-        details: `Tugas Samsat untuk order ${orderNo} dikembalikan ke Daftar Tugas oleh ${user.userName}`,
-        metadata: { orderNo },
-      });
-    } catch {}
+  const authHeaders = getAuthHeader();
+  if (typeof fetch !== "undefined" && authHeaders.Authorization) {
+    const promise = (async () => {
+      try {
+        const cleanNotes = user.role === "messenger" ? undefined : notes?.trim() || undefined;
+        const res = await fetchWithTimeout(
+          `${APP_CONFIG.apiBaseUrl}/orders/${encodeURIComponent(orderNo)}/samsat/release`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeaders },
+            body: JSON.stringify(cleanNotes ? { notes: cleanNotes } : {}),
+          }
+        );
+        if (!res.ok) {
+          const errorMsg = await parseApiErrorResponse(res, `Gagal melepaskan tugas Samsat (${res.status})`);
+          return { success: false, error: errorMsg };
+        }
+        const data = await res.json().catch(() => ({}));
+        if (data?.data && typeof data.data === "object") {
+          applyServerSnapshot(orderNo, data.data);
+          return { success: true };
+        }
+      } catch (err: any) {
+        return { success: false, error: err?.message || "Gagal menghubungi server untuk menyerahkan tugas Samsat" };
+      }
+      return applyLocal();
+    })();
+    return createActionResult(promise);
   }
 
-  return { success, error: success ? undefined : "Gagal melepaskan tugas" };
+  const syncResult = applyLocal();
+  return createActionResult(Promise.resolve(syncResult), syncResult);
 }
 

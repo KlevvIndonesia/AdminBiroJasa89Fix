@@ -16,8 +16,12 @@
  * 12. Regression test untuk layanan lain (Mutasi Antar Samsat & Balik Nama)
  */
 
-import test from "node:test";
+import test, { before, after } from "node:test";
 import assert from "node:assert";
+import http from "node:http";
+import { createApp } from "../server/src/app";
+import { pricingRepository } from "../src/data/repositories/pricingRepository";
+import { ApiPricingProvider } from "../src/data/api/apiPricingProvider";
 import { resolveServiceFee } from "../src/domain/pricing/pricingResolver";
 import { calculateEstimation } from "../src/domain/estimation/estimationEngine";
 import {
@@ -32,6 +36,44 @@ import { estimationStore } from "../src/app/data/estimationStore";
 import { pricingStore } from "../src/app/data/pricingStore";
 import { SERVICE_STANDARD_BASELINES } from "../src/app/components/BiayaLayanan";
 import { EstimationInput } from "../src/domain/estimation/types";
+
+let server: http.Server | null = null;
+const prevToken = process.env.AUTH_TOKEN;
+
+before(async () => {
+  const started = await new Promise<{ server: http.Server; baseUrl: string }>((resolve) => {
+    const app = createApp();
+    const s = http.createServer(app);
+    s.listen(0, () => {
+      const addr = s.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      resolve({ server: s, baseUrl: `http://localhost:${port}` });
+    });
+  });
+  server = started.server;
+
+  const loginRes = await fetch(`${started.baseUrl}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "svp@birojasa.com", password: "admin123" }),
+  });
+  assert.strictEqual(loginRes.status, 200);
+  const loginBody = (await loginRes.json()) as any;
+  process.env.AUTH_TOKEN = loginBody.data.token;
+
+  pricingRepository.setProvider(new ApiPricingProvider(`${started.baseUrl}/api`));
+  await pricingStore.initFromApi();
+});
+
+after(() => {
+  if (prevToken === undefined) {
+    delete process.env.AUTH_TOKEN;
+  } else {
+    process.env.AUTH_TOKEN = prevToken;
+  }
+  pricingRepository.setProvider(new ApiPricingProvider());
+  server?.close();
+});
 
 test("1. R4 Mutasi LD default service fee resolves to Rp 1.500.000", () => {
   const resolved = resolveServiceFee({

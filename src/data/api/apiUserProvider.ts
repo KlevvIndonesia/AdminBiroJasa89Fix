@@ -8,6 +8,7 @@
 
 import { SystemUser, IUserDataProvider, AuthUserSession, AuthResult, AuthErrorCode } from "../../domain/user/types";
 import { APP_CONFIG } from "../../app/config/appConfig";
+import { permissionStore } from "../../app/data/permissionStore";
 
 export class ApiUserProvider implements IUserDataProvider {
   private baseUrl: string;
@@ -19,7 +20,12 @@ export class ApiUserProvider implements IUserDataProvider {
 
   constructor(baseUrl = APP_CONFIG.apiBaseUrl) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
-    if (typeof window === "undefined" || (typeof window !== "undefined" && window.localStorage?.getItem("auth_token"))) {
+    if (
+      typeof window !== "undefined" &&
+      window.localStorage?.getItem("auth_token") &&
+      (permissionStore.hasInitializedFromApi() || permissionStore.hasExplicitSessionHydration()) &&
+      permissionStore.canAccessApiEndpoint("users")
+    ) {
       this.initFromApi();
     }
   }
@@ -43,8 +49,9 @@ export class ApiUserProvider implements IUserDataProvider {
 
   public async initFromApi(): Promise<void> {
     const authHeaders = this.getAuthHeader();
-    if (!authHeaders.Authorization) {
+    if (!authHeaders.Authorization || !permissionStore.canAccessApiEndpoint("users")) {
       this.isLoadingState = false;
+      this.lastError = null;
       return;
     }
     this.isLoadingState = true;
@@ -95,6 +102,18 @@ export class ApiUserProvider implements IUserDataProvider {
 
   public getError(): string | null {
     return this.lastError ? this.lastError.message : null;
+  }
+
+  public clearSessionData(): void {
+    this.users = [];
+    this.isInitialized = false;
+    this.isLoadingState = false;
+    this.lastError = null;
+    this.notify();
+  }
+
+  public isReady(): boolean {
+    return this.isInitialized;
   }
 
   public getAll(): SystemUser[] {

@@ -1,18 +1,11 @@
+import { loginSvp } from "./helpers/authHelper";
 import { test, expect } from "@playwright/test";
 
 const BASE_URL = "http://localhost:3000";
 
-async function loginFinance(page: any) {
-  await page.goto(`${BASE_URL}/login`);
-  await page.fill("#email", "finance@birojasa.com");
-  await page.fill("#password", "finance123");
-  await page.click("button[type='submit']");
-  await page.waitForURL("**/dashboard", { timeout: 15000 });
-}
-
 test.describe("Phase 8.7: Global Table Layout & Employee Selectors", () => {
   test.beforeEach(async ({ page }) => {
-    await loginFinance(page);
+    await loginSvp(page);
   });
 
   test("1. Global Table Layout: table container stretches to card bottom and anchors horizontal scrollbar", async ({ page }) => {
@@ -47,59 +40,52 @@ test.describe("Phase 8.7: Global Table Layout & Employee Selectors", () => {
     await page.goto(`${BASE_URL}/finance/kas-messenger`);
     await page.waitForLoadState("domcontentloaded");
 
-    // Verify table container has rendered
     const tableContainer = page.locator('[data-slot="table-container"]');
     await expect(tableContainer).toBeVisible();
 
-    // Open add page
-    const tambahBtn = page.getByRole("button", { name: "Tambah" });
-    await tambahBtn.click();
+    // Open AddKasMessengerModal dialog
+    await page.getByRole("button", { name: "Tambah" }).click();
+    const dialog = page.locator("[role='dialog']").filter({ hasText: "Tambah Transaksi Kas Messenger" });
+    await expect(dialog).toBeVisible();
 
-    // Ensure we are on FinanceAddPage
-    await expect(page.getByText("Tambah data kas messenger")).toBeVisible();
-
-    // Verify Messenger field is a Select trigger, NOT a raw text input
-    await expect(page.getByText("Nama messenger")).toBeVisible();
-
-    // Click messenger select trigger
-    const messengerSelect = page.getByText("Pilih messenger");
-    await expect(messengerSelect).toBeVisible();
-    await messengerSelect.click();
-
-    // Verify active messengers are listed
-    await expect(page.getByRole("option", { name: "Rudi Hartono" })).toBeVisible();
-    await expect(page.getByRole("option", { name: "Joko Prasetyo" })).toBeVisible();
-
-    // Verify non-messengers (e.g. Siti Nurhaliza, Andi Wijaya) are NOT present in messenger options
-    await expect(page.getByRole("option", { name: "Siti Nurhaliza" })).toHaveCount(0);
-    await expect(page.getByRole("option", { name: "Andi Wijaya" })).toHaveCount(0);
-
-    // Select Rudi Hartono
-    await page.getByRole("option", { name: "Rudi Hartono" }).click();
-
-    // Verify Jenis select trigger has sentence case options
-    const jenisSelect = page.getByText("Pilih jenis transaksi");
+    // Verify Jenis Kas select trigger has sentence-case options
+    const jenisSelect = dialog.locator("button[role='combobox']").filter({ hasText: /Petty cash|Operasional|Biaya Samsat|Pilih jenis/ }).first();
     await expect(jenisSelect).toBeVisible();
     await jenisSelect.click();
-
     await expect(page.getByRole("option", { name: "Petty cash" })).toBeVisible();
     await expect(page.getByRole("option", { name: "Operasional" })).toBeVisible();
     await expect(page.getByRole("option", { name: "Biaya Samsat" })).toBeVisible();
     await page.getByRole("option", { name: "Petty cash" }).click();
 
-    // Fill other fields and submit
-    await page.fill("input[placeholder='Rincian keperluan kas']", "Bensin operasional armada");
-    await page.locator("input[type='number']").first().fill("75000");
+    // Verify Nama Messenger combobox only lists live active messengers (never non-messengers)
+    const messengerSelect = dialog.locator("button[role='combobox']").filter({ hasText: /Budi Santoso|Andi Pratama|Rudi Hartono|Pilih kurir/ }).first();
+    await expect(messengerSelect).toBeVisible();
+    await messengerSelect.click();
+    await expect(page.getByRole("option", { name: "Budi Santoso" })).toBeVisible();
+    await expect(page.getByRole("option", { name: "Andi Pratama" })).toBeVisible();
+    await expect(page.getByRole("option", { name: "Admin Super (SVP)" })).toHaveCount(0);
+    await expect(page.getByRole("option", { name: "Finance User" })).toHaveCount(0);
+    await page.getByRole("option", { name: "Budi Santoso" }).click();
 
-    const submitBtn = page.getByRole("button", { name: /Simpan data/i });
-    await submitBtn.click();
+    // Select Kas Masuk (Top-Up) with active Payment Method & submit cleanly against real backend
+    await dialog.getByRole("button", { name: "Kas Masuk (Top-Up)" }).click();
+    await dialog.locator("input[placeholder='0']").fill("75000");
+    await dialog.locator("input[placeholder*='Top-up saldo']").fill("Top-up bensin operasional armada");
 
-    // Returns to table view
-    await expect(page.getByText("Buku kas harian messenger")).toBeVisible({ timeout: 10000 });
+    const pmSelect = dialog.getByText("Pilih Metode Pembayaran (Tunai / Rekening Bank)...");
+    await pmSelect.click();
+    await page.getByRole("option").first().click();
 
-    // Verify newly added row displays sentence-case jenis and selected messenger
-    await expect(page.getByText("Petty cash").first()).toBeVisible();
-    await expect(page.getByText("Rudi Hartono").first()).toBeVisible();
+    const createPromise = page.waitForResponse(
+      (res) => res.url().includes("/api/finance/kas-messenger") && res.request().method() === "POST"
+    );
+    await dialog.getByRole("button", { name: /Simpan Transaksi/i }).click();
+    const createRes = await createPromise;
+    expect(createRes.status()).toBe(201);
+    await expect(dialog).toBeHidden({ timeout: 10000 });
+
+    await expect(page.locator("table").getByText("Petty cash").first()).toBeVisible();
+    await expect(page.locator("table").getByText("Budi Santoso").first()).toBeVisible();
   });
 
   test("3. Kas Kantor: Penanggung Jawab dropdown derived from non-messengers, historical '-' preservation", async ({ page }) => {
@@ -107,87 +93,70 @@ test.describe("Phase 8.7: Global Table Layout & Employee Selectors", () => {
     await page.goto(`${BASE_URL}/finance/kas-kantor`);
     await page.waitForLoadState("domcontentloaded");
 
-    // Verify table has "Penanggung jawab" column header button
-    const thPJ = page.getByRole("button", { name: "Penanggung jawab" });
+    const thPJ = page.getByRole("button", { name: /Penanggung jawab/i });
     await expect(thPJ).toBeVisible();
 
-    // Open add page
-    const tambahBtn = page.getByRole("button", { name: "Tambah" });
-    await tambahBtn.click();
+    // Open AddKasKantorModal dialog
+    await page.getByRole("button", { name: "Tambah" }).click();
+    const dialog = page.locator("[role='dialog']").filter({ hasText: "Tambah Transaksi Kas Kantor" });
+    await expect(dialog).toBeVisible();
 
-    await expect(page.getByText("Tambah transaksi kas kantor")).toBeVisible();
-
-    // Find Penanggung jawab field
-    const pjSelect = page.getByText("Pilih penanggung jawab");
+    // Verify Penanggung Jawab dropdown lists active non-messengers and excludes messengers
+    const pjSelect = dialog.locator("button[role='combobox']").filter({ hasText: /Admin Super|Admin User|Finance User|Siti Nurhaliza|Pilih penanggung jawab/ }).first();
     await expect(pjSelect).toBeVisible();
     await pjSelect.click();
+    await expect(page.getByRole("option", { name: "Admin Super (SVP)" })).toBeVisible();
+    await expect(page.getByRole("option", { name: "Finance User" })).toBeVisible();
+    await expect(page.getByRole("option", { name: "Budi Santoso" })).toHaveCount(0);
+    await expect(page.getByRole("option", { name: "Andi Pratama" })).toHaveCount(0);
+    await page.getByRole("option", { name: "Admin Super (SVP)" }).click();
 
-    // Verify active non-messengers are options
-    await expect(page.getByRole("option", { name: "Siti Nurhaliza" })).toBeVisible();
-    await expect(page.getByRole("option", { name: "Andi Wijaya" })).toBeVisible();
+    // Fill transaction
+    await dialog.getByRole("button", { name: "Debit (Masuk)" }).click();
+    await dialog.locator("input[placeholder='0']").fill("150000");
+    await dialog.locator("input[placeholder*='Penerimaan pembayaran']").fill("Penerimaan titipan berkas kantor");
 
-    // Verify messengers are EXCLUDED from Penanggung jawab
-    await expect(page.getByRole("option", { name: "Rudi Hartono" })).toHaveCount(0);
-    await expect(page.getByRole("option", { name: "Joko Prasetyo" })).toHaveCount(0);
+    // Select Payment Method
+    const pmSelect = dialog.getByText("Pilih Metode Pembayaran (Tunai / Rekening Bank)...");
+    await pmSelect.click();
+    await page.getByRole("option").first().click();
 
-    // Select Siti Nurhaliza
-    await page.getByRole("option", { name: "Siti Nurhaliza" }).click();
-
-    // Select Tipe arus kas
-    const statusSelect = page.getByText("Pilih tipe arus kas");
-    await statusSelect.click();
-    await page.getByRole("option", { name: "Debit" }).click();
-
-    // Fill Keterangan
-    await page.fill("input[placeholder*='Pembayaran invoice']", "Penerimaan titipan berkas kantor");
-
-    // Submit
-    const submitBtn = page.getByRole("button", { name: /Simpan data/i });
-    await submitBtn.click();
-
-    await expect(page.getByText("Buku kas besar kantor")).toBeVisible({ timeout: 10000 });
-
-    // Verify newly added entry shows Siti Nurhaliza in the table
-    await expect(page.getByText("Siti Nurhaliza").first()).toBeVisible();
+    await dialog.getByRole("button", { name: /Simpan Transaksi/i }).click();
+    await expect(dialog).toBeHidden({ timeout: 10000 });
+    await expect(page.locator("table").getByText("Admin Super (SVP)").first()).toBeVisible();
   });
 
-  test("4. Pengeluaran: Penanggung Jawab dropdown and historical '-' preservation", async ({ page }) => {
+  test("4. Pengeluaran route consolidates into Kas Kantor Kredit with non-messenger Penanggung Jawab dropdown", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(`${BASE_URL}/finance/pengeluaran`);
+    await page.waitForURL("**/finance/kas-kantor", { timeout: 10000 });
     await page.waitForLoadState("domcontentloaded");
 
-    // Verify table has "Penanggung jawab" column header button
-    const thPJ = page.getByRole("button", { name: "Penanggung jawab" });
+    const thPJ = page.getByRole("button", { name: /Penanggung jawab/i });
     await expect(thPJ).toBeVisible();
 
-    // Open add page
-    const tambahBtn = page.getByRole("button", { name: "Tambah" });
-    await tambahBtn.click();
-
-    await expect(page.getByText("Tambah data pengeluaran")).toBeVisible();
-
-    // Find Penanggung jawab field
-    const pjSelect = page.getByText("Pilih penanggung jawab");
-    await expect(pjSelect).toBeVisible();
-    await pjSelect.click();
+    await page.getByRole("button", { name: "Tambah" }).click();
+    const dialog = page.locator("[role='dialog']").filter({ hasText: "Tambah Transaksi Kas Kantor" });
+    await expect(dialog).toBeVisible();
 
     // Verify non-messengers present, messengers excluded
-    await expect(page.getByRole("option", { name: "Andi Wijaya" })).toBeVisible();
-    await expect(page.getByRole("option", { name: "Rudi Hartono" })).toHaveCount(0);
+    const pjSelect = dialog.locator("button[role='combobox']").filter({ hasText: /Admin Super|Admin User|Finance User|Siti Nurhaliza|Pilih penanggung jawab/ }).first();
+    await pjSelect.click();
+    await expect(page.getByRole("option", { name: "Finance User" })).toBeVisible();
+    await expect(page.getByRole("option", { name: "Budi Santoso" })).toHaveCount(0);
+    await page.getByRole("option", { name: "Finance User" }).click();
 
-    // Select Andi Wijaya
-    await page.getByRole("option", { name: "Andi Wijaya" }).click();
+    // Record expense as Kredit (Keluar)
+    await dialog.getByRole("button", { name: "Kredit (Keluar)" }).click();
+    await dialog.locator("input[placeholder='0']").fill("250000");
+    await dialog.locator("input[placeholder*='Penerimaan pembayaran']").fill("Pembelian token listrik kantor cabang");
 
-    // Fill Keterangan and nominal
-    await page.fill("input[placeholder*='Listrik bulanan']", "Pembelian token listrik kantor cabang");
-    await page.locator("input[type='number']").first().fill("250000");
+    const pmSelect = dialog.getByText("Pilih Metode Pembayaran (Tunai / Rekening Bank)...");
+    await pmSelect.click();
+    await page.getByRole("option").first().click();
 
-    const submitBtn = page.getByRole("button", { name: /Simpan data/i });
-    await submitBtn.click();
-
-    await expect(page.getByText("Daftar beban operasional")).toBeVisible({ timeout: 10000 });
-
-    // Verify Andi Wijaya appears in the table
-    await expect(page.getByText("Andi Wijaya").first()).toBeVisible();
+    await dialog.getByRole("button", { name: /Simpan Transaksi/i }).click();
+    await expect(dialog).toBeHidden({ timeout: 10000 });
+    await expect(page.locator("table").getByText("Finance User").first()).toBeVisible();
   });
 });

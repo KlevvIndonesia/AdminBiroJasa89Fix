@@ -2,6 +2,7 @@ import React, { useState, useMemo, useCallback } from "react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
+import { Textarea } from "./ui/textarea";
 import { Label } from "./ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "./ui/dialog";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog";
@@ -17,6 +18,8 @@ import {
   ArrowUpDown,
   ArrowUp,
   ArrowDown,
+  ChevronUp,
+  ChevronDown,
   Calendar,
   SlidersHorizontal,
   Download,
@@ -52,7 +55,7 @@ import {
   SelectValue,
 } from "./ui/select";
 import { TablePagination } from "./ui/TablePagination";
-import { EmptyState } from "./ui/empty-state";
+import { DataTableShell, DataTableEmptyRow } from "./ui/data-table";
 import { cn } from "./ui/utils";
 import { motion, AnimatePresence } from "motion/react";
 import { toast } from "sonner";
@@ -79,9 +82,31 @@ export interface Column {
   filterable?: boolean;
   filterType?: "text" | "select" | "date";
   filterOptions?: string[];
-  align?: "left" | "right";
+  align?: "left" | "right" | "center";
   isPrimaryMobile?: boolean; // True for the 2 primary columns on mobile
   render?: (value: any, item?: any) => React.ReactNode;
+  exportValue?: (value: any, item?: any) => string | number | null | undefined;
+}
+
+function normalizeColumnOrder(storedOrder: unknown, cols: Column[]): string[] {
+  const validKeys = new Set(cols.map((c) => c.key));
+  const result: string[] = [];
+  const seen = new Set<string>();
+  if (Array.isArray(storedOrder)) {
+    for (const k of storedOrder) {
+      if (typeof k === "string" && validKeys.has(k) && !seen.has(k)) {
+        result.push(k);
+        seen.add(k);
+      }
+    }
+  }
+  for (const col of cols) {
+    if (!seen.has(col.key)) {
+      result.push(col.key);
+      seen.add(col.key);
+    }
+  }
+  return result;
 }
 
 export interface FieldConfig {
@@ -99,8 +124,8 @@ interface EnhancedTableWithDialogsProps {
   columns: Column[];
   data: any[];
   onAdd?: () => void;
-  onEdit?: (item: any, updatedData: any) => void;
-  onDelete?: (item: any, reason?: string) => void;
+  onEdit?: (item: any, updatedData: any) => Promise<any> | boolean | void;
+  onDelete?: (item: any, reason?: string) => Promise<any> | void;
   onView?: (item: any) => void;
   onPrint?: (item: any) => void;
   onExport?: (format: 'csv' | 'pdf') => void;
@@ -118,6 +143,7 @@ interface EnhancedTableWithDialogsProps {
   renderBottom?: (context: { filteredData: any[]; sortedData: any[]; totalItems: number }) => React.ReactNode;
   onFilteredDataChange?: (filteredData: any[]) => void;
   tableContainerClassName?: string;
+  toolbarExtras?: React.ReactNode;
 }
 
 type SortDirection = "asc" | "desc" | null;
@@ -145,6 +171,7 @@ export function EnhancedTableWithDialogs({
   renderBottom,
   onFilteredDataChange,
   tableContainerClassName,
+  toolbarExtras,
 }: EnhancedTableWithDialogsProps) {
   // Search inputs (Requirement 12: separate date and text searches)
   const [searchTerm, setSearchTerm] = useState("");
@@ -189,7 +216,7 @@ export function EnhancedTableWithDialogs({
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDirection, setSortDirection] = useState<SortDirection>(null);
 
-  // Desktop Table Settings: Saved & Draft Font size & column visibility (Explicit Save Model)
+  // Desktop Table Settings: Saved & Draft Font size, column visibility, and column order (Explicit Save Model)
   const [savedTableFontSize, setSavedTableFontSize] = useState<"1x" | "2x" | "3x">(() => {
     if (savedSettings?.tableFontSize && ["1x", "2x", "3x"].includes(savedSettings.tableFontSize)) {
       return savedSettings.tableFontSize;
@@ -208,10 +235,29 @@ export function EnhancedTableWithDialogs({
     return allColKeys;
   });
 
+  const [savedColumnOrder, setSavedColumnOrder] = useState<string[]>(() =>
+    normalizeColumnOrder(savedSettings?.columnOrder, columns)
+  );
+
   // Settings Popover Open State & Draft States
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [draftTableFontSize, setDraftTableFontSize] = useState<"1x" | "2x" | "3x">(savedTableFontSize);
   const [draftVisibleColumnKeys, setDraftVisibleColumnKeys] = useState<Set<string>>(() => new Set(savedVisibleColumnKeys));
+  const [draftColumnOrder, setDraftColumnOrder] = useState<string[]>(() => [...savedColumnOrder]);
+
+  const orderedColumns = useMemo(() => {
+    const colMap = new Map(columns.map((c) => [c.key, c]));
+    return normalizeColumnOrder(savedColumnOrder, columns)
+      .map((k) => colMap.get(k))
+      .filter((c): c is Column => Boolean(c));
+  }, [columns, savedColumnOrder]);
+
+  const draftOrderedColumns = useMemo(() => {
+    const colMap = new Map(columns.map((c) => [c.key, c]));
+    return normalizeColumnOrder(draftColumnOrder, columns)
+      .map((k) => colMap.get(k))
+      .filter((c): c is Column => Boolean(c));
+  }, [columns, draftColumnOrder]);
 
   // Determine if draft differs from saved configuration
   const hasUnsavedFontSize = draftTableFontSize !== savedTableFontSize;
@@ -222,14 +268,19 @@ export function EnhancedTableWithDialogs({
     }
     return false;
   }, [draftVisibleColumnKeys, savedVisibleColumnKeys]);
-  const hasUnsavedSettings = hasUnsavedFontSize || hasUnsavedColumns;
+  const hasUnsavedOrder = useMemo(() => {
+    if (draftColumnOrder.length !== savedColumnOrder.length) return true;
+    return draftColumnOrder.some((k, idx) => k !== savedColumnOrder[idx]);
+  }, [draftColumnOrder, savedColumnOrder]);
+  const hasUnsavedSettings = hasUnsavedFontSize || hasUnsavedColumns || hasUnsavedOrder;
 
   // Persist table settings helper
-  const persistTableSettings = useCallback((cols: Set<string>, fontSize: "1x" | "2x" | "3x", perPage: number) => {
+  const persistTableSettings = useCallback((cols: Set<string>, order: string[], fontSize: "1x" | "2x" | "3x", perPage: number) => {
     try {
       if (typeof window !== "undefined" && window.localStorage) {
         const payload = {
           visibleColumns: Array.from(cols),
+          columnOrder: order,
           tableFontSize: fontSize,
           itemsPerPage: perPage,
         };
@@ -244,15 +295,17 @@ export function EnhancedTableWithDialogs({
       // Saat menu dibuka kembali, tampilkan pengaturan terakhir yang tersimpan
       setDraftTableFontSize(savedTableFontSize);
       setDraftVisibleColumnKeys(new Set(savedVisibleColumnKeys));
+      setDraftColumnOrder([...savedColumnOrder]);
     } else {
       // Pastikan perubahan draft yang dibatalkan tidak menggantikan konfigurasi tersimpan
       setDraftTableFontSize(savedTableFontSize);
       setDraftVisibleColumnKeys(new Set(savedVisibleColumnKeys));
+      setDraftColumnOrder([...savedColumnOrder]);
     }
     setIsSettingsOpen(open);
   };
 
-  // Synchronize visibleColumnKeys when columns prop updates or when subTabTitle changes
+  // Synchronize visibleColumnKeys and columnOrder when columns prop updates or when subTabTitle changes
   const prevSubTabRef = React.useRef(subTabTitle);
   const prevColumnsKeyStrRef = React.useRef(columns.map((c) => c.key).join(","));
 
@@ -281,6 +334,10 @@ export function EnhancedTableWithDialogs({
       setSavedVisibleColumnKeys(initialKeys);
       setDraftVisibleColumnKeys(new Set(initialKeys));
 
+      const nextOrder = normalizeColumnOrder(saved?.columnOrder, columns);
+      setSavedColumnOrder(nextOrder);
+      setDraftColumnOrder([...nextOrder]);
+
       const initialFont = (saved?.tableFontSize && ["1x", "2x", "3x"].includes(saved.tableFontSize)) ? saved.tableFontSize : "1x";
       setSavedTableFontSize(initialFont);
       setDraftTableFontSize(initialFont);
@@ -303,22 +360,46 @@ export function EnhancedTableWithDialogs({
         setDraftVisibleColumnKeys(new Set(resolved));
         return resolved;
       });
+      setSavedColumnOrder((prev) => {
+        const nextOrder = normalizeColumnOrder(prev, columns);
+        setDraftColumnOrder([...nextOrder]);
+        return nextOrder;
+      });
     }
   }, [subTabTitle, columns, loadPersistedSettings, itemsPerPageOptions]);
 
+  const handleDraftMoveColumn = (key: string, direction: -1 | 1) => {
+    setDraftColumnOrder((prev) => {
+      const order = normalizeColumnOrder(prev, columns);
+      const idx = order.indexOf(key);
+      const targetIdx = idx + direction;
+      if (idx < 0 || targetIdx < 0 || targetIdx >= order.length) return order;
+      const next = [...order];
+      const [moved] = next.splice(idx, 1);
+      next.splice(targetIdx, 0, moved);
+      return next;
+    });
+  };
+
   const handleSaveTableSettings = () => {
+    const normalizedOrder = normalizeColumnOrder(draftColumnOrder, columns);
     setSavedTableFontSize(draftTableFontSize);
     setSavedVisibleColumnKeys(new Set(draftVisibleColumnKeys));
-    persistTableSettings(draftVisibleColumnKeys, draftTableFontSize, itemsPerPage);
+    setSavedColumnOrder(normalizedOrder);
+    setDraftColumnOrder([...normalizedOrder]);
+    persistTableSettings(draftVisibleColumnKeys, normalizedOrder, draftTableFontSize, itemsPerPage);
     toast.success("Pengaturan tabel berhasil disimpan");
     setIsSettingsOpen(false);
   };
 
   const handleResetTableSettings = () => {
     const allKeys = new Set(columns.map((c) => c.key));
+    const defaultOrder = columns.map((c) => c.key);
     setDraftVisibleColumnKeys(new Set(allKeys));
+    setDraftColumnOrder([...defaultOrder]);
     setDraftTableFontSize("1x");
     setSavedVisibleColumnKeys(new Set(allKeys));
+    setSavedColumnOrder(defaultOrder);
     setSavedTableFontSize("1x");
     const defaultPerPage = itemsPerPageOptions.includes(25) ? 25 : itemsPerPageOptions[0];
     setItemsPerPage(defaultPerPage);
@@ -382,6 +463,7 @@ export function EnhancedTableWithDialogs({
   const [isDiscardDialogOpen, setIsDiscardDialogOpen] = useState<boolean>(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [deleteReason, setDeleteReason] = useState("");
   const [selectedItem, setSelectedItem] = useState<any>(null);
   const [editFormData, setEditFormData] = useState<any>({});
@@ -645,28 +727,48 @@ export function EnhancedTableWithDialogs({
     return "left";
   };
 
-  // Export columns (excluding action columns)
+  // Export columns following exact saved order & visibility (excluding action columns)
   const exportColumns = useMemo<ExportColumn[]>(() => {
-    return columns
+    return orderedColumns
       .filter((c) => {
         const k = c.key.toLowerCase();
         if (k === "aksi" || k === "actions" || k === "aksipelunasan") return false;
         return savedVisibleColumnKeys.has(c.key);
       })
-      .map((c) => ({
-        key: c.key,
-        label: c.label,
-        align: getColumnAlignment(c),
-      }));
-  }, [columns, savedVisibleColumnKeys]);
+      .map((c) => {
+        const lowerKey = c.key.toLowerCase();
+        const resolvedExportValue = c.exportValue
+          ? (val: any, row: any) => c.exportValue!(val, row)
+          : lowerKey.includes("receipt") || lowerKey.includes("buktistruk")
+          ? (val: any, row: any) => (val || row?.receiptUrl ? "Tersedia" : "-")
+          : lowerKey === "phone" || lowerKey.includes("telepon") || lowerKey === "no hp" || lowerKey === "nomor hp"
+          ? (val: any, row: any) => row?.phone || row?.nomorHp || row?.noHp || row?.["No HP"] || row?.["Nomor HP"] || val || "-"
+          : c.render
+          ? (val: any, row: any) => c.render!(val, row)
+          : undefined;
 
-  // Preview / filtered dataset for export respecting table filters and export period
+        return {
+          key: c.key,
+          label: c.label,
+          align: getColumnAlignment(c),
+          exportValue: resolvedExportValue,
+        };
+      });
+  }, [orderedColumns, savedVisibleColumnKeys]);
+
+  // All columns passed for date-key resolution so export period filtering works even if Tanggal column is hidden
+  const allDateColumnsHint = useMemo<ExportColumn[]>(
+    () => columns.map((c) => ({ key: c.key, label: c.label })),
+    [columns]
+  );
+
+  // Preview / filtered + sorted dataset for export respecting table filters, search, sort order, and export period
   const previewExportData = useMemo(() => {
-    return filterDataByExportPeriod(filteredData, exportColumns, exportPeriod, {
+    return filterDataByExportPeriod(sortedData, allDateColumnsHint, exportPeriod, {
       start: customStartDate,
       end: customEndDate,
     });
-  }, [filteredData, exportColumns, exportPeriod, customStartDate, customEndDate]);
+  }, [sortedData, allDateColumnsHint, exportPeriod, customStartDate, customEndDate]);
 
   const getExportPeriodLabel = (): string => {
     switch (exportPeriod) {
@@ -687,14 +789,64 @@ export function EnhancedTableWithDialogs({
     }
   };
 
+  const buildExportMetadata = () => {
+    const meta: { label: string; value: string }[] = [];
+    const totalNonActionCols = columns.filter((c) => {
+      const k = c.key.toLowerCase();
+      return k !== "aksi" && k !== "actions" && k !== "aksipelunasan";
+    }).length;
+    meta.push({
+      label: "Kolom Ditampilkan",
+      value: `${exportColumns.length} dari ${totalNonActionCols} kolom`,
+    });
+    if (searchTerm.trim()) {
+      meta.push({ label: "Pencarian", value: searchTerm.trim() });
+    }
+    if (dateFilter) {
+      let dateFilterLabel = "Aktif";
+      if (dateFilter.mode === "hari" && dateFilter.selectedDate) {
+        dateFilterLabel = dateFilter.selectedDate.toLocaleDateString("id-ID");
+      } else if (dateFilter.mode === "minggu" && dateFilter.selectedDate) {
+        dateFilterLabel = `Minggu ${dateFilter.selectedDate.toLocaleDateString("id-ID")}`;
+      } else if (dateFilter.mode === "bulan" && dateFilter.selectedMonth !== undefined && dateFilter.selectedYear !== undefined) {
+        dateFilterLabel = new Date(dateFilter.selectedYear, dateFilter.selectedMonth, 1).toLocaleDateString("id-ID", {
+          month: "long",
+          year: "numeric",
+        });
+      } else if (dateFilter.mode === "tahun" && dateFilter.selectedYear !== undefined) {
+        dateFilterLabel = `Tahun ${dateFilter.selectedYear}`;
+      }
+      meta.push({ label: "Filter Tanggal Tabel", value: dateFilterLabel });
+    }
+    Object.entries(filters).forEach(([key, val]) => {
+      if (val && val !== "all" && val !== "Semua") {
+        const colLabel = columns.find((c) => c.key === key)?.label || key;
+        meta.push({ label: `Filter ${colLabel}`, value: val });
+      }
+    });
+    if (sortKey && sortDirection) {
+      const sortLabel = columns.find((c) => c.key === sortKey)?.label || sortKey;
+      meta.push({
+        label: "Urutan",
+        value: `${sortLabel} (${sortDirection === "asc" ? "A-Z / Naik" : "Z-A / Turun"})`,
+      });
+    }
+    return meta;
+  };
+
   const handleExecuteExport = () => {
+    if (exportColumns.length === 0) {
+      toast.error("Minimal 1 kolom harus diaktifkan pada Pengaturan tabel sebelum mengekspor.");
+      return;
+    }
     if (previewExportData.length === 0) {
-      toast.error("Tidak ada data yang dapat diekspor untuk periode ini");
+      toast.error("Tidak ada data yang dapat diekspor untuk filter / periode ini");
       return;
     }
 
     const title = subTabTitle ? `Laporan Keuangan - ${subTabTitle}` : "Laporan Keuangan SUN89";
     const periodLabel = getExportPeriodLabel();
+    const metadata = buildExportMetadata();
 
     try {
       if (exportFormat === "csv") {
@@ -703,15 +855,18 @@ export function EnhancedTableWithDialogs({
           columns: exportColumns,
           data: previewExportData,
           periodLabel,
+          metadata,
         });
         toast.success(`Berhasil mengunduh CSV (${previewExportData.length} baris)`);
       } else {
         exportToPDF({
           title,
-          subTitle: "Biro Jasa SUN89 - Laporan Operasional & Keuangan",
+          subTitle: `Modul Keuangan SUN89 — ${subTabTitle || "Laporan Operasional & Keuangan"}`,
           periodLabel,
           columns: exportColumns,
           data: previewExportData,
+          metadata,
+          action: "download",
         });
         toast.success(`Dokumen cetak / PDF (${previewExportData.length} baris) siap dicetak`);
       }
@@ -941,7 +1096,7 @@ export function EnhancedTableWithDialogs({
     setIsDeleteDialogOpen(true);
   };
 
-  const handleEditSubmit = () => {
+  const handleEditSubmit = async () => {
     if (editFields) {
       for (const field of editFields) {
         const isCoreRequired = field.key === "Plat No" || field.key === "Nama Customer";
@@ -956,10 +1111,19 @@ export function EnhancedTableWithDialogs({
     }
 
     if (onEdit && selectedItem) {
-      onEdit(selectedItem, editFormData);
+      try {
+        setIsSavingEdit(true);
+        await Promise.resolve(onEdit(selectedItem, editFormData));
+        setIsEditDialogOpen(false);
+        toast.success("Data transaksi berhasil diperbarui");
+      } catch (err: any) {
+        toast.error(err?.message || "Gagal memperbarui data transaksi.");
+      } finally {
+        setIsSavingEdit(false);
+      }
+    } else {
+      setIsEditDialogOpen(false);
     }
-    setIsEditDialogOpen(false);
-    toast.success("Data transaksi berhasil diperbarui");
   };
 
   const handleDeleteConfirm = async () => {
@@ -1233,24 +1397,48 @@ export function EnhancedTableWithDialogs({
                     <span className="text-foreground">Pilih semua</span>
                   </label>
 
-                  {/* Scrollable list of individual columns */}
+                  {/* Scrollable list of individual columns (visibility + ordering) */}
                   <ScrollArea className="h-40 pr-1.5">
                     <div className="space-y-1">
-                      {columns.map((col) => {
+                      {draftOrderedColumns.map((col, idx) => {
                         const isChecked = draftVisibleColumnKeys.has(col.key);
                         return (
-                          <label
+                          <div
                             key={col.key}
-                            className="flex items-center gap-2.5 p-1 rounded hover:bg-muted/50 cursor-pointer text-xs select-none"
+                            className="flex items-center justify-between gap-1.5 p-1 rounded hover:bg-muted/50 text-xs select-none"
                           >
-                            <Checkbox
-                              checked={isChecked}
-                              onCheckedChange={() => handleDraftToggleColumn(col.key)}
-                            />
-                            <span className={isChecked ? "text-foreground font-medium" : "text-muted-foreground"}>
-                              {col.label}
-                            </span>
-                          </label>
+                            <label className="flex items-center gap-2.5 cursor-pointer flex-1 min-w-0">
+                              <Checkbox
+                                checked={isChecked}
+                                onCheckedChange={() => handleDraftToggleColumn(col.key)}
+                              />
+                              <span className={cn("truncate", isChecked ? "text-foreground font-medium" : "text-muted-foreground")}>
+                                {col.label}
+                              </span>
+                            </label>
+                            <div className="flex items-center gap-0.5 shrink-0">
+                              <button
+                                type="button"
+                                disabled={idx === 0}
+                                onClick={() => handleDraftMoveColumn(col.key, -1)}
+                                aria-label={`Naikkan kolom ${col.label}`}
+                                title="Naikkan urutan kolom"
+                                className="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-30 disabled:pointer-events-none"
+                              >
+                                <ChevronUp className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                disabled={idx === draftOrderedColumns.length - 1}
+                                onClick={() => handleDraftMoveColumn(col.key, 1)}
+                                aria-label={`Turunkan kolom ${col.label}`}
+                                title="Turunkan urutan kolom"
+                                className="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-30 disabled:pointer-events-none"
+                              >
+                                <ChevronDown className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
                         );
                       })}
                     </div>
@@ -1290,6 +1478,7 @@ export function EnhancedTableWithDialogs({
               </div>
             </PopoverContent>
           </Popover>
+          {toolbarExtras}
         </div>
 
         {/* Right Section: Single Main Search Field */}
@@ -1310,8 +1499,7 @@ export function EnhancedTableWithDialogs({
 
 
       {/* Main Table: Desktop (Full Columns with desktop settings) & Mobile (2 Primary Columns + Actions) */}
-      <div className="rounded-lg border border-border bg-card overflow-hidden shadow-2xs flex-1 flex flex-col min-h-0">
-        <div className="w-full flex-1 flex flex-col min-h-0">
+      <DataTableShell>
           <Table 
             containerClassName={cn(
               "flex-1 min-h-[160px] md:min-h-0 overflow-y-auto overflow-x-auto",
@@ -1325,11 +1513,11 @@ export function EnhancedTableWithDialogs({
             <TableHeader className="finance-table__header sticky top-0 z-10 bg-card border-b border-border shadow-2xs">
               <TableRow className="hover:bg-transparent">
                 {/* No. Column (Row Numbering - always visible, cannot be hidden via settings) */}
-                <TableHead className="h-9 px-2 font-semibold text-foreground/80 text-center whitespace-nowrap text-[10px] w-12 min-w-[48px] max-w-[48px] bg-card">
+                <TableHead className="h-8.5 px-2 font-semibold text-foreground/80 text-center whitespace-nowrap text-[10px] w-11 min-w-[44px] max-w-[44px] bg-card">
                   No.
                 </TableHead>
 
-                {columns.map(col => {
+                {orderedColumns.map(col => {
                   const isVisibleDesktop = savedVisibleColumnKeys.has(col.key);
                   const isMobileVisible = mobilePrimaryKeys.has(col.key);
 
@@ -1359,7 +1547,7 @@ export function EnhancedTableWithDialogs({
                       role="button"
                       aria-sort={isSorted ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}
                       aria-label={`Urutkan kolom ${col.label}`}
-                      className={`h-9 px-3.5 font-semibold text-foreground/80 whitespace-nowrap text-[10px] select-none cursor-pointer hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary ${alignClass} ${visibilityClass} bg-card`}
+                      className={`h-8.5 px-2.5 font-semibold text-foreground/80 whitespace-nowrap text-[10px] select-none cursor-pointer hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary ${alignClass} ${visibilityClass} bg-card`}
                     >
                       <div className={`inline-flex items-center gap-1 ${align === "right" ? "flex-row-reverse" : align === "center" ? "justify-center" : "flex-row"}`}>
                         <span>{col.label}</span>
@@ -1379,7 +1567,7 @@ export function EnhancedTableWithDialogs({
 
                 {/* Actions Column Header (Desktop & Mobile, Requirement 10 & 11) */}
                 {!suppressTrailingActionColumn && (
-                  <TableHead className="h-9 px-2 font-semibold text-foreground/80 text-center whitespace-nowrap text-[10px] w-[95px] bg-card">
+                  <TableHead className="h-8.5 px-2 font-semibold text-foreground/80 text-center whitespace-nowrap text-[10px] w-[92px] bg-card">
                     Aksi
                   </TableHead>
                 )}
@@ -1387,32 +1575,27 @@ export function EnhancedTableWithDialogs({
             </TableHeader>
             <TableBody className="finance-table__body">
               {paginatedData.length === 0 ? (
-                <TableRow className="h-full hover:bg-transparent">
-                  <TableCell 
-                    colSpan={columns.filter(c => savedVisibleColumnKeys.has(c.key) || mobilePrimaryKeys.has(c.key)).length + (suppressTrailingActionColumn ? 0 : 1) + 1} 
-                    className="h-full min-h-[200px] text-center p-0 align-middle"
-                  >
-                    <EmptyState
-                      icon={FileQuestion}
-                      title="Tidak ada data transaksi yang ditemukan"
-                      description="Periksa filter pencarian atau tambahkan transaksi baru."
-                    />
-                  </TableCell>
-                </TableRow>
+                <DataTableEmptyRow
+                  colSpan={orderedColumns.filter(c => savedVisibleColumnKeys.has(c.key) || mobilePrimaryKeys.has(c.key)).length + (suppressTrailingActionColumn ? 0 : 1) + 1}
+                  icon={FileQuestion}
+                  title="Tidak ada data transaksi yang ditemukan"
+                  description="Periksa filter pencarian atau tambahkan transaksi baru."
+                  cellClassName="h-full min-h-[200px]"
+                />
               ) : (
                 paginatedData.map((item, idx) => {
                   const rowNumber = (serverPageOffset !== undefined ? serverPageOffset : startIndex) + idx + 1;
                   return (
                     <TableRow
                       key={item.id || idx}
-                      className="hover:bg-muted/30 transition-colors border-b border-border/60 last:border-0 h-10"
+                      className="hover:bg-muted/30 transition-colors border-b border-border/60 last:border-0 h-9"
                     >
                       {/* No. Cell (Row Numbering - always visible, cannot be hidden via settings) */}
-                      <TableCell className="px-2 py-2 text-center text-muted-foreground font-mono text-[10px] tabular-nums w-12 min-w-[48px] max-w-[48px]">
+                      <TableCell className="px-2 py-1.5 text-center text-muted-foreground font-mono text-[10px] tabular-nums w-11 min-w-[44px] max-w-[44px]">
                         {rowNumber}
                       </TableCell>
 
-                      {columns.map(col => {
+                      {orderedColumns.map(col => {
                         const isVisibleDesktop = savedVisibleColumnKeys.has(col.key);
                         const isMobileVisible = mobilePrimaryKeys.has(col.key);
 
@@ -1430,7 +1613,7 @@ export function EnhancedTableWithDialogs({
                         return (
                           <TableCell 
                             key={col.key} 
-                            className={`px-3.5 py-2 text-[10px] ${alignClass} ${visibilityClass}`}
+                            className={`px-2.5 py-1.5 text-[10px] ${alignClass} ${visibilityClass}`}
                           >
                             {formatCellValue(item[col.key], col.key, item, col)}
                           </TableCell>
@@ -1439,7 +1622,7 @@ export function EnhancedTableWithDialogs({
 
                     {/* Actions Cell (Requirements 10 & 11: Direct visible View, Edit, Delete with soft default and distinct hover) */}
                     {!suppressTrailingActionColumn && (
-                      <TableCell className="px-2 py-1.5 text-center">
+                      <TableCell className="px-2 py-1 text-center">
                       <div className="finance-table__actions flex items-center justify-center gap-1">
                         {onView && (
                           <Button
@@ -1499,8 +1682,7 @@ export function EnhancedTableWithDialogs({
               )}
             </TableBody>
           </Table>
-        </div>
-      </div>
+      </DataTableShell>
 
       {/* Standardized Table Pagination */}
       <div className="mt-auto pt-1 shrink-0">
@@ -1512,7 +1694,7 @@ export function EnhancedTableWithDialogs({
           onItemsPerPageChange={(newSize) => {
             setItemsPerPage(newSize);
             setCurrentPage(1);
-            persistTableSettings(savedVisibleColumnKeys, savedTableFontSize, newSize);
+            persistTableSettings(savedVisibleColumnKeys, savedColumnOrder, savedTableFontSize, newSize);
           }}
           pageSizeOptions={itemsPerPageOptions}
         />
@@ -1809,12 +1991,12 @@ export function EnhancedTableWithDialogs({
             </div>
 
             <DialogFooter className="p-4 pt-3 border-t border-border/60 sticky bottom-0 bg-card z-10 shrink-0 flex items-center justify-between sm:justify-between">
-              <Button variant="outline" size="sm" onClick={handleCancelEdit} className="text-xs h-9 px-4">
+              <Button variant="outline" disabled={isSavingEdit} onClick={handleCancelEdit} className="text-xs px-4">
                 Batal
               </Button>
-              <Button size="sm" className="bg-primary hover:bg-primary/90 text-primary-foreground text-xs h-9 px-4 font-semibold shadow-xs flex items-center gap-1.5" onClick={handleEditSubmit}>
+              <Button disabled={isSavingEdit} className="text-xs px-4 font-semibold gap-1.5" onClick={handleEditSubmit}>
                 <Check className="w-3.5 h-3.5" />
-                Simpan Perubahan
+                {isSavingEdit ? "Menyimpan..." : "Simpan Perubahan"}
               </Button>
             </DialogFooter>
           </DialogContent>
@@ -1870,15 +2052,15 @@ export function EnhancedTableWithDialogs({
                 Tindakan ini tidak dapat dibatalkan dan akan menghapus catatan transaksi dari modul {subTabTitle || "keuangan"}.
               </p>
               <div className="pt-2 text-left">
-                <label className="text-[11px] font-semibold text-foreground block mb-1">
+                <Label className="text-[11px] font-semibold text-foreground block mb-1.5">
                   Alasan Penghapusan Permanen (Wajib min. 10 karakter):
-                </label>
-                <textarea
+                </Label>
+                <Textarea
                   value={deleteReason}
                   onChange={(e) => setDeleteReason(e.target.value)}
                   placeholder="Contoh: Pembatalan transaksi ganda oleh supervisor..."
                   rows={2}
-                  className="w-full text-xs p-2 rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none"
+                  className="text-xs resize-none min-h-14"
                 />
               </div>
             </AlertDialogDescription>

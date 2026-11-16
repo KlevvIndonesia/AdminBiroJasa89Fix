@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { TablePagination } from "./ui/TablePagination";
-import { EmptyState } from "./ui/empty-state";
+import { DataTableShell, DataTableEmptyRow } from "./ui/data-table";
 import { Search, Eye, KeyRound, CheckCircle2, UserCheck, UserX, Shield, Copy, Check, RotateCcw, AlertTriangle, RefreshCw, Loader2, Trash2 } from "lucide-react";
 import { PermanentErasureDialog } from "./PermanentErasureDialog";
 import { toast } from "sonner";
@@ -16,7 +16,8 @@ import { useKaryawanPengguna, PenggunaRecord, karyawanPenggunaAdapter } from "..
 import { cn } from "./ui/utils";
 
 export function ManajemenPengguna() {
-  const { pengguna, isLoading, error, isStale, refresh, activateAccount, deactivateAccount, resetPassword } = useKaryawanPengguna();
+  const { pengguna, isPenggunaLoading: isLoading, penggunaError: error, isPenggunaStale: isStale, refresh: refreshUsers, activateAccount, deactivateAccount, resetPassword } = useKaryawanPengguna();
+  const refresh = () => refreshUsers({ target: "users" });
 
   const [searchTerm, setSearchTerm] = useState("");
   const [filterStatus, setFilterStatus] = useState("all");
@@ -158,34 +159,13 @@ export function ManajemenPengguna() {
   };
 
   const getStatusBadge = (status: PenggunaRecord["statusAkun"]) => {
-    switch (status) {
-      case "Aktif":
-        return (
-          <Badge className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30 text-[11px] font-medium">
-            Aktif
-          </Badge>
-        );
-      case "Nonaktif":
-        return (
-          <Badge className="bg-rose-500/15 text-rose-600 dark:text-rose-400 border-rose-500/30 text-[11px] font-medium">
-            Nonaktif
-          </Badge>
-        );
-      case "Belum Aktif":
-        return (
-          <Badge className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30 text-[11px] font-medium">
-            Belum Aktif
-          </Badge>
-        );
-      default:
-        return <Badge variant="outline">{status}</Badge>;
-    }
+    return <Badge status={status}>{status}</Badge>;
   };
 
   if (isLoading && pengguna.length === 0) {
     return (
-      <div className="space-y-4 w-full min-w-0 text-left content-fluid">
-        <Card className="p-8 border border-border/80 bg-card shadow-xs flex flex-col items-center justify-center text-center rounded-xl">
+      <div className="flex-1 flex flex-col min-h-0 space-y-4 w-full min-w-0 text-left content-fluid">
+        <Card className="p-8 border border-border/80 bg-card shadow-xs flex-1 flex flex-col items-center justify-center text-center">
           <Loader2 className="w-8 h-8 animate-spin text-primary mb-3" />
           <p className="text-sm font-medium text-foreground">Memuat data pengguna dari database...</p>
           <p className="text-xs text-muted-foreground mt-1">Menghubungkan ke API server...</p>
@@ -196,8 +176,8 @@ export function ManajemenPengguna() {
 
   if (error && pengguna.length === 0) {
     return (
-      <div className="space-y-4 w-full min-w-0 text-left content-fluid">
-        <Card className="p-8 border border-red-500/20 bg-red-500/5 shadow-xs flex flex-col items-center justify-center text-center rounded-xl">
+      <div className="flex-1 flex flex-col min-h-0 space-y-4 w-full min-w-0 text-left content-fluid">
+        <Card className="p-8 border border-red-500/20 bg-red-500/5 shadow-xs flex-1 flex flex-col items-center justify-center text-center">
           <div className="w-12 h-12 rounded-full bg-red-500/10 flex items-center justify-center text-red-500 mb-3">
             <AlertTriangle className="w-6 h-6" />
           </div>
@@ -218,8 +198,8 @@ export function ManajemenPengguna() {
   }
 
   return (
-    <div className="space-y-4 w-full min-w-0 text-left content-fluid">
-      <Card className="p-4 sm:p-5 border border-border/80 bg-card shadow-xs space-y-4 w-full rounded-xl">
+    <div className="flex-1 flex flex-col min-h-0 space-y-4 w-full min-w-0 text-left content-fluid">
+      <Card className="p-4 sm:p-5 border border-border/80 bg-card shadow-xs flex-1 flex flex-col min-h-0 space-y-3 w-full">
         {isStale && (
           <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-between text-xs text-amber-700 dark:text-amber-400">
             <div className="flex items-center gap-2">
@@ -234,7 +214,7 @@ export function ManajemenPengguna() {
               onClick={() => refresh()}
               className="h-7 text-xs gap-1 hover:bg-amber-500/20"
             >
-              <RefreshCw className="w-3 h-3" />
+              <RefreshCw className="w-3.5 h-3.5" />
               Coba Sinkron Ulang
             </Button>
           </div>
@@ -242,10 +222,10 @@ export function ManajemenPengguna() {
         {/* COMPACT TOOLBAR (Judul, Search, Filters — strictly derived from Karyawan HR master) */}
         <div className="flex flex-col md:flex-row gap-2.5 justify-between items-stretch md:items-center shrink-0">
           <div className="relative flex-1">
-            <Search className="absolute left-2.5 top-1/2 transform -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+            <Search className="absolute left-2.5 top-1/2 transform -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
             <Input
               placeholder="Cari nama, email, atau NIK/ID karyawan..."
-              className="pl-8 bg-input-background border-border h-8 text-xs font-normal"
+              className="pl-8 bg-background border-border h-8 text-xs font-normal placeholder:text-muted-foreground/65"
               value={searchTerm}
               onChange={(e) => handleSearchChange(e.target.value)}
             />
@@ -253,7 +233,7 @@ export function ManajemenPengguna() {
 
           <div className="flex flex-wrap items-center gap-2">
             <Select value={filterStatus} onValueChange={handleStatusFilterChange}>
-              <SelectTrigger className="w-[140px] bg-input-background border-border h-8 text-xs">
+              <SelectTrigger size="sm" className="w-[140px] bg-background border-border h-8 text-xs">
                 <SelectValue placeholder="Semua Status" />
               </SelectTrigger>
               <SelectContent>
@@ -265,7 +245,7 @@ export function ManajemenPengguna() {
             </Select>
 
             <Select value={filterJabatan} onValueChange={handleJabatanFilterChange}>
-              <SelectTrigger className="w-[140px] bg-input-background border-border h-8 text-xs">
+              <SelectTrigger size="sm" className="w-[140px] bg-background border-border h-8 text-xs">
                 <SelectValue placeholder="Semua Jabatan" />
               </SelectTrigger>
               <SelectContent>
@@ -293,150 +273,9 @@ export function ManajemenPengguna() {
         </div>
 
         {/* RESPONSIVE TABLE WRAPPER (Fill Width, horizontal scrollable if needed) */}
-        <div className="rounded-lg border border-border bg-card overflow-hidden shadow-2xs w-full flex-1 flex flex-col min-h-0">
-          <div className="w-full flex-1 flex flex-col min-h-0">
-            <Table 
-              containerClassName="overflow-y-auto overflow-x-auto max-h-[calc(100vh-270px)] sm:max-h-[calc(100vh-280px)] min-h-[160px]"
-              className={cn("w-full min-w-[750px]", paginatedData.length === 0 && "h-full")}
-            >
-              <TableHeader className="sticky top-0 z-10 bg-card border-b border-border shadow-2xs">
-                <TableRow className="hover:bg-transparent">
-                  <TableHead className="w-[50px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-2">No</TableHead>
-                  <TableHead className="min-w-[170px] text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Nama</TableHead>
-                  <TableHead className="w-[110px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Jabatan</TableHead>
-                  <TableHead className="min-w-[190px] text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Username / Email</TableHead>
-                  <TableHead className="w-[100px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Role</TableHead>
-                  <TableHead className="w-[110px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Status Akun</TableHead>
-                  <TableHead className="w-[130px] text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Terakhir Login</TableHead>
-                  <TableHead className="w-[180px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-2">Aksi</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {paginatedData.length > 0 ? (
-                  paginatedData.map((item, index) => {
-                    const globalIndex = startIndex + index + 1;
-                    return (
-                      <TableRow
-                        key={item.id}
-                        className="hover:bg-muted/30 transition-colors border-b border-border/60 last:border-0 h-10"
-                      >
-                        <TableCell className="w-[50px] text-center text-xs text-muted-foreground font-mono px-2 py-2 align-middle">
-                          {globalIndex}
-                        </TableCell>
-                        <TableCell className="px-3.5 py-2 text-xs font-medium text-foreground align-middle">
-                          <div>
-                            <span>{item.nama}</span>
-                            <span className="text-[10px] text-muted-foreground block font-mono">
-                              {item.employeeId || <span className="italic text-muted-foreground/60">Non-Pegawai</span>}
-                            </span>
-                          </div>
-                        </TableCell>
-                        <TableCell className="w-[110px] px-3.5 py-2 text-xs text-center align-middle">
-                          <Badge variant="outline" className="text-[10px] font-mono uppercase">
-                            {item.jabatan}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="px-3.5 py-2 text-xs text-foreground/85 font-mono align-middle">
-                          {item.email}
-                        </TableCell>
-                        <TableCell className="w-[100px] px-3.5 py-2 text-xs capitalize font-medium text-foreground/80 text-center align-middle">
-                          {item.role}
-                        </TableCell>
-                        <TableCell className="w-[110px] px-3.5 py-2 text-center text-xs align-middle">
-                          {getStatusBadge(item.statusAkun)}
-                        </TableCell>
-                        <TableCell className="w-[130px] px-3.5 py-2 text-xs font-mono text-muted-foreground align-middle">
-                          {item.terakhirLogin}
-                        </TableCell>
-                        <TableCell className="w-[180px] px-2 py-1.5 text-center text-xs align-middle">
-                          <div className="flex items-center justify-center gap-1">
-                            {/* Toggle Status Button */}
-                            {item.statusAkun === "Aktif" ? (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                onClick={() => handleOpenDeactivateDialog(item)}
-                                className="h-7 px-2 text-[11px] text-amber-600 hover:text-amber-700 hover:bg-amber-500/10 rounded transition-colors gap-1"
-                                title="Nonaktifkan akun pengguna"
-                              >
-                                <UserX className="w-3.5 h-3.5" />
-                                <span className="hidden lg:inline">Nonaktifkan</span>
-                              </Button>
-                            ) : (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                onClick={() => handleActivateClick(item)}
-                                className="h-7 px-2 text-[11px] text-emerald-600 hover:text-emerald-700 hover:bg-emerald-500/10 rounded transition-colors gap-1"
-                                title="Aktifkan akun pengguna"
-                              >
-                                <UserCheck className="w-3.5 h-3.5" />
-                                <span className="hidden lg:inline">Aktifkan</span>
-                              </Button>
-                            )}
-
-                            {/* Reset Password Button */}
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => handleOpenResetDialog(item)}
-                              className="h-7 px-2 text-[11px] text-primary hover:text-primary/90 hover:bg-primary/10 rounded transition-colors gap-1"
-                              title="Reset kata sandi menggunakan tanggal lahir (DDMMYYYY)"
-                            >
-                              <KeyRound className="w-3.5 h-3.5" />
-                              <span className="hidden lg:inline">Reset</span>
-                            </Button>
-
-                            {/* View Detail Button */}
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => handleViewUser(item)}
-                              className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
-                              title="Lihat rincian akun"
-                            >
-                              <Eye className="w-3.5 h-3.5" />
-                            </Button>
-
-                            {/* Permanent Erasure Button (Administrator Only) */}
-                            {isAdministrator && (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                onClick={() => handleOpenErasureDialog(item)}
-                                className="h-7 px-2 text-[11px] text-destructive hover:text-destructive hover:bg-destructive/10 rounded transition-colors gap-1"
-                                title="Hapus permanen akun pengguna dan data master"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                                <span className="hidden lg:inline">Hapus</span>
-                              </Button>
-                            )}
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })
-                ) : (
-                  <TableRow className="h-full hover:bg-transparent">
-                    <TableCell colSpan={8} className="p-6">
-                      <EmptyState
-                        icon={UserX}
-                        title="Data Pengguna Tidak Ditemukan"
-                        description={
-                          searchTerm
-                            ? `Tidak ditemukan akun pengguna yang cocok dengan "${searchTerm}".`
-                            : "Belum ada akun pengguna yang terdaftar atau sesuai dengan filter yang dipilih."
-                        }
-                      />
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
-          </div>
-
-          {/* STANDARDIZED TABLE PAGINATION */}
-          <div className="border-t border-border/80 p-3 bg-card shrink-0 mt-auto">
+        <DataTableShell
+          className="w-full"
+          footer={
             <TablePagination
               currentPage={currentPage}
               totalItems={filteredData.length}
@@ -445,8 +284,151 @@ export function ManajemenPengguna() {
               onItemsPerPageChange={handlePageSizeChange}
               pageSizeOptions={[10, 25, 50, 100]}
             />
-          </div>
-        </div>
+          }
+        >
+          <Table 
+            containerClassName="overflow-y-auto overflow-x-auto max-h-[calc(100vh-270px)] sm:max-h-[calc(100vh-280px)] min-h-[160px]"
+            className={cn("w-full min-w-[700px]", paginatedData.length === 0 && "h-full")}
+          >
+            <TableHeader className="sticky top-0 z-10 bg-card border-b border-border shadow-2xs">
+              <TableRow className="hover:bg-transparent">
+                <TableHead className="w-[50px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-2">No</TableHead>
+                <TableHead className="min-w-[160px] text-left text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Nama</TableHead>
+                <TableHead className="w-[110px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Jabatan</TableHead>
+                <TableHead className="min-w-[180px] text-left text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Username / Email</TableHead>
+                <TableHead className="w-[100px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Role</TableHead>
+                <TableHead className="w-[110px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Status Akun</TableHead>
+                <TableHead className="w-[130px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-3.5">Terakhir Login</TableHead>
+                <TableHead className="w-[140px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-2">Aksi</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {paginatedData.length > 0 ? (
+                paginatedData.map((item, index) => {
+                  const globalIndex = startIndex + index + 1;
+                  return (
+                    <TableRow
+                      key={item.id}
+                      className="hover:bg-muted/30 transition-colors border-b border-border/60 last:border-0 h-10"
+                    >
+                      <TableCell className="w-[50px] text-center text-xs text-muted-foreground font-mono px-2 py-2 align-middle">
+                        {globalIndex}
+                      </TableCell>
+                      <TableCell className="px-3.5 py-2 text-xs align-middle text-left">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="font-medium text-foreground truncate">{item.nama}</span>
+                          {item.employeeId ? (
+                            <span className="text-[11px] text-muted-foreground font-mono shrink-0">
+                              ({item.employeeId})
+                            </span>
+                          ) : (
+                            <span className="text-[10px] text-muted-foreground/60 italic shrink-0">
+                              (Non-Pegawai)
+                            </span>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell className="w-[110px] px-3.5 py-2 text-xs text-center align-middle">
+                        <Badge status={item.jabatan}>
+                          {item.jabatan}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="px-3.5 py-2 text-xs text-foreground/90 align-middle text-left">
+                        {item.email}
+                      </TableCell>
+                      <TableCell className="w-[100px] px-3.5 py-2 text-xs capitalize text-foreground/80 text-center align-middle">
+                        {item.role}
+                      </TableCell>
+                      <TableCell className="w-[110px] px-3.5 py-2 text-center text-xs align-middle">
+                        {getStatusBadge(item.statusAkun)}
+                      </TableCell>
+                      <TableCell className="w-[130px] px-3.5 py-2 text-xs text-muted-foreground text-center align-middle">
+                        {item.terakhirLogin}
+                      </TableCell>
+                      <TableCell className="w-[140px] px-2 py-1.5 text-center text-xs align-middle">
+                        <div className="flex items-center justify-center gap-1">
+                          {/* Toggle Status Button */}
+                          {item.statusAkun === "Aktif" ? (
+                            <Button
+                              size="icon-sm"
+                              variant="ghost"
+                              onClick={() => handleOpenDeactivateDialog(item)}
+                              className="finance-action-btn h-7 w-7 text-muted-foreground hover:text-amber-600 dark:hover:text-amber-400 hover:bg-amber-500/10"
+                              aria-label={`Nonaktifkan akun ${item.nama}`}
+                              title="Nonaktifkan akun pengguna"
+                            >
+                              <UserX className="w-3.5 h-3.5" />
+                            </Button>
+                          ) : (
+                            <Button
+                              size="icon-sm"
+                              variant="ghost"
+                              onClick={() => handleActivateClick(item)}
+                              className="finance-action-btn h-7 w-7 text-muted-foreground hover:text-emerald-600 dark:hover:text-emerald-400 hover:bg-emerald-500/10"
+                              aria-label={`Aktifkan akun ${item.nama}`}
+                              title="Aktifkan akun pengguna"
+                            >
+                              <UserCheck className="w-3.5 h-3.5" />
+                            </Button>
+                          )}
+
+                          {/* Reset Password Button */}
+                          <Button
+                            size="icon-sm"
+                            variant="ghost"
+                            onClick={() => handleOpenResetDialog(item)}
+                            className="finance-action-btn h-7 w-7 text-muted-foreground hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-500/10"
+                            aria-label={`Reset password ${item.nama}`}
+                            title="Reset kata sandi menggunakan tanggal lahir (DDMMYYYY)"
+                          >
+                            <KeyRound className="w-3.5 h-3.5" />
+                          </Button>
+
+                          {/* View Detail Button */}
+                          <Button
+                            size="icon-sm"
+                            variant="ghost"
+                            onClick={() => handleViewUser(item)}
+                            className="finance-action-btn h-7 w-7 text-muted-foreground hover:text-foreground hover:bg-muted"
+                            aria-label={`Lihat rincian akun ${item.nama || item.email || ""}`.trim()}
+                            title="Lihat rincian akun"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                          </Button>
+
+                          {/* Permanent Erasure Button (Administrator Only) */}
+                          {isAdministrator && (
+                            <Button
+                              size="icon-sm"
+                              variant="ghost"
+                              onClick={() => handleOpenErasureDialog(item)}
+                              className="finance-action-btn h-7 w-7 text-muted-foreground hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-500/10"
+                              aria-label={`Hapus permanen akun ${item.nama}`}
+                              title="Hapus permanen akun pengguna dan data master"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </Button>
+                          )}
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })
+              ) : (
+                <DataTableEmptyRow
+                  colSpan={8}
+                  icon={UserX}
+                  title="Data Pengguna Tidak Ditemukan"
+                  description={
+                    searchTerm
+                      ? `Tidak ditemukan akun pengguna yang cocok dengan "${searchTerm}".`
+                      : "Belum ada akun pengguna yang terdaftar atau sesuai dengan filter yang dipilih."
+                  }
+                />
+              )}
+            </TableBody>
+          </Table>
+        </DataTableShell>
       </Card>
 
       {/* CONFIRMATION DIALOG: DEACTIVATE ACCOUNT */}

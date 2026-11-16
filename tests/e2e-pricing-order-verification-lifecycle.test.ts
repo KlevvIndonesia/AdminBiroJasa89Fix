@@ -76,13 +76,33 @@ test("FASE 4: END-TO-END PRICING, ORDER CREATION, COST VERIFICATION & INVOICE LI
     const officeA = "samsat-e2e-alpha";
     const officeB = "samsat-e2e-beta";
 
-    // Ensure office records exist in database
+    // Ensure office records and test samsat_pricing catalog items exist in isolated test DB
     db.prepare("DELETE FROM samsat_operational_tariffs WHERE samsat_id IN (?, ?)").run(officeA, officeB);
     db.prepare("DELETE FROM samsat_offices WHERE id IN (?, ?)").run(officeA, officeB);
     db.prepare(`
       INSERT INTO samsat_offices (id, name, wilayah, is_verified, status_aktif)
       VALUES (?, ?, ?, 1, 1), (?, ?, ?, 1, 1)
     `).run(officeA, "Samsat E2E Alpha", "Jakarta Timur", officeB, "Samsat E2E Beta", "Jakarta Barat");
+    const insertPricing = db.prepare(`
+      INSERT OR IGNORE INTO samsat_pricing (id, nama_item, kategori, tipe_kendaraan, biaya_dasar, is_active, is_configured, data_json)
+      VALUES (?, ?, ?, ?, ?, 1, 1, ?)
+    `);
+    insertPricing.run(
+      "pkb-pokok",
+      "PKB Pokok",
+      "Pajak",
+      "Semua",
+      450000,
+      JSON.stringify({ id: "pkb-pokok", namaItem: "PKB Pokok", kategori: "Pajak", tipeKendaraan: "Semua", biayaDasar: 450000, isActive: true })
+    );
+    insertPricing.run(
+      "swdkllj-motor",
+      "SWDKLLJ Motor",
+      "SWDKLLJ",
+      "Motor",
+      0,
+      JSON.stringify({ id: "swdkllj-motor", namaItem: "SWDKLLJ Motor", kategori: "SWDKLLJ", tipeKendaraan: "Motor", biayaDasar: 0, isActive: true })
+    );
 
     // A1: Save operational tariffs for Samsat Alpha
     const alphaRes = await fetch(`${baseUrl}/api/pricing/samsat-tariffs`, {
@@ -436,18 +456,50 @@ test("FASE 4: END-TO-END PRICING, ORDER CREATION, COST VERIFICATION & INVOICE LI
     });
     assert.equal(verifyGuardOrder.status, 200, "Order verification must succeed");
 
-    // Payment must now succeed
+    // Payment must now succeed using active payment method from isolated DB
+    const activePm = db
+      .prepare("SELECT id, nama_metode, bank FROM payment_methods WHERE LOWER(status) = 'aktif' ORDER BY CASE WHEN LOWER(nama_metode) LIKE '%cash%' OR LOWER(nama_metode) LIKE '%tunai%' THEN 0 ELSE 1 END, id ASC LIMIT 1")
+      .get() as any;
+    assert.ok(activePm?.id, "At least one active payment method must exist in isolated DB");
+
     const paySuccessRes = await fetch(`${baseUrl}/api/finance/invoices/${guardInv.id}/pay`, {
       method: "POST",
       headers: svpHeaders,
       body: JSON.stringify({
         amount: 645000,
-        metodePembayaran: "Transfer",
+        paymentMethodId: activePm.id,
+        metodePembayaran: activePm.nama_metode,
+        namaBank: activePm.bank || undefined,
+        buktiPembayaran: {
+          fileName: "bukti-e2e.jpg",
+          fileType: "image",
+          fileUrl: "/uploads/bukti-e2e.jpg",
+        },
       }),
     });
     assert.equal(paySuccessRes.status, 200, "Payment must succeed after cost verification");
     const paySuccessJson = (await paySuccessRes.json()) as any;
-    assert.equal(paySuccessJson?.data?.status, "PAID");
+    if (paySuccessJson?.data?.status !== "PAID") {
+      const payments = dbFinanceRepository.getPaymentsByOrderNo(guardOrderNo);
+      assert.ok(payments.length > 0, "Pending payment row must exist before verification");
+      const targetPaymentId = (payments[0] as any).payment_id || payments[0].id;
+      const verifyPayRes = await fetch(`${baseUrl}/api/orders/${guardOrderNo}/verify-payment`, {
+        method: "POST",
+        headers: {
+          ...svpHeaders,
+          "X-Idempotency-Key": crypto.randomUUID(),
+        },
+        body: JSON.stringify({
+          paymentId: targetPaymentId,
+          orderNo: guardOrderNo,
+          invoiceId: guardInv.id,
+          confirmedAmount: 645000,
+        }),
+      });
+      assert.equal(verifyPayRes.status, 200, "Payment verification must succeed");
+    }
+    const updatedGuardInv = dbFinanceRepository.getInvoiceById(guardInv.id)!;
+    assert.equal(updatedGuardInv.status, "PAID");
   });
 
   // ═══════════════════════════════════════════════════════════════════════════

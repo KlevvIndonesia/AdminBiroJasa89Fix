@@ -4,19 +4,19 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "./utils";
 
 const alertVariants = cva(
-  "relative w-full rounded-xl border px-4 py-3 text-sm grid has-[>svg]:grid-cols-[calc(var(--spacing)*4)_1fr] grid-cols-[0_1fr] has-[>svg]:gap-x-3 gap-y-0.5 items-start [&>svg]:size-4 [&>svg]:translate-y-0.5 [&>svg]:text-current shadow-2xs",
+  "relative w-full rounded-xl border px-4 py-3 text-sm grid has-[>svg]:grid-cols-[calc(var(--spacing)*4)_1fr] grid-cols-[0_1fr] has-[>svg]:gap-x-3 gap-y-0.5 items-start [&>svg]:size-4 [&>svg]:translate-y-0.5 [&>svg]:text-current shadow-xs",
   {
     variants: {
       variant: {
-        default: "bg-card text-card-foreground border-border/80",
+        default: "bg-card text-card-foreground border-border",
         destructive:
-          "text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950/30 border-rose-200 dark:border-rose-900/50 [&>svg]:text-rose-600 dark:[&>svg]:text-rose-400 *:data-[slot=alert-description]:text-rose-600 dark:*:data-[slot=alert-description]:text-rose-300/90",
+          "text-status-danger-fg bg-status-danger-bg border-status-danger-border [&>svg]:text-status-danger-fg *:data-[slot=alert-description]:text-status-danger-fg/90",
         warning:
-          "text-amber-800 dark:text-amber-200 bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-900/50 [&>svg]:text-amber-600 dark:[&>svg]:text-amber-400 *:data-[slot=alert-description]:text-amber-700 dark:*:data-[slot=alert-description]:text-amber-300/90",
+          "text-status-warning-fg bg-status-warning-bg border-status-warning-border [&>svg]:text-status-warning-fg *:data-[slot=alert-description]:text-status-warning-fg/90",
         info:
-          "text-blue-800 dark:text-blue-200 bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-900/50 [&>svg]:text-blue-600 dark:[&>svg]:text-blue-400 *:data-[slot=alert-description]:text-blue-700 dark:*:data-[slot=alert-description]:text-blue-300/90",
+          "text-status-info-fg bg-status-info-bg border-status-info-border [&>svg]:text-status-info-fg *:data-[slot=alert-description]:text-status-info-fg/90",
         success:
-          "text-emerald-800 dark:text-emerald-200 bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-900/50 [&>svg]:text-emerald-600 dark:[&>svg]:text-emerald-400 *:data-[slot=alert-description]:text-emerald-700 dark:*:data-[slot=alert-description]:text-emerald-300/90",
+          "text-status-success-fg bg-status-success-bg border-status-success-border [&>svg]:text-status-success-fg *:data-[slot=alert-description]:text-status-success-fg/90",
       },
     },
     defaultVariants: {

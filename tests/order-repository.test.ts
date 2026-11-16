@@ -1,274 +1,209 @@
 import test from "node:test";
 import assert from "node:assert";
-import { orderRepository, OrderRepository } from "../src/data/repositories/orderRepository";
-import { MockOrderProvider } from "./fixtures/mock/mockOrderProvider";
+import http from "node:http";
+import { createApp } from "../server/src/app";
+import { dbOrderRepository } from "../server/src/repositories/dbOrderRepository";
+import { OrderRepository } from "../src/data/repositories/orderRepository";
+import { ApiOrderProvider } from "../src/data/api/apiOrderProvider";
 import { OperationalOrder } from "../src/domain/order/types";
 
-test("OrderRepository - Read operations return valid fixture collections", () => {
-  const provider = new MockOrderProvider();
-  const repo = new OrderRepository(provider);
+function startTestServer(): Promise<{ server: http.Server; baseUrl: string }> {
+  return new Promise((resolve) => {
+    const app = createApp();
+    const server = http.createServer(app);
+    server.listen(0, () => {
+      const addr = server.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      resolve({ server, baseUrl: `http://localhost:${port}` });
+    });
+  });
+}
 
-  const activeOrders = repo.getActiveOrders();
-  assert.ok(activeOrders, "Active orders should exist");
-  assert.ok(activeOrders["Verifikasi"], "Stage Verifikasi should exist");
-  assert.ok(Array.isArray(activeOrders["Verifikasi"]), "Stage Verifikasi should be an array");
+async function loginAsAdmin(baseUrl: string): Promise<string> {
+  const res = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "admin@birojasa.com", password: "admin123" }),
+  });
+  const body = (await res.json()) as any;
+  assert.strictEqual(res.status, 200);
+  return body.data.token;
+}
 
-  const testOrder: OperationalOrder = {
-    orderNo: "ORD-REPO-READ-001",
-    customer: "Test Read Customer",
+function makeOrder(suffix: string, customer: string): OperationalOrder {
+  return {
+    orderNo: `TMP-REPO-${suffix}`,
+    customer,
     nomorHP: "081234567890",
     layanan: "Perpanjangan 1 Tahun",
     currentStep: 1,
     currentStageName: "Verifikasi",
     createdAt: new Date().toISOString(),
-    namaPemilik: "Test Read Owner",
+    namaPemilik: customer,
     kepemilikanKendaraan: "Milik Sendiri",
-    nopol: "B 1234 RPO",
-    wilayahSamsatAsal: "Jakarta Timur",
-  };
-  repo.saveOrder(testOrder);
-
-  const allOrders = repo.getAllFlat();
-  assert.ok(Array.isArray(allOrders), "getAllFlat should return an array");
-  assert.ok(allOrders.length > 0, "Repository should have orders after saving");
-
-  const firstOrder = allOrders[0];
-  const foundByNo = repo.getByOrderNo(firstOrder.orderNo);
-  assert.strictEqual(foundByNo?.orderNo, firstOrder.orderNo, "getByOrderNo should find the order");
-
-  const byStage = repo.getByStage("Verifikasi");
-  assert.ok(Array.isArray(byStage), "getByStage should return an array");
-  assert.strictEqual(byStage.length, 1, "getByStage should return saved order");
-});
-
-test("OrderRepository - Mutation operations: saveOrder and updateOrder", () => {
-  const provider = new MockOrderProvider();
-  const repo = new OrderRepository(provider);
-
-  const testOrderNo = `TEST-ORD-${Date.now()}`;
-  const dummyOrder: OperationalOrder = {
-    orderNo: testOrderNo,
-    customer: "Budi Test",
-    nomorHP: "081234567890",
-    layanan: "Perpanjangan 1 Tahun",
-    currentStep: 1,
-    currentStageName: "Verifikasi",
-    createdAt: new Date().toISOString(),
-    namaPemilik: "Budi Test",
-    kepemilikanKendaraan: "Milik Sendiri",
-    nopol: "B 1234 TST",
+    nopol: `B ${suffix.slice(-4)} RPO`,
     wilayahSamsatAsal: "Jakarta Timur",
     wilayahSamsatTujuan: "-",
     nominalPkbTerakhir: 350000,
     nominalSwdkllj: 143000,
-    biayaJasa: 50000,
+    biayaJasa: 100000,
     pkb: 350000,
     swdkllj: 143000,
     dendaSwdkllj: 0,
-    totalEstimasi: 543000,
+    totalEstimasi: 593000,
     payment: {
       tipePembayaran: "Bayar di Awal",
       metodePembayaran: "Cash",
       statusPembayaran: "Lunas",
-      totalBiaya: 543000,
-      dibayar: 543000,
+      totalBiaya: 593000,
+      dibayar: 593000,
       kurang: 0,
-      isPaymentVerified: true,
     },
-    orderSource: "Offline / Loket",
-    createdBy: "Admin Loket",
-    clientDocuments: {
-      stnk: { name: "STNK.pdf", status: "Sudah Tersedia" },
-    },
-    samsatProcesses: [],
-  };
-
-  // 1. saveOrder
-  repo.saveOrder(dummyOrder);
-  const fetched = repo.getByOrderNo(testOrderNo);
-  assert.ok(fetched, "Order should be saved in repository");
-  assert.strictEqual(fetched?.customer, "Budi Test");
-
-  // 2. updateOrder
-  const updateSuccess = repo.updateOrder(testOrderNo, { customer: "Budi Updated" });
-  assert.strictEqual(updateSuccess, true, "updateOrder should succeed");
-
-  const updated = repo.getByOrderNo(testOrderNo);
-  assert.strictEqual(updated?.customer, "Budi Updated", "Customer name should be updated");
-
-  // 3. update non-existent order
-  const failUpdate = repo.updateOrder("NON-EXISTENT-9999", { customer: "Nobody" });
-  assert.strictEqual(failUpdate, false, "updateOrder on non-existent order should return false");
-});
-
-test("OrderRepository - advanceOrder moves order between stages", () => {
-  const provider = new MockOrderProvider();
-  const repo = new OrderRepository(provider);
-
-  const testOrderNo = `ADV-${Date.now()}`;
-  const dummyOrder: OperationalOrder = {
-    orderNo: testOrderNo,
-    customer: "Andi Workflow",
-    nomorHP: "0811111111",
-    layanan: "Perpanjangan 1 Tahun",
-    currentStep: 1,
-    currentStageName: "Verifikasi",
-    createdAt: new Date().toISOString(),
-    namaPemilik: "Andi",
-    kepemilikanKendaraan: "Milik Sendiri",
-    nopol: "B 5678 ADV",
-    wilayahSamsatAsal: "Jakarta Timur",
-    wilayahSamsatTujuan: "-",
-    nominalPkbTerakhir: 200000,
-    nominalSwdkllj: 143000,
-    biayaJasa: 50000,
-    pkb: 200000,
-    swdkllj: 143000,
-    dendaSwdkllj: 0,
-    totalEstimasi: 393000,
-    payment: {
-      tipePembayaran: "Bayar di Akhir",
-      metodePembayaran: "Cash",
-      statusPembayaran: "Belum Bayar",
-      totalBiaya: 393000,
-      dibayar: 0,
-      kurang: 393000,
-    },
-    orderSource: "Offline / Loket",
-    createdBy: "Admin Loket",
     clientDocuments: {},
     samsatProcesses: [],
   };
+}
 
-  repo.saveOrder(dummyOrder);
+test("OrderRepository - Read operations return valid SQLite collections", async () => {
+  const { server, baseUrl } = await startTestServer();
+  const prevToken = process.env.AUTH_TOKEN;
+  try {
+    process.env.AUTH_TOKEN = await loginAsAdmin(baseUrl);
+    const repo = new OrderRepository(new ApiOrderProvider(`${baseUrl}/api`));
 
-  // Advance from Verifikasi (1) to Penjadwalan (2)
-  const advanceSuccess = repo.advanceOrder(testOrderNo, "Penjadwalan", {
-    currentStep: 2,
-    tanggalPenjadwalan: "2026-10-10",
-  });
-  assert.strictEqual(advanceSuccess, true, "advanceOrder should succeed");
+    const saved = await repo.saveOrderAsync(makeOrder("001", "Test Read Customer"));
+    await repo.initFromApi();
 
-  const orderAfterAdvance = repo.getByOrderNo(testOrderNo);
-  assert.strictEqual(orderAfterAdvance?.currentStageName, "Penjadwalan");
-  assert.strictEqual(orderAfterAdvance?.currentStep, 2);
-  assert.strictEqual(orderAfterAdvance?.tanggalPenjadwalan, "2026-10-10");
+    const activeOrders = repo.getActiveOrders();
+    assert.ok(activeOrders, "Active orders should exist");
+    assert.ok(Array.isArray(activeOrders["Verifikasi"]), "Stage Verifikasi should be an array");
 
-  // Verify it is no longer in Verifikasi
-  const verifikasiList = repo.getByStage("Verifikasi");
-  const inVerifikasi = verifikasiList.some((o) => o.orderNo === testOrderNo);
-  assert.strictEqual(inVerifikasi, false, "Order should no longer be in Verifikasi");
+    const allOrders = repo.getAllFlat();
+    assert.ok(Array.isArray(allOrders), "getAllFlat should return an array");
+    assert.ok(allOrders.length > 0, "Repository should have orders after saving");
 
-  // Verify it is in Penjadwalan
-  const penjadwalanList = repo.getByStage("Penjadwalan");
-  const inPenjadwalan = penjadwalanList.some((o) => o.orderNo === testOrderNo);
-  assert.strictEqual(inPenjadwalan, true, "Order should now be in Penjadwalan");
+    const foundByNo = repo.getByOrderNo(saved.orderNo);
+    assert.strictEqual(foundByNo?.orderNo, saved.orderNo, "getByOrderNo should find the order");
+
+    const byStage = repo.getByStage("Verifikasi");
+    assert.ok(Array.isArray(byStage), "getByStage should return an array");
+    assert.ok(byStage.some((o) => o.orderNo === saved.orderNo), "getByStage should include saved order");
+  } finally {
+    process.env.AUTH_TOKEN = prevToken;
+    server.close();
+  }
 });
 
-test("OrderRepository - archiveOrder moves order to archived collection", () => {
-  const provider = new MockOrderProvider();
-  const repo = new OrderRepository(provider);
+test("OrderRepository - Mutation operations: saveOrderAsync and updateOrderAsync", async () => {
+  const { server, baseUrl } = await startTestServer();
+  const prevToken = process.env.AUTH_TOKEN;
+  try {
+    process.env.AUTH_TOKEN = await loginAsAdmin(baseUrl);
+    const repo = new OrderRepository(new ApiOrderProvider(`${baseUrl}/api`));
 
-  const testOrderNo = `ARC-${Date.now()}`;
-  const dummyOrder: OperationalOrder = {
-    orderNo: testOrderNo,
-    customer: "Citra Selesai",
-    nomorHP: "0822222222",
-    layanan: "Perpanjangan 1 Tahun",
-    currentStep: 8,
-    currentStageName: "Dokumen Telah Diterima",
-    createdAt: new Date().toISOString(),
-    namaPemilik: "Citra",
-    kepemilikanKendaraan: "Milik Sendiri",
-    nopol: "B 9999 ARC",
-    wilayahSamsatAsal: "Jakarta Timur",
-    wilayahSamsatTujuan: "-",
-    nominalPkbTerakhir: 200000,
-    nominalSwdkllj: 143000,
-    biayaJasa: 50000,
-    pkb: 200000,
-    swdkllj: 143000,
-    dendaSwdkllj: 0,
-    totalEstimasi: 393000,
-    payment: {
-      tipePembayaran: "Bayar di Akhir",
-      metodePembayaran: "Cash",
-      statusPembayaran: "Lunas",
-      totalBiaya: 393000,
-      dibayar: 393000,
-      kurang: 0,
-    },
-    orderSource: "Offline / Loket",
-    createdBy: "Admin Loket",
-    clientDocuments: {},
-    samsatProcesses: [],
-  };
+    const saved = await repo.saveOrderAsync(makeOrder("002", "Budi Test"));
+    const fetched = repo.getByOrderNo(saved.orderNo);
+    assert.ok(fetched, "Order should be saved in repository");
+    assert.strictEqual(fetched?.customer, "Budi Test");
 
-  repo.saveOrder(dummyOrder);
-  assert.strictEqual(repo.getArchivedOrders().length, 0);
+    const updateSuccess = await repo.updateOrderAsync(saved.orderNo, { customer: "Budi Updated" });
+    assert.strictEqual(updateSuccess, true, "updateOrderAsync should succeed");
 
-  const archiveSuccess = repo.archiveOrder(testOrderNo);
-  assert.strictEqual(archiveSuccess, true, "archiveOrder should succeed");
+    await repo.initFromApi();
+    const updated = repo.getByOrderNo(saved.orderNo);
+    assert.strictEqual(updated?.customer, "Budi Updated", "Customer name should persist in SQLite");
 
-  const archivedList = repo.getArchivedOrders();
-  assert.strictEqual(archivedList.length, 1);
-  assert.strictEqual(archivedList[0].orderNo, testOrderNo);
-
-  // Active collection should not contain it
-  const activeOrder = repo.getByStage("Dokumen Telah Diterima").find((o) => o.orderNo === testOrderNo);
-  assert.strictEqual(activeOrder, undefined, "Archived order should not be in active stages");
+    assert.strictEqual(repo.updateOrder("NON-EXISTENT-9999", { customer: "Nobody" }), false);
+    await assert.rejects(() => repo.updateOrderAsync("NON-EXISTENT-9999", { customer: "Nobody" }));
+  } finally {
+    process.env.AUTH_TOKEN = prevToken;
+    server.close();
+  }
 });
 
-test("OrderRepository - Subscription notifies listeners on state changes", () => {
-  const provider = new MockOrderProvider();
-  const repo = new OrderRepository(provider);
+test("OrderRepository - advanceOrderAsync moves order between stages in SQLite", async () => {
+  const { server, baseUrl } = await startTestServer();
+  const prevToken = process.env.AUTH_TOKEN;
+  try {
+    process.env.AUTH_TOKEN = await loginAsAdmin(baseUrl);
+    const repo = new OrderRepository(new ApiOrderProvider(`${baseUrl}/api`));
 
-  let notifyCount = 0;
-  const unsubscribe = repo.subscribe(() => {
-    notifyCount++;
-  });
+    const saved = await repo.saveOrderAsync(makeOrder("003", "Andi Workflow"));
+    const advanced = await repo.advanceOrderAsync(saved.orderNo, "Penjadwalan", {
+      tanggalPenjadwalan: "2026-10-10",
+    });
+    assert.ok(advanced && typeof advanced === "object", "advanceOrderAsync should return updated order");
 
-  const testOrderNo = `NOTIFY-${Date.now()}`;
-  repo.saveOrder({
-    orderNo: testOrderNo,
-    customer: "Test Listener",
-    nomorHP: "0833333333",
-    layanan: "Perpanjangan 1 Tahun",
-    currentStep: 1,
-    currentStageName: "Verifikasi",
-    createdAt: new Date().toISOString(),
-    namaPemilik: "Test",
-    kepemilikanKendaraan: "Milik Sendiri",
-    nopol: "B 1111 NOT",
-    wilayahSamsatAsal: "Jakarta Timur",
-    wilayahSamsatTujuan: "-",
-    nominalPkbTerakhir: 100000,
-    nominalSwdkllj: 143000,
-    biayaJasa: 50000,
-    pkb: 100000,
-    swdkllj: 143000,
-    dendaSwdkllj: 0,
-    totalEstimasi: 293000,
-    payment: {
-      tipePembayaran: "Bayar di Awal",
-      metodePembayaran: "Cash",
-      statusPembayaran: "Lunas",
-      totalBiaya: 293000,
-      dibayar: 293000,
-      kurang: 0,
-    },
-    orderSource: "Offline / Loket",
-    createdBy: "Admin Loket",
-    clientDocuments: {},
-    samsatProcesses: [],
-  });
+    const orderAfterAdvance = repo.getByOrderNo(saved.orderNo);
+    assert.strictEqual(orderAfterAdvance?.currentStageName, "Penjadwalan");
+    assert.strictEqual(orderAfterAdvance?.currentStep, 2);
+    assert.strictEqual(orderAfterAdvance?.tanggalPenjadwalan, "2026-10-10");
 
-  assert.strictEqual(notifyCount, 1, "Listener should be called once on saveOrder");
+    assert.strictEqual(repo.getByStage("Verifikasi").some((o) => o.orderNo === saved.orderNo), false);
+    assert.strictEqual(repo.getByStage("Penjadwalan").some((o) => o.orderNo === saved.orderNo), true);
+  } finally {
+    process.env.AUTH_TOKEN = prevToken;
+    server.close();
+  }
+});
 
-  repo.updateOrder(testOrderNo, { customer: "Updated Listener" });
-  assert.strictEqual(notifyCount, 2, "Listener should be called again on updateOrder");
+test("OrderRepository - archiveOrderAsync moves Stage 8 order to archived collection", async () => {
+  const { server, baseUrl } = await startTestServer();
+  const prevToken = process.env.AUTH_TOKEN;
+  try {
+    process.env.AUTH_TOKEN = await loginAsAdmin(baseUrl);
+    const repo = new OrderRepository(new ApiOrderProvider(`${baseUrl}/api`));
 
-  unsubscribe();
-  repo.updateOrder(testOrderNo, { customer: "After Unsubscribe" });
-  assert.strictEqual(notifyCount, 2, "Listener should not be called after unsubscribe");
+    const saved = await repo.saveOrderAsync(makeOrder("004", "Citra Selesai"));
+    dbOrderRepository.updateOrder(saved.orderNo, {
+      currentStep: 8,
+      currentStageName: "Dokumen Telah Diterima",
+      isReceived: true,
+    });
+    await repo.initFromApi();
+    assert.strictEqual(repo.getArchivedOrders().length, 0);
+
+    const archiveSuccess = await repo.archiveOrderAsync(saved.orderNo);
+    assert.strictEqual(archiveSuccess, true, "archiveOrderAsync should succeed at Stage 8");
+
+    await repo.initFromApi();
+    const archivedList = repo.getArchivedOrders();
+    assert.ok(archivedList.some((o) => o.orderNo === saved.orderNo));
+
+    const activeOrder = repo.getByStage("Dokumen Telah Diterima").find((o) => o.orderNo === saved.orderNo);
+    assert.strictEqual(activeOrder, undefined, "Archived order should not be in active stages");
+  } finally {
+    process.env.AUTH_TOKEN = prevToken;
+    server.close();
+  }
+});
+
+test("OrderRepository - Subscription notifies listeners on state changes", async () => {
+  const { server, baseUrl } = await startTestServer();
+  const prevToken = process.env.AUTH_TOKEN;
+  try {
+    process.env.AUTH_TOKEN = await loginAsAdmin(baseUrl);
+    const repo = new OrderRepository(new ApiOrderProvider(`${baseUrl}/api`));
+    await repo.initFromApi();
+
+    let notifyCount = 0;
+    const unsubscribe = repo.subscribe(() => {
+      notifyCount++;
+    });
+
+    const saved = await repo.saveOrderAsync(makeOrder("005", "Test Listener"));
+    const countAfterSave = notifyCount;
+    assert.ok(countAfterSave >= 1, "Listener should be called on saveOrderAsync");
+
+    await repo.updateOrderAsync(saved.orderNo, { customer: "Updated Listener" });
+    assert.ok(notifyCount > countAfterSave, "Listener should be called again on updateOrderAsync");
+    const countBeforeUnsub = notifyCount;
+
+    unsubscribe();
+    await repo.updateOrderAsync(saved.orderNo, { customer: "After Unsubscribe" });
+    assert.strictEqual(notifyCount, countBeforeUnsub, "Listener should not be called after unsubscribe");
+  } finally {
+    process.env.AUTH_TOKEN = prevToken;
+    server.close();
+  }
 });

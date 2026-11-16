@@ -42,14 +42,15 @@ export function MasterDataContent({ tab }: MasterDataContentProps) {
   usePricingStore();
   const {
     karyawan: karyawanData,
-    isLoading: isKaryawanLoading,
-    error: karyawanError,
-    isStale: isKaryawanStale,
-    refresh: refreshKaryawan,
+    isKaryawanLoading,
+    karyawanError,
+    isKaryawanStale,
+    refresh: refreshKaryawanBase,
     addKaryawan,
     updateKaryawan,
     deleteKaryawan
   } = useKaryawanPengguna();
+  const refreshKaryawan = () => refreshKaryawanBase({ target: "employees" });
 
   const [isAddKaryawanOpen, setIsAddKaryawanOpen] = useState(false);
   const [isEditKaryawanOpen, setIsEditKaryawanOpen] = useState(false);

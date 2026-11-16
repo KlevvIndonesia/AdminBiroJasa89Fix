@@ -245,7 +245,7 @@ export const SERVICE_STANDARD_BASELINES: Record<
   string,
   { jasa: number; jasaR4?: number; jasaR2?: number; kurir: number }
 > = {
-  "Perpanjangan 1 Tahun": { jasa: 250000, jasaR4: 250000, jasaR2: 150000, kurir: 50000 },
+  "Perpanjangan 1 Tahun": { jasa: 250000, jasaR4: 250000, jasaR2: 200000, kurir: 50000 },
   "Perpanjangan 5 Tahun": { jasa: 500000, jasaR4: 500000, jasaR2: 300000, kurir: 50000 },
   "Mutasi Antar Samsat": { jasa: 800000, jasaR4: 800000, jasaR2: 500000, kurir: 50000 },
   "Mutasi Luar Daerah": { jasa: 1500000, jasaR4: 1500000, jasaR2: 500000, kurir: 50000 },

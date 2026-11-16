@@ -23,7 +23,29 @@ export async function getInvoices(req: AuthenticatedRequest, res: Response, next
 
 export async function getProfitList(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
   try {
-    const profitList = financeService.getProfitList();
+    const paymentMethodId =
+      typeof req.query.paymentMethodId === "string" && req.query.paymentMethodId.trim()
+        ? req.query.paymentMethodId.trim()
+        : undefined;
+    const startDate =
+      typeof req.query.startDate === "string" && req.query.startDate.trim()
+        ? req.query.startDate.trim()
+        : undefined;
+    const endDate =
+      typeof req.query.endDate === "string" && req.query.endDate.trim()
+        ? req.query.endDate.trim()
+        : undefined;
+    const category =
+      typeof req.query.category === "string" && req.query.category.trim()
+        ? req.query.category.trim()
+        : undefined;
+
+    const profitList = financeService.getProfitList({
+      paymentMethodId,
+      startDate,
+      endDate,
+      category,
+    });
     res.json({ success: true, message: "OK", data: profitList, timestamp: new Date().toISOString() });
   } catch (err) {
     next(err);
@@ -126,6 +148,24 @@ export async function addKasKantor(req: AuthenticatedRequest, res: Response, nex
   }
 }
 
+export async function updateKasKantor(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new ApiError(400, "INVALID_ID", "ID transaksi kas kantor tidak valid.");
+    }
+    const entry = financeService.updateKasKantor(id, req.body || {}, req.user);
+    res.status(200).json({
+      success: true,
+      message: "Transaksi kas kantor berhasil diperbarui.",
+      data: entry,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getPengeluaran(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const entries = financeService.getAllPengeluaran();
@@ -201,6 +241,47 @@ export async function completeInvoice(req: AuthenticatedRequest, res: Response, 
   }
 }
 
+export async function completeCashback(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const id = validatePositiveInteger(req.params.id, "ID invoice");
+    const headerKey = (req.headers["x-idempotency-key"] as string) || (req.headers["idempotency-key"] as string);
+    const bodyKey = req.body?.idempotencyKey;
+    const idempotencyKey = headerKey || bodyKey;
+
+    const invoice = financeService.completeCashback(
+      id,
+      {
+        catatan: req.body?.catatan,
+        idempotencyKey,
+        expectedVersion: req.body?.expectedVersion,
+      },
+      req.user
+    );
+    res.json({
+      success: true,
+      message: "Transaksi cashback berhasil diselesaikan dan dipindahkan ke Riwayat Cashback.",
+      data: invoice,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getCashbackHistory(_req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const history = financeService.getCashbackHistory();
+    res.json({
+      success: true,
+      message: "OK",
+      data: history,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function deleteKasKantor(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const id = req.params.id;
@@ -251,6 +332,38 @@ export async function addKasMessenger(req: AuthenticatedRequest, res: Response, 
   try {
     const entry = financeService.addKasMessenger(req.body, req.user);
     res.status(201).json({ success: true, message: "Kas messenger berhasil dicatat.", data: entry, timestamp: new Date().toISOString() });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function updateKasMessenger(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new ApiError(400, "INVALID_ID", "ID transaksi kas messenger tidak valid.");
+    }
+    const entry = financeService.updateKasMessenger(id, req.body || {}, req.user);
+    res.status(200).json({
+      success: true,
+      message: "Transaksi kas messenger berhasil diperbarui.",
+      data: entry,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getCashReconciliation(_req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const summary = financeService.getCashLedgerReconciliation();
+    res.status(200).json({
+      success: true,
+      message: "OK",
+      data: summary,
+      timestamp: new Date().toISOString(),
+    });
   } catch (err) {
     next(err);
   }

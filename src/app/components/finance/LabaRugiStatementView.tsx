@@ -24,12 +24,19 @@ import {
   LabaRugiTransactionRow,
   CanonicalLabaRugiSummary,
   parseDateFlexible,
+  isQuarantinedInvoice,
+  isInternalTransferTransaction,
 } from "../../../domain/finance/labaRugiCanonical";
+import { classifyFinancialTransaction } from "../../../domain/finance/types";
+import {
+  DAY_MS,
+  getWibPartsFromEpochMs,
+  matchesPeriodWib,
+} from "../../../domain/finance/datePeriod";
 import {
   Calendar,
   Download,
   FileText,
-  Printer,
   TrendingUp,
   TrendingDown,
   Search,
@@ -38,9 +45,10 @@ import {
   SlidersHorizontal,
   Info,
   Loader2,
+  AlertTriangle,
 } from "lucide-react";
 
-type PeriodPreset = "this_month" | "last_month" | "this_year" | "all" | "custom";
+type PeriodPreset = "today" | "this_week" | "this_month" | "last_month" | "this_year" | "all" | "custom";
 
 interface GenericDrillDownRow {
   id: string | number;
@@ -69,34 +77,39 @@ export function LabaRugiStatementView() {
     belumBayarList,
   } = useFinanceStore();
 
-  // 1. PERIOD FILTER STATES
+  // 1. PERIOD FILTER STATES (Anchored in Asia/Jakarta WIB)
   const [activePreset, setActivePreset] = useState<PeriodPreset>("this_month");
   const today = useMemo(() => new Date(), []);
 
   const defaultDates = useMemo(() => {
-    const year = today.getFullYear();
-    const month = today.getMonth(); // 0-indexed
+    const wib = getWibPartsFromEpochMs(today.getTime()) || getWibPartsFromEpochMs(Date.now())!;
+    const { year, month, day, dayOfWeek, ymd } = wib;
+    const pad2 = (n: number) => String(n).padStart(2, "0");
 
-    const startThisMonth = new Date(year, month, 1);
-    const endThisMonth = new Date(year, month + 1, 0);
+    // This Week (Monday .. Sunday in WIB)
+    const todayWibMidMs = Date.UTC(year, month - 1, day) - 7 * 3600 * 1000;
+    const diffFromMon = (dayOfWeek + 6) % 7;
+    const monStart = getWibPartsFromEpochMs(todayWibMidMs - diffFromMon * DAY_MS)!;
+    const sunEnd = getWibPartsFromEpochMs(todayWibMidMs - diffFromMon * DAY_MS + 6 * DAY_MS)!;
 
-    const startLastMonth = new Date(year, month - 1, 1);
-    const endLastMonth = new Date(year, month, 0);
+    // This Month
+    const lastDayThisMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    const startThisMonth = `${year}-${pad2(month)}-01`;
+    const endThisMonth = `${year}-${pad2(month)}-${pad2(lastDayThisMonth)}`;
 
-    const startThisYear = new Date(year, 0, 1);
-    const endThisYear = new Date(year, 11, 31);
-
-    const toYMD = (d: Date) => {
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, "0");
-      const day = String(d.getDate()).padStart(2, "0");
-      return `${y}-${m}-${day}`;
-    };
+    // Last Month
+    const prevMonthYear = month === 1 ? year - 1 : year;
+    const prevMonth = month === 1 ? 12 : month - 1;
+    const lastDayPrevMonth = new Date(Date.UTC(prevMonthYear, prevMonth, 0)).getUTCDate();
+    const startLastMonth = `${prevMonthYear}-${pad2(prevMonth)}-01`;
+    const endLastMonth = `${prevMonthYear}-${pad2(prevMonth)}-${pad2(lastDayPrevMonth)}`;
 
     return {
-      thisMonth: { start: toYMD(startThisMonth), end: toYMD(endThisMonth) },
-      lastMonth: { start: toYMD(startLastMonth), end: toYMD(endLastMonth) },
-      thisYear: { start: toYMD(startThisYear), end: toYMD(endThisYear) },
+      today: { start: ymd, end: ymd },
+      thisWeek: { start: monStart.ymd, end: sunEnd.ymd },
+      thisMonth: { start: startThisMonth, end: endThisMonth },
+      lastMonth: { start: startLastMonth, end: endLastMonth },
+      thisYear: { start: `${year}-01-01`, end: `${year}-12-31` },
     };
   }, [today]);
 
@@ -105,7 +118,13 @@ export function LabaRugiStatementView() {
 
   const handleSelectPreset = (preset: PeriodPreset) => {
     setActivePreset(preset);
-    if (preset === "this_month") {
+    if (preset === "today") {
+      setStartDate(defaultDates.today.start);
+      setEndDate(defaultDates.today.end);
+    } else if (preset === "this_week") {
+      setStartDate(defaultDates.thisWeek.start);
+      setEndDate(defaultDates.thisWeek.end);
+    } else if (preset === "this_month") {
       setStartDate(defaultDates.thisMonth.start);
       setEndDate(defaultDates.thisMonth.end);
     } else if (preset === "last_month") {
@@ -120,25 +139,12 @@ export function LabaRugiStatementView() {
     }
   };
 
-  // Helper date filter within range
+  // Canonical period matcher (rejects null/empty/dash/invalid dates for any bounded period)
   const isDateInPeriod = (dateStr?: string | null): boolean => {
-    if (!dateStr || dateStr === "-" || dateStr === "—") return true;
     if (activePreset === "all") return true;
     const d = parseDateFlexible(dateStr);
-    if (!d) return true;
-
-    if (startDate) {
-      const s = parseDateFlexible(startDate);
-      if (s && d < s) return false;
-    }
-    if (endDate) {
-      const e = parseDateFlexible(endDate);
-      if (e) {
-        e.setHours(23, 59, 59, 999);
-        if (d > e) return false;
-      }
-    }
-    return true;
+    if (!d) return false;
+    return matchesPeriodWib(d, "custom", today, startDate, endDate);
   };
 
   // 2. RETRIEVE CANONICAL LABA RUGI SUMMARY
@@ -149,53 +155,122 @@ export function LabaRugiStatementView() {
     return getCanonicalLabaRugi("custom", startDate, endDate);
   }, [getCanonicalLabaRugi, activePreset, startDate, endDate]);
 
-  // 3. RETRIEVE KAS KANTOR & KAS MESSENGER MUTASI IN PERIOD
+  // 3. RETRIEVE KAS KANTOR & KAS MESSENGER MUTASI IN PERIOD (Aligned with Canonical P&L Exclusion Rules)
+  const voidedKantorRefs = useMemo(() => {
+    const refs = new Set<string>();
+    (kasKantorList || []).forEach((item) => {
+      const ket = String(item.keterangan || "");
+      if (ket.includes("[VOID") || ket.includes("[BATAL")) {
+        const m = ket.match(/\[Ref:\s*([^\]]+)\]/);
+        if (m && m[1]) refs.add(m[1].trim());
+      }
+    });
+    return refs;
+  }, [kasKantorList]);
+
   const filteredKasKantor = useMemo(() => {
     return (kasKantorList || []).filter((item) => {
-      // Exclude void
+      const ket = String(item.keterangan || "");
       if (
         (item as any).is_void ||
         item.status === "VOIDED" ||
-        String(item.keterangan || "").startsWith("[VOID]")
+        ket.startsWith("[VOID") ||
+        ket.startsWith("[BATAL")
+      ) {
+        return false;
+      }
+      const refMatch = ket.match(/\[Ref:\s*([^\]]+)\]/);
+      if (refMatch && refMatch[1] && voidedKantorRefs.has(refMatch[1].trim())) {
+        return false;
+      }
+      if (!isDateInPeriod(item.tanggal)) return false;
+
+      if (isInternalTransferTransaction(item)) return false;
+      const classification = classifyFinancialTransaction(item);
+      if (
+        classification === "INTERNAL_TRANSFER" ||
+        classification === "CAPITAL_INJECTION" ||
+        classification === "SAMSAT_PASS_THROUGH" ||
+        classification === "CUSTOMER_REFUND"
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [kasKantorList, voidedKantorRefs, startDate, endDate, activePreset]);
+
+  const kasKantorUangMasuk = useMemo(() => {
+    if (canonicalSummary.kasKantorDebitNonInternal !== undefined) {
+      return canonicalSummary.kasKantorDebitNonInternal;
+    }
+    return filteredKasKantor.reduce((sum, item) => {
+      const ket = String(item.keterangan || "").toLowerCase();
+      const kat = String((item as any).kategori || "").toUpperCase();
+      if (kat === "PEMBAYARAN_INVOICE" || ket.startsWith("penerimaan pembayaran invoice") || Boolean((item as any).invoiceNo)) {
+        return sum;
+      }
+      return sum + Number(item.debit || 0);
+    }, 0);
+  }, [canonicalSummary, filteredKasKantor]);
+
+  const kasKantorUangKeluar = useMemo(() => {
+    return canonicalSummary.pengeluaranKantor + canonicalSummary.realizedCashback;
+  }, [canonicalSummary]);
+
+  const filteredKasMessenger = useMemo(() => {
+    const voidedCounts = new Map<string, number>();
+    (kasMessengerList || []).forEach((item) => {
+      const ket = String(item.keterangan || "");
+      if (ket.includes("[VOID") || ket.includes("[BATAL")) {
+        const m = ket.match(/\[Ref:\s*([^\]]+)\]/);
+        if (m && m[1]) {
+          const ref = m[1].trim();
+          voidedCounts.set(ref, (voidedCounts.get(ref) || 0) + 1);
+        }
+      }
+    });
+    const remainingCancel = new Map(voidedCounts);
+
+    return (kasMessengerList || []).filter((item) => {
+      const ket = String(item.keterangan || "");
+      if ((item as any).is_void || ket.startsWith("[VOID") || ket.startsWith("[BATAL")) return false;
+      const refMatch = ket.match(/\[Ref:\s*([^\]]+)\]/);
+      const refId = ((item as any).reimbursementId || (refMatch && refMatch[1] ? refMatch[1].trim() : "")) || "";
+      if (refId && (remainingCancel.get(refId) || 0) > 0) {
+        remainingCancel.set(refId, (remainingCancel.get(refId) || 1) - 1);
+        return false;
+      }
+      if (isInternalTransferTransaction(item)) return false;
+      const classification = classifyFinancialTransaction(item);
+      if (
+        classification === "INTERNAL_TRANSFER" ||
+        classification === "CAPITAL_INJECTION" ||
+        classification === "SAMSAT_PASS_THROUGH"
       ) {
         return false;
       }
       return isDateInPeriod(item.tanggal);
     });
-  }, [kasKantorList, startDate, endDate, activePreset]);
-
-  const kasKantorUangMasuk = useMemo(() => {
-    return filteredKasKantor.reduce((sum, item) => sum + Number(item.debit || 0), 0);
-  }, [filteredKasKantor]);
-
-  const kasKantorUangKeluar = useMemo(() => {
-    return filteredKasKantor.reduce((sum, item) => sum + Number(item.kredit || 0), 0);
-  }, [filteredKasKantor]);
-
-  const filteredKasMessenger = useMemo(() => {
-    return (kasMessengerList || []).filter((item) => {
-      if (String(item.keterangan || "").startsWith("[VOID]")) return false;
-      return isDateInPeriod(item.tanggal);
-    });
   }, [kasMessengerList, startDate, endDate, activePreset]);
 
   const kasMessengerUangMasuk = useMemo(() => {
+    if (canonicalSummary.kasMessengerInNonInternal !== undefined) {
+      return canonicalSummary.kasMessengerInNonInternal;
+    }
     return filteredKasMessenger.reduce(
       (sum, item) => sum + Number(item.in ?? (item as any).masuk ?? (item as any).debit ?? 0),
       0
     );
-  }, [filteredKasMessenger]);
+  }, [canonicalSummary, filteredKasMessenger]);
 
   const kasMessengerUangKeluar = useMemo(() => {
-    return filteredKasMessenger.reduce(
-      (sum, item) => sum + Number(item.out ?? (item as any).keluar ?? (item as any).kredit ?? 0),
-      0
-    );
-  }, [filteredKasMessenger]);
+    return canonicalSummary.pengeluaranMessenger;
+  }, [canonicalSummary]);
 
-  // Invoices filtered by period for Tagihan Customer & Pending Items
+  // Invoices filtered by period for Tagihan Customer & Pending Items (excludes quarantined & cancelled)
   const periodInvoices = useMemo(() => {
     return (invoices || []).filter((inv: any) => {
+      if (isQuarantinedInvoice(inv)) return false;
       if (
         inv.status === "CANCELLED" ||
         inv.billingStatus === "CANCELLED" ||
@@ -204,7 +279,7 @@ export function LabaRugiStatementView() {
       ) {
         return false;
       }
-      const dStr = inv.tanggal || inv.tanggalBayar || (inv as any).createdAt || "";
+      const dStr = inv.tanggalBayar || inv.tanggal || inv.tanggalInvoice || (inv as any).createdAt || "";
       return isDateInPeriod(dStr);
     });
   }, [invoices, startDate, endDate, activePreset]);
@@ -218,10 +293,8 @@ export function LabaRugiStatementView() {
   }, [periodInvoices]);
 
   const totalTagihanCustomer = useMemo(() => {
-    return filteredTagihanCustomer.reduce((sum: number, inv: any) => {
-      return sum + Number(inv.sisa ?? (inv as any).sisaTagihan ?? 0);
-    }, 0);
-  }, [filteredTagihanCustomer]);
+    return canonicalSummary.pendingUnpaidBalance;
+  }, [canonicalSummary]);
 
   // Uncollected service profit margin portion of Tagihan Customer (Accrual service fee)
   const uncollectedServiceProfit = useMemo(() => {
@@ -354,12 +427,21 @@ export function LabaRugiStatementView() {
 
   const getKasKantorMasukRows = (): GenericDrillDownRow[] => {
     return filteredKasKantor
-      .filter((k) => Number(k.debit || 0) > 0)
+      .filter((k) => {
+        const debit = Number(k.debit || 0);
+        if (debit <= 0) return false;
+        const ket = String(k.keterangan || "").toLowerCase();
+        const kat = String((k as any).kategori || "").toUpperCase();
+        if (kat === "PEMBAYARAN_INVOICE" || ket.startsWith("penerimaan pembayaran invoice") || Boolean((k as any).invoiceNo)) {
+          return false;
+        }
+        return true;
+      })
       .map((k) => ({
         id: `kk-in-${k.id}`,
         tanggal: k.tanggal,
         invoiceOrOrder: (k as any).invoiceNo || (k as any).orderNo || "-",
-        keterangan: k.keterangan || "Uang Masuk Kas Kantor",
+        keterangan: k.keterangan || "Uang Masuk Non-Invoice Kas Kantor",
         kategori: (k as any).kategori || "Debit Kas Kantor",
         nominal: Number(k.debit || 0),
         type: "in",
@@ -367,17 +449,33 @@ export function LabaRugiStatementView() {
   };
 
   const getKasKantorKeluarRows = (): GenericDrillDownRow[] => {
-    return filteredKasKantor
-      .filter((k) => Number(k.kredit || 0) > 0)
-      .map((k) => ({
-        id: `kk-out-${k.id}`,
-        tanggal: k.tanggal,
-        invoiceOrOrder: (k as any).invoiceNo || (k as any).orderNo || "-",
-        keterangan: k.keterangan || "Pengeluaran Kas Kantor",
-        kategori: (k as any).kategori || "Kredit Kas Kantor",
-        nominal: Number(k.kredit || 0),
-        type: "out",
+    const officeOpex = canonicalSummary.combinedTableData
+      .filter((r) => r.type === "out" && r.kategori === "Pengeluaran kantor")
+      .map((r) => ({
+        id: `kk-opex-${r.id}`,
+        tanggal: r.tanggal,
+        invoiceOrOrder: r.invoice || "-",
+        keterangan: r.keterangan,
+        kategori: "Pengeluaran Kantor",
+        nominal: r.nominal,
+        type: "out" as const,
       }));
+    const cashbackRows = periodInvoices
+      .filter((inv: any) => {
+        const cb = Number(inv.cashback ?? inv.cashback_nominal ?? 0);
+        const st = String(inv.cashbackStatus ?? inv.cashback_status ?? "").toUpperCase();
+        return cb > 0 && (st === "REALIZED" || st === "PAID" || st === "PROCESSED");
+      })
+      .map((inv: any) => ({
+        id: `kk-cb-${inv.id}`,
+        tanggal: inv.cashbackPaidAt || inv.tanggalBayar || inv.tanggal || "-",
+        invoiceOrOrder: inv.invoice || inv.invoiceNo || inv.orderNo || "-",
+        keterangan: `Realisasi Cashback Rekanan - ${inv.customer || "-"}`,
+        kategori: "Cashback Rekanan",
+        nominal: Number(inv.cashbackPaidAmount || inv.cashback || inv.cashback_nominal || 0),
+        type: "out" as const,
+      }));
+    return [...officeOpex, ...cashbackRows];
   };
 
   const getKasMessengerMasukRows = (): GenericDrillDownRow[] => {
@@ -387,7 +485,7 @@ export function LabaRugiStatementView() {
         id: `km-in-${m.id}`,
         tanggal: m.tanggal,
         invoiceOrOrder: "-",
-        keterangan: `${m.keterangan || "Top Up Kas Messenger"} (${m.messenger || "Kurir"})`,
+        keterangan: `${m.keterangan || "Penerimaan Eksternal Kas Messenger"} (${m.messenger || "Kurir"})`,
         kategori: m.jenis || "Debit Kas Messenger",
         nominal: Number(m.in ?? (m as any).masuk ?? (m as any).debit ?? 0),
         type: "in",
@@ -395,15 +493,15 @@ export function LabaRugiStatementView() {
   };
 
   const getKasMessengerKeluarRows = (): GenericDrillDownRow[] => {
-    return filteredKasMessenger
-      .filter((m) => Number(m.out ?? (m as any).keluar ?? (m as any).kredit ?? 0) > 0)
-      .map((m) => ({
-        id: `km-out-${m.id}`,
-        tanggal: m.tanggal,
-        invoiceOrOrder: "-",
-        keterangan: `${m.keterangan || "Operasional Lapangan"} (${m.messenger || "Kurir"})`,
-        kategori: m.jenis || "Operasional Kurir",
-        nominal: Number(m.out ?? (m as any).keluar ?? (m as any).kredit ?? 0),
+    return canonicalSummary.combinedTableData
+      .filter((r) => r.type === "out" && r.kategori.startsWith("Pengeluaran messenger"))
+      .map((r) => ({
+        id: `km-out-${r.id}`,
+        tanggal: r.tanggal,
+        invoiceOrOrder: r.invoice || "-",
+        keterangan: r.keterangan,
+        kategori: r.kategori,
+        nominal: r.nominal,
         type: "out",
       }));
   };
@@ -464,6 +562,10 @@ export function LabaRugiStatementView() {
     const periodLabel =
       activePreset === "all"
         ? "Semua Data"
+        : activePreset === "today"
+        ? `Hari Ini (${formatDateDDMMYYYY(startDate)})`
+        : activePreset === "this_week"
+        ? `Minggu Ini (${formatDateDDMMYYYY(startDate)} s.d ${formatDateDDMMYYYY(endDate)})`
         : activePreset === "this_month"
         ? `Bulan Ini (${formatDateDDMMYYYY(startDate)} s.d ${formatDateDDMMYYYY(endDate)})`
         : activePreset === "last_month"
@@ -572,16 +674,16 @@ export function LabaRugiStatementView() {
             <span className="px-2 py-0.5 rounded text-[11px] font-bold tracking-wider uppercase bg-primary/10 text-primary border border-primary/20">
               Ringkasan Finansial
             </span>
-            <h1 className="text-lg sm:text-xl font-bold tracking-tight text-foreground">
+            <h2 className="text-lg sm:text-xl font-bold tracking-tight text-foreground">
               Laporan Laba Rugi
-            </h1>
+            </h2>
           </div>
           <p className="text-xs text-muted-foreground mt-0.5">
             Ringkasan keuangan dari Data Penjualan, Kas Kantor, dan Kas Messenger
           </p>
         </div>
 
-        {/* Action Buttons: Export CSV, Export PDF, Cetak Laporan */}
+        {/* Action Buttons: Export CSV, Export PDF */}
         <div className="flex items-center gap-2 shrink-0">
           <Button
             variant="outline"
@@ -612,21 +714,6 @@ export function LabaRugiStatementView() {
             )}
             <span>Export PDF</span>
           </Button>
-
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => handleExportPDF("print")}
-            disabled={isExporting !== null}
-            className="h-8 text-xs font-medium gap-1.5 border-border hover:bg-muted shadow-2xs"
-          >
-            {isExporting === "print" ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : (
-              <Printer className="w-3.5 h-3.5" />
-            )}
-            <span>Cetak Laporan</span>
-          </Button>
         </div>
       </div>
 
@@ -641,6 +728,22 @@ export function LabaRugiStatementView() {
               <Calendar className="w-3.5 h-3.5" />
               Periode:
             </span>
+            <Button
+              variant={activePreset === "today" ? "default" : "outline"}
+              size="sm"
+              onClick={() => handleSelectPreset("today")}
+              className="h-7 text-xs font-medium px-2.5"
+            >
+              Hari Ini
+            </Button>
+            <Button
+              variant={activePreset === "this_week" ? "default" : "outline"}
+              size="sm"
+              onClick={() => handleSelectPreset("this_week")}
+              className="h-7 text-xs font-medium px-2.5"
+            >
+              Minggu Ini
+            </Button>
             <Button
               variant={activePreset === "this_month" ? "default" : "outline"}
               size="sm"
@@ -686,7 +789,7 @@ export function LabaRugiStatementView() {
                   setStartDate(e.target.value);
                   setActivePreset("custom");
                 }}
-                className="h-7 text-xs w-36 bg-background font-normal"
+                className="h-8 text-xs w-36 bg-background font-normal"
               />
             </div>
             <div className="flex items-center gap-1.5">
@@ -698,7 +801,7 @@ export function LabaRugiStatementView() {
                   setEndDate(e.target.value);
                   setActivePreset("custom");
                 }}
-                className="h-7 text-xs w-36 bg-background font-normal"
+                className="h-8 text-xs w-36 bg-background font-normal"
               />
             </div>
           </div>
@@ -800,6 +903,15 @@ export function LabaRugiStatementView() {
               (Semua komponen pending dinonaktifkan — hasil murni transaksi aktual)
             </span>
           )}
+          {canonicalSummary.invalidDateCount && canonicalSummary.invalidDateCount > 0 ? (
+            <span
+              className="ml-auto inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-300/60 font-medium"
+              title="Transaksi dengan tanggal kosong/tidak valid otomatis dikecualikan dari filter periode"
+            >
+              <AlertTriangle className="w-3 h-3" />
+              {canonicalSummary.invalidDateCount} data bertanggal tidak valid dikecualikan dari periode
+            </span>
+          ) : null}
         </div>
       </Card>
 
@@ -820,35 +932,35 @@ export function LabaRugiStatementView() {
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full text-xs text-left border-collapse">
-            <thead className="bg-muted text-muted-foreground uppercase text-[11px] tracking-wider border-b border-border">
+          <table className="finance-table w-full text-xs text-left border-collapse">
+            <thead className="finance-table__header bg-muted text-muted-foreground uppercase text-[11px] tracking-wider border-b border-border">
               <tr>
-                <th className="py-2.5 px-3.5 font-semibold min-w-[180px]">Sumber Transaksi</th>
-                <th className="py-2.5 px-3.5 font-semibold text-right min-w-[140px] text-emerald-700 dark:text-emerald-400">
+                <th className="py-2 px-2.5 font-semibold min-w-[180px]">Sumber Transaksi</th>
+                <th className="py-2 px-2.5 font-semibold text-right min-w-[140px] text-emerald-700 dark:text-emerald-400">
                   Uang Masuk
                 </th>
-                <th className="py-2.5 px-3.5 font-semibold text-right min-w-[140px] text-rose-700 dark:text-rose-400">
+                <th className="py-2 px-2.5 font-semibold text-right min-w-[140px] text-rose-700 dark:text-rose-400">
                   Uang Keluar
                 </th>
-                <th className="py-2.5 px-3.5 font-semibold text-right min-w-[140px]">
+                <th className="py-2 px-2.5 font-semibold text-right min-w-[140px]">
                   Profit Terpending
                 </th>
-                <th className="py-2.5 px-3.5 font-semibold text-right min-w-[140px]">
+                <th className="py-2 px-2.5 font-semibold text-right min-w-[140px]">
                   Cashback Terpending
                 </th>
-                <th className="py-2.5 px-3.5 font-semibold text-right min-w-[140px]">
+                <th className="py-2 px-2.5 font-semibold text-right min-w-[140px]">
                   Tagihan Customer
                 </th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-border/60">
+            <tbody className="finance-table__body divide-y divide-border/60">
               {/* BARIS 1: DATA PENJUALAN */}
               <tr className="hover:bg-muted/30 transition-colors">
-                <td className="py-3 px-3.5 font-semibold text-[13px] text-foreground">
+                <td className="py-2 px-2.5 font-semibold text-xs text-foreground">
                   Data Penjualan
                 </td>
                 {/* Uang Masuk */}
-                <td className="py-3 px-3.5 text-right font-mono font-semibold text-[13px] text-emerald-600 dark:text-emerald-400 tabular-nums">
+                <td className="py-2 px-2.5 text-right font-mono font-semibold text-xs text-emerald-600 dark:text-emerald-400 tabular-nums">
                   <button
                     type="button"
                     onClick={() =>
@@ -866,7 +978,7 @@ export function LabaRugiStatementView() {
                   </button>
                 </td>
                 {/* Uang Keluar */}
-                <td className="py-3 px-3.5 text-right font-mono font-semibold text-[13px] text-rose-600 dark:text-rose-400 tabular-nums">
+                <td className="py-2 px-2.5 text-right font-mono font-semibold text-xs text-rose-600 dark:text-rose-400 tabular-nums">
                   <button
                     type="button"
                     onClick={() =>
@@ -884,7 +996,7 @@ export function LabaRugiStatementView() {
                   </button>
                 </td>
                 {/* Profit Terpending */}
-                <td className="py-3 px-3.5 text-right font-mono font-medium text-[12px] text-foreground tabular-nums">
+                <td className="py-2 px-2.5 text-right font-mono font-medium text-xs text-foreground tabular-nums">
                   <button
                     type="button"
                     onClick={() =>
@@ -902,7 +1014,7 @@ export function LabaRugiStatementView() {
                   </button>
                 </td>
                 {/* Cashback Terpending */}
-                <td className="py-3 px-3.5 text-right font-mono font-medium text-[12px] text-foreground tabular-nums">
+                <td className="py-2 px-2.5 text-right font-mono font-medium text-xs text-foreground tabular-nums">
                   <button
                     type="button"
                     onClick={() =>
@@ -920,7 +1032,7 @@ export function LabaRugiStatementView() {
                   </button>
                 </td>
                 {/* Tagihan Customer */}
-                <td className="py-3 px-3.5 text-right font-mono font-medium text-[12px] text-foreground tabular-nums">
+                <td className="py-2 px-2.5 text-right font-mono font-medium text-xs text-foreground tabular-nums">
                   <button
                     type="button"
                     onClick={() =>
@@ -941,11 +1053,11 @@ export function LabaRugiStatementView() {
 
               {/* BARIS 2: KAS KANTOR */}
               <tr className="hover:bg-muted/30 transition-colors">
-                <td className="py-3 px-3.5 font-semibold text-[13px] text-foreground">
+                <td className="py-2 px-2.5 font-semibold text-xs text-foreground">
                   Kas Kantor
                 </td>
                 {/* Uang Masuk */}
-                <td className="py-3 px-3.5 text-right font-mono font-semibold text-[13px] text-emerald-600 dark:text-emerald-400 tabular-nums">
+                <td className="py-2 px-2.5 text-right font-mono font-semibold text-xs text-emerald-600 dark:text-emerald-400 tabular-nums">
                   <button
                     type="button"
                     onClick={() =>
@@ -963,7 +1075,7 @@ export function LabaRugiStatementView() {
                   </button>
                 </td>
                 {/* Uang Keluar */}
-                <td className="py-3 px-3.5 text-right font-mono font-semibold text-[13px] text-rose-600 dark:text-rose-400 tabular-nums">
+                <td className="py-2 px-2.5 text-right font-mono font-semibold text-xs text-rose-600 dark:text-rose-400 tabular-nums">
                   <button
                     type="button"
                     onClick={() =>
@@ -981,26 +1093,26 @@ export function LabaRugiStatementView() {
                   </button>
                 </td>
                 {/* Profit Terpending */}
-                <td className="py-3 px-3.5 text-right font-mono text-muted-foreground text-center">
+                <td className="py-2 px-2.5 text-right font-mono text-muted-foreground text-center">
                   —
                 </td>
                 {/* Cashback Terpending */}
-                <td className="py-3 px-3.5 text-right font-mono text-muted-foreground text-center">
+                <td className="py-2 px-2.5 text-right font-mono text-muted-foreground text-center">
                   —
                 </td>
                 {/* Tagihan Customer */}
-                <td className="py-3 px-3.5 text-right font-mono text-muted-foreground text-center">
+                <td className="py-2 px-2.5 text-right font-mono text-muted-foreground text-center">
                   —
                 </td>
               </tr>
 
               {/* BARIS 3: KAS MESSENGER */}
               <tr className="hover:bg-muted/30 transition-colors">
-                <td className="py-3 px-3.5 font-semibold text-[13px] text-foreground">
+                <td className="py-2 px-2.5 font-semibold text-xs text-foreground">
                   Kas Messenger
                 </td>
                 {/* Uang Masuk */}
-                <td className="py-3 px-3.5 text-right font-mono font-semibold text-[13px] text-emerald-600 dark:text-emerald-400 tabular-nums">
+                <td className="py-2 px-2.5 text-right font-mono font-semibold text-xs text-emerald-600 dark:text-emerald-400 tabular-nums">
                   <button
                     type="button"
                     onClick={() =>
@@ -1018,7 +1130,7 @@ export function LabaRugiStatementView() {
                   </button>
                 </td>
                 {/* Uang Keluar */}
-                <td className="py-3 px-3.5 text-right font-mono font-semibold text-[13px] text-rose-600 dark:text-rose-400 tabular-nums">
+                <td className="py-2 px-2.5 text-right font-mono font-semibold text-xs text-rose-600 dark:text-rose-400 tabular-nums">
                   <button
                     type="button"
                     onClick={() =>
@@ -1036,27 +1148,27 @@ export function LabaRugiStatementView() {
                   </button>
                 </td>
                 {/* Profit Terpending */}
-                <td className="py-3 px-3.5 text-right font-mono text-muted-foreground text-center">
+                <td className="py-2 px-2.5 text-right font-mono text-muted-foreground text-center">
                   —
                 </td>
                 {/* Cashback Terpending */}
-                <td className="py-3 px-3.5 text-right font-mono text-muted-foreground text-center">
+                <td className="py-2 px-2.5 text-right font-mono text-muted-foreground text-center">
                   —
                 </td>
                 {/* Tagihan Customer */}
-                <td className="py-3 px-3.5 text-right font-mono text-muted-foreground text-center">
+                <td className="py-2 px-2.5 text-right font-mono text-muted-foreground text-center">
                   —
                 </td>
               </tr>
             </tbody>
 
             {/* BARIS 4: TOTAL KESELURUHAN */}
-            <tfoot className="bg-muted text-foreground border-t-2 border-border font-bold text-[13px]">
+            <tfoot className="finance-table__footer bg-muted text-foreground border-t-2 border-border font-bold text-xs">
               <tr>
-                <td className="py-3 px-3.5 text-left uppercase tracking-wider font-bold">
+                <td className="py-2 px-2.5 text-left uppercase tracking-wider font-bold">
                   TOTAL
                 </td>
-                <td className="py-3 px-3.5 text-right font-mono text-emerald-600 dark:text-emerald-400 font-bold tabular-nums">
+                <td className="py-2 px-2.5 text-right font-mono text-emerald-600 dark:text-emerald-400 font-bold tabular-nums">
                   <button
                     type="button"
                     onClick={() =>
@@ -1076,7 +1188,7 @@ export function LabaRugiStatementView() {
                     {formatRupiah(totalColUangMasuk)}
                   </button>
                 </td>
-                <td className="py-3 px-3.5 text-right font-mono text-rose-600 dark:text-rose-400 font-bold tabular-nums">
+                <td className="py-2 px-2.5 text-right font-mono text-rose-600 dark:text-rose-400 font-bold tabular-nums">
                   <button
                     type="button"
                     onClick={() =>
@@ -1096,7 +1208,7 @@ export function LabaRugiStatementView() {
                     {formatRupiah(totalColUangKeluar)}
                   </button>
                 </td>
-                <td className="py-3 px-3.5 text-right font-mono font-bold tabular-nums text-foreground">
+                <td className="py-2 px-2.5 text-right font-mono font-bold tabular-nums text-foreground">
                   <button
                     type="button"
                     onClick={() =>
@@ -1112,7 +1224,7 @@ export function LabaRugiStatementView() {
                     {formatRupiah(totalColProfitPending)}
                   </button>
                 </td>
-                <td className="py-3 px-3.5 text-right font-mono font-bold tabular-nums text-foreground">
+                <td className="py-2 px-2.5 text-right font-mono font-bold tabular-nums text-foreground">
                   <button
                     type="button"
                     onClick={() =>
@@ -1128,7 +1240,7 @@ export function LabaRugiStatementView() {
                     {formatRupiah(totalColCashbackPending)}
                   </button>
                 </td>
-                <td className="py-3 px-3.5 text-right font-mono font-bold tabular-nums text-foreground">
+                <td className="py-2 px-2.5 text-right font-mono font-bold tabular-nums text-foreground">
                   <button
                     type="button"
                     onClick={() =>
@@ -1312,18 +1424,18 @@ export function LabaRugiStatementView() {
 
           {/* Drill Down Table */}
           <div className="overflow-y-auto max-h-[50vh] rounded-lg border border-border">
-            <table className="w-full text-xs text-left border-collapse">
-              <thead className="bg-muted text-muted-foreground uppercase text-[10px] tracking-wider sticky top-0 z-10 border-b border-border">
+            <table className="finance-table w-full text-xs text-left border-collapse">
+              <thead className="finance-table__header bg-muted text-muted-foreground uppercase text-[10px] tracking-wider sticky top-0 z-10 border-b border-border">
                 <tr>
-                  <th className="py-2 px-3 text-center w-12 font-semibold">No.</th>
-                  <th className="py-2 px-3 w-28 font-semibold">Tanggal</th>
-                  <th className="py-2 px-3 w-36 font-semibold">No. Invoice / Order</th>
-                  <th className="py-2 px-3 min-w-[200px] font-semibold">Keterangan Transaksi</th>
-                  <th className="py-2 px-3 w-36 font-semibold">Kategori</th>
-                  <th className="py-2 px-3 text-right w-32 font-semibold">Nominal (Rp)</th>
+                  <th className="py-2 px-2.5 text-center w-12 font-semibold">No.</th>
+                  <th className="py-2 px-2.5 w-28 font-semibold">Tanggal</th>
+                  <th className="py-2 px-2.5 w-36 font-semibold">No. Invoice / Order</th>
+                  <th className="py-2 px-2.5 min-w-[200px] font-semibold">Keterangan Transaksi</th>
+                  <th className="py-2 px-2.5 w-36 font-semibold">Kategori</th>
+                  <th className="py-2 px-2.5 text-right w-32 font-semibold">Nominal (Rp)</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-border/60">
+              <tbody className="finance-table__body divide-y divide-border/60">
                 {filteredDrillDownRows.length > 0 ? (
                   filteredDrillDownRows.map((row, idx) => (
                     <tr key={row.id || idx} className="hover:bg-muted/30 transition-colors">

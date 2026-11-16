@@ -38,21 +38,21 @@ let server: http.Server;
 let baseUrl: string;
 
 const messengerUser = {
-  userId: "user-msg-001",
+  userId: "usr-4",
   email: "budi.messenger@birojasa.com",
   role: "messenger",
   nama: "Budi Santoso",
   jabatan: "MESSENGER",
-  employeeId: "EMP-MSG-001",
+  employeeId: "EMP-0004",
 };
 
 const adminUser = {
-  userId: "user-admin-001",
+  userId: "usr-2",
   email: "admin@birojasa.com",
   role: "admin",
   nama: "Admin Operasional",
   jabatan: "ADMIN",
-  employeeId: "EMP-ADM-001",
+  employeeId: "EMP-0002",
 };
 
 const messengerToken = generateToken(messengerUser);
@@ -95,7 +95,7 @@ function seedTestOrder(orderNo: string, overrides: Record<string, any> = {}) {
     isCancelled: false,
     messenger: "Budi Santoso",
     assignedMessengerName: "Budi Santoso",
-    assignedMessengerId: "EMP-MSG-001",
+    assignedMessengerId: "EMP-0004",
     messengerTaskStatus: "Sedang Dijemput",
     pickupCompleted: false,
     totalBiaya: 500000,
@@ -127,7 +127,7 @@ test("PATCH B - TASK B2: completeSamsatProcess rejects non-empty note from messe
       currentStep: 4,
       currentStageName: "Proses Samsat",
       samsatStatus: "Sedang Proses Samsat",
-      samsatMessengerId: "EMP-MSG-001",
+      samsatMessengerId: "EMP-0004",
       petugasSamsat: "Budi Santoso",
       samsatProcesses: [
         { id: "c1", name: "Cek Fisik", status: "Selesai" },
@@ -139,7 +139,7 @@ test("PATCH B - TASK B2: completeSamsatProcess rejects non-empty note from messe
         "Proses Samsat": {
           status: "ACCEPTED",
           isLocked: true,
-          courierId: "EMP-MSG-001",
+          courierId: "EMP-0004",
           courierName: "Budi Santoso",
         },
       },
@@ -175,7 +175,7 @@ test("PATCH B - TASK B2: completeSamsatProcess without note succeeds with canoni
       currentStep: 4,
       currentStageName: "Proses Samsat",
       samsatStatus: "Sedang Proses Samsat",
-      samsatMessengerId: "EMP-MSG-001",
+      samsatMessengerId: "EMP-0004",
       petugasSamsat: "Budi Santoso",
       samsatProcesses: [
         { id: "c1", name: "Cek Fisik", status: "Selesai" },
@@ -187,7 +187,7 @@ test("PATCH B - TASK B2: completeSamsatProcess without note succeeds with canoni
         "Proses Samsat": {
           status: "ACCEPTED",
           isLocked: true,
-          courierId: "EMP-MSG-001",
+          courierId: "EMP-0004",
           courierName: "Budi Santoso",
         },
       },
@@ -290,12 +290,12 @@ test("PATCH B - TASK B3: releaseDeliveryTask rejects non-empty notes from messen
       currentStageName: "Pengantaran",
       deliveryStatus: "Sedang Dikirim",
       messengerPengantar: "Budi Santoso",
-      deliveryMessengerId: "EMP-MSG-001",
+      deliveryMessengerId: "EMP-0004",
       taskAcceptance: {
         "Pengantaran Dokumen": {
           status: "ACCEPTED",
           isLocked: true,
-          courierId: "EMP-MSG-001",
+          courierId: "EMP-0004",
           courierName: "Budi Santoso",
         },
       },
@@ -327,7 +327,7 @@ test("PATCH B - TASK B4: declineMessengerTask rejects non-empty reason from mess
         "Jemput Dokumen": {
           status: "PENDING",
           isLocked: false,
-          courierId: "EMP-MSG-001",
+          courierId: "EMP-0004",
           courierName: "Budi Santoso",
         },
       },
@@ -364,7 +364,7 @@ test("PATCH B - TASK B4: declineMessengerTask without reason succeeds with canon
         "Jemput Dokumen": {
           status: "PENDING",
           isLocked: false,
-          courierId: "EMP-MSG-001",
+          courierId: "EMP-0004",
           courierName: "Budi Santoso",
         },
       },
@@ -553,12 +553,12 @@ test("PATCH B - TASK B6: completeDeliveryTask rejects non-empty notes from messe
       currentStageName: "Pengantaran",
       deliveryStatus: "Sedang Dikirim",
       messengerPengantar: "Budi Santoso",
-      deliveryMessengerId: "EMP-MSG-001",
+      deliveryMessengerId: "EMP-0004",
       taskAcceptance: {
         "Pengantaran Dokumen": {
           status: "ACCEPTED",
           isLocked: true,
-          courierId: "EMP-MSG-001",
+          courierId: "EMP-0004",
           courierName: "Budi Santoso",
         },
       },
@@ -593,7 +593,7 @@ test("PATCH B - TASK B6: reportSamsatPickupKendala rejects free-text notes and c
       currentStageName: "Proses Samsat",
       samsatStatus: "Selesai",
       samsatPickupStatus: "Sedang Jemput Dokumen Samsat",
-      samsatPickupMessengerId: "EMP-MSG-001",
+      samsatPickupMessengerId: "EMP-0004",
       petugasJemputSamsat: "Budi Santoso",
       samsatCycle: 1,
       taskAcceptance: {
@@ -601,7 +601,7 @@ test("PATCH B - TASK B6: reportSamsatPickupKendala rejects free-text notes and c
           status: "ACCEPTED",
           cycle: 1,
           isLocked: true,
-          courierId: "EMP-MSG-001",
+          courierId: "EMP-0004",
           courierName: "Budi Santoso",
         },
       },

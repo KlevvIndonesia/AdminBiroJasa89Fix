@@ -71,10 +71,10 @@ export async function createAccessTicket(
     }
 
     // 2. Ticket Issuance Authorization Matrix
-    const role = (req.user.role || req.user.jabatan || "").toLowerCase();
+    const role = (req.user.role || "").toLowerCase();
     const uid = String(req.user.userId || (req.user as any).id || "");
 
-    if (role === "administrator" || role === "svp" || role === "finance") {
+    if (role === "administrator" || role === "finance") {
       // Full ticket issuance access
     } else if (role === "admin") {
       // Operational admin can issue tickets for order documents or documents uploaded by this admin

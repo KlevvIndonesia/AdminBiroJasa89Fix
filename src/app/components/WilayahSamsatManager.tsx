@@ -7,7 +7,9 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog";
 import { Label } from "./ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 import { TablePagination } from "./ui/TablePagination";
+import { DataTableShell, DataTableEmptyRow } from "./ui/data-table";
 import {
   Building2,
   MapPin,
@@ -567,9 +569,10 @@ export function WilayahSamsatManager() {
                 {(searchQuery || selectedProvinsi !== "all" || selectedJenis !== "all" || selectedStatus !== "all") && (
                   <Button
                     variant="ghost"
-                    size="sm"
+                    size="icon"
                     onClick={handleResetFilters}
-                    className="h-9 px-2 text-xs text-muted-foreground hover:text-foreground shrink-0"
+                    className="text-muted-foreground hover:text-foreground shrink-0"
+                    aria-label="Reset Filter"
                     title="Reset Filter"
                   >
                     <RotateCcw className="w-3.5 h-3.5" />
@@ -580,107 +583,8 @@ export function WilayahSamsatManager() {
           </Card>
 
           {/* Wilayah Table */}
-          <Card className="border border-border/80 bg-card overflow-hidden shadow-2xs flex-1 flex flex-col min-h-0">
-            <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-320px)] sm:max-h-[calc(100vh-340px)] min-h-[160px]">
-              <table className="w-full text-xs text-left">
-                <thead className="sticky top-0 z-10 bg-card border-b border-border shadow-2xs text-muted-foreground uppercase text-[10px] tracking-wider">
-                  <tr>
-                    <th className="py-2.5 px-3 font-semibold w-24 bg-card">Kode</th>
-                    <th className="py-2.5 px-3 font-semibold bg-card">Kabupaten / Kota</th>
-                    <th className="py-2.5 px-3 font-semibold w-28 bg-card">Jenis</th>
-                    <th className="py-2.5 px-3 font-semibold bg-card">Provinsi</th>
-                    <th className="py-2.5 px-3 font-semibold bg-card">Kantor Samsat Terdaftar</th>
-                    <th className="py-2.5 px-3 font-semibold w-36 bg-card">Status Biaya</th>
-                    <th className="py-2.5 px-3 font-semibold text-right w-40 bg-card">Aksi</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border/60">
-                  {paginatedWilayah.length === 0 ? (
-                    <tr>
-                      <td colSpan={7} className="py-8 text-center text-muted-foreground">
-                        Tidak ada wilayah yang sesuai dengan filter pencarian.
-                      </td>
-                    </tr>
-                  ) : (
-                    paginatedWilayah.map((item) => {
-                      const hasSamsat = item.hasConfiguredSamsat;
-                      return (
-                        <tr key={item.kode} className="hover:bg-muted/30 transition-colors">
-                          <td className="py-2 px-3 font-mono text-[11px] font-semibold text-foreground">
-                            {item.kode}
-                          </td>
-                          <td className="py-2 px-3 font-medium text-foreground">
-                            {item.nama}
-                          </td>
-                          <td className="py-2 px-3">
-                            <Badge
-                              variant="outline"
-                              className={cn(
-                                "text-[10px] px-2 py-0 h-4 border",
-                                item.jenis === "Kota"
-                                  ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20"
-                                  : "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20"
-                              )}
-                            >
-                              {item.jenis}
-                            </Badge>
-                          </td>
-                          <td className="py-2 px-3 text-muted-foreground">
-                            {item.provinsi}
-                          </td>
-                          <td className="py-2 px-3">
-                            {item.samsatOffices && item.samsatOffices.length > 0 ? (
-                              <div className="flex flex-wrap gap-1">
-                                {item.samsatOffices.map((s: SamsatMasterItem) => (
-                                  <span
-                                    key={s.id}
-                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-primary/10 text-primary border border-primary/20"
-                                  >
-                                    <Building2 className="w-3 h-3 shrink-0" />
-                                    <span>{s.name}</span>
-                                  </span>
-                                ))}
-                              </div>
-                            ) : (
-                              <span className="text-muted-foreground text-[11px] italic">
-                                Belum ada kantor Samsat terdaftar
-                              </span>
-                            )}
-                          </td>
-                          <td className="py-2 px-3">
-                            {hasSamsat ? (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border border-emerald-500/30">
-                                <CheckCircle2 className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
-                                Terkonfigurasi
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium bg-muted text-muted-foreground border border-border">
-                                <AlertCircle className="w-3 h-3 text-muted-foreground" />
-                                Belum Dikonfigurasi
-                              </span>
-                            )}
-                          </td>
-                          <td className="py-2 px-3 text-right">
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => handleOpenLinkWilayah(item)}
-                              className="h-7 px-2 text-[11px] gap-1 hover:border-primary/50"
-                            >
-                              <Link2 className="w-3 h-3" />
-                              <span>{hasSamsat ? "Kelola Samsat" : "Hubungkan Samsat"}</span>
-                            </Button>
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Pagination */}
-            <div className="p-3 border-t border-border/80 bg-card shrink-0 mt-auto">
+          <DataTableShell
+            footer={
               <TablePagination
                 currentPage={currentPage}
                 totalItems={totalWilayahItems}
@@ -692,8 +596,108 @@ export function WilayahSamsatManager() {
                 }}
                 pageSizeOptions={[10, 25, 50, 100]}
               />
-            </div>
-          </Card>
+            }
+          >
+            <Table
+              containerClassName="overflow-x-auto overflow-y-auto max-h-[calc(100vh-320px)] sm:max-h-[calc(100vh-340px)] min-h-[160px]"
+              className="w-full text-xs text-left"
+            >
+              <TableHeader className="sticky top-0 z-10 bg-card border-b border-border shadow-2xs">
+                <TableRow className="hover:bg-transparent">
+                  <TableHead className="py-2.5 px-3 font-semibold text-xs w-24 bg-card">Kode</TableHead>
+                  <TableHead className="py-2.5 px-3 font-semibold text-xs bg-card">Kabupaten / Kota</TableHead>
+                  <TableHead className="py-2.5 px-3 font-semibold text-xs w-28 bg-card">Jenis</TableHead>
+                  <TableHead className="py-2.5 px-3 font-semibold text-xs bg-card">Provinsi</TableHead>
+                  <TableHead className="py-2.5 px-3 font-semibold text-xs bg-card">Kantor Samsat Terdaftar</TableHead>
+                  <TableHead className="py-2.5 px-3 font-semibold text-xs w-36 bg-card">Status Biaya</TableHead>
+                  <TableHead className="py-2.5 px-3 font-semibold text-xs text-right w-40 bg-card">Aksi</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {paginatedWilayah.length === 0 ? (
+                  <DataTableEmptyRow
+                    colSpan={7}
+                    icon={MapPin}
+                    title="Tidak ada wilayah ditemukan"
+                    description="Tidak ada wilayah yang sesuai dengan filter pencarian."
+                  />
+                ) : (
+                  paginatedWilayah.map((item) => {
+                    const hasSamsat = item.hasConfiguredSamsat;
+                    return (
+                      <TableRow key={item.kode} className="hover:bg-muted/30 transition-colors">
+                        <TableCell className="py-2 px-3 font-mono text-xs font-semibold text-foreground">
+                          {item.kode}
+                        </TableCell>
+                        <TableCell className="py-2 px-3 text-xs font-medium text-foreground">
+                          {item.nama}
+                        </TableCell>
+                        <TableCell className="py-2 px-3">
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              "text-[11px] px-2 py-0 h-5 border",
+                              item.jenis === "Kota"
+                                ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20"
+                                : "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20"
+                            )}
+                          >
+                            {item.jenis}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="py-2 px-3 text-xs text-muted-foreground">
+                          {item.provinsi}
+                        </TableCell>
+                        <TableCell className="py-2 px-3">
+                          {item.samsatOffices && item.samsatOffices.length > 0 ? (
+                            <div className="flex flex-wrap gap-1">
+                              {item.samsatOffices.map((s: SamsatMasterItem) => (
+                                <span
+                                  key={s.id}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-primary/10 text-primary border border-primary/20"
+                                >
+                                  <Building2 className="w-3 h-3 shrink-0" />
+                                  <span>{s.name}</span>
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-muted-foreground text-[11px] italic">
+                              Belum ada kantor Samsat terdaftar
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell className="py-2 px-3">
+                          {hasSamsat ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border border-emerald-500/30">
+                              <CheckCircle2 className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
+                              Terkonfigurasi
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-muted text-muted-foreground border border-border">
+                              <AlertCircle className="w-3 h-3 text-muted-foreground" />
+                              Belum Dikonfigurasi
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell className="py-2 px-3 text-right">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleOpenLinkWilayah(item)}
+                            className="h-7 px-2.5 text-xs gap-1 hover:border-primary/50"
+                          >
+                            <Link2 className="w-3 h-3" />
+                            <span>{hasSamsat ? "Kelola Samsat" : "Hubungkan Samsat"}</span>
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })
+                )}
+              </TableBody>
+            </Table>
+          </DataTableShell>
         </div>
       )}
 
@@ -718,88 +722,102 @@ export function WilayahSamsatManager() {
               </Button>
             </div>
 
-            <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-320px)] sm:max-h-[calc(100vh-340px)] min-h-[160px] rounded-lg border border-border/80">
-              <table className="w-full text-xs text-left">
-                <thead className="sticky top-0 z-10 bg-card border-b border-border shadow-2xs text-muted-foreground uppercase text-[10px] tracking-wider">
-                  <tr>
-                    <th className="py-2.5 px-3 font-semibold bg-card">Nama Samsat</th>
-                    <th className="py-2.5 px-3 font-semibold bg-card">Alamat Kantor</th>
-                    <th className="py-2.5 px-3 font-semibold bg-card">Wilayah Layanan</th>
-                    <th className="py-2.5 px-3 font-semibold bg-card">Kode & Kab/Kota Kemendagri</th>
-                    <th className="py-2.5 px-3 font-semibold bg-card">Provinsi</th>
-                    <th className="py-2.5 px-3 font-semibold w-28 bg-card">Status</th>
-                    <th className="py-2.5 px-3 font-semibold text-right w-24 bg-card">Aksi</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border/60">
-                  {samsats.map((s) => {
-                    const officialWilayah = s.kode_kabupaten_kota
-                      ? findWilayahByKode(s.kode_kabupaten_kota)
-                      : undefined;
-                    return (
-                      <tr key={s.id} className="hover:bg-muted/30 transition-colors">
-                        <td className="py-2.5 px-3 font-medium text-foreground">
-                          <div className="flex items-center gap-1.5">
-                            <Building2 className="w-3.5 h-3.5 text-primary shrink-0" />
-                            <span>{s.name}</span>
-                          </div>
-                        </td>
-                        <td className="py-2.5 px-3 text-muted-foreground">
-                          {s.alamat}
-                        </td>
-                        <td className="py-2.5 px-3 font-medium text-foreground">
-                          {s.wilayah}
-                        </td>
-                        <td className="py-2.5 px-3">
-                          {s.kode_kabupaten_kota ? (
-                            <span className="inline-flex items-center gap-1.5 font-mono text-[11px]">
-                              <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 border-border">
-                                {s.kode_kabupaten_kota}
-                              </Badge>
-                              <span className="text-foreground">{officialWilayah?.nama_kabupaten_kota || s.wilayah}</span>
+            <div className="rounded-xl border border-border overflow-hidden">
+              <Table
+                containerClassName="overflow-x-auto overflow-y-auto max-h-[calc(100vh-320px)] sm:max-h-[calc(100vh-340px)] min-h-[160px]"
+                className="w-full text-xs text-left"
+              >
+                <TableHeader className="sticky top-0 z-10 bg-card border-b border-border shadow-2xs">
+                  <TableRow className="hover:bg-transparent">
+                    <TableHead className="py-2.5 px-3 font-semibold text-xs bg-card">Nama Samsat</TableHead>
+                    <TableHead className="py-2.5 px-3 font-semibold text-xs bg-card">Alamat Kantor</TableHead>
+                    <TableHead className="py-2.5 px-3 font-semibold text-xs bg-card">Wilayah Layanan</TableHead>
+                    <TableHead className="py-2.5 px-3 font-semibold text-xs bg-card">Kode & Kab/Kota Kemendagri</TableHead>
+                    <TableHead className="py-2.5 px-3 font-semibold text-xs bg-card">Provinsi</TableHead>
+                    <TableHead className="py-2.5 px-3 font-semibold text-xs w-28 bg-card">Status</TableHead>
+                    <TableHead className="py-2.5 px-3 font-semibold text-xs text-right w-24 bg-card">Aksi</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {samsats.length === 0 ? (
+                    <DataTableEmptyRow
+                      colSpan={7}
+                      icon={Building2}
+                      title="Belum ada kantor Samsat terdaftar"
+                      description="Tambahkan kantor pelayanan Samsat baru untuk mulai mengonfigurasi wilayah dan tarif layanan."
+                    />
+                  ) : (
+                    samsats.map((s) => {
+                      const officialWilayah = s.kode_kabupaten_kota
+                        ? findWilayahByKode(s.kode_kabupaten_kota)
+                        : undefined;
+                      return (
+                        <TableRow key={s.id} className="hover:bg-muted/30 transition-colors">
+                          <TableCell className="py-2.5 px-3 text-xs font-medium text-foreground">
+                            <div className="flex items-center gap-1.5">
+                              <Building2 className="w-3.5 h-3.5 text-primary shrink-0" />
+                              <span>{s.name}</span>
+                            </div>
+                          </TableCell>
+                          <TableCell className="py-2.5 px-3 text-xs text-muted-foreground">
+                            {s.alamat}
+                          </TableCell>
+                          <TableCell className="py-2.5 px-3 text-xs font-medium text-foreground">
+                            {s.wilayah}
+                          </TableCell>
+                          <TableCell className="py-2.5 px-3">
+                            {s.kode_kabupaten_kota ? (
+                              <span className="inline-flex items-center gap-1.5 font-mono text-[11px]">
+                                <Badge variant="outline" className="text-[11px] px-1.5 py-0 h-5 border-border">
+                                  {s.kode_kabupaten_kota}
+                                </Badge>
+                                <span className="text-foreground">{officialWilayah?.nama_kabupaten_kota || s.wilayah}</span>
+                              </span>
+                            ) : (
+                              <span className="text-amber-600 dark:text-amber-400 text-[11px] italic">
+                                Belum ditautkan kode Kemendagri
+                              </span>
+                            )}
+                          </TableCell>
+                          <TableCell className="py-2.5 px-3 text-xs text-muted-foreground">
+                            {s.nama_provinsi || officialWilayah?.nama_provinsi || "—"}
+                          </TableCell>
+                          <TableCell className="py-2.5 px-3">
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border border-emerald-500/30">
+                              <ShieldCheck className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
+                              Terverifikasi
                             </span>
-                          ) : (
-                            <span className="text-amber-600 dark:text-amber-400 text-[11px] italic">
-                              Belum ditautkan kode Kemendagri
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-2.5 px-3 text-muted-foreground">
-                          {s.nama_provinsi || officialWilayah?.nama_provinsi || "—"}
-                        </td>
-                        <td className="py-2.5 px-3">
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border border-emerald-500/30">
-                            <ShieldCheck className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
-                            Terverifikasi
-                          </span>
-                        </td>
-                        <td className="py-2.5 px-3 text-right">
-                          <div className="flex items-center justify-end gap-1">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => handleOpenEditSamsat(s)}
-                              className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
-                              title="Edit Samsat"
-                            >
-                              <Edit className="w-3.5 h-3.5" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => handleOpenDeleteSamsat(s)}
-                              className="h-7 w-7 p-0 text-rose-500 hover:text-rose-600 hover:bg-rose-500/10"
-                              title="Hapus Samsat"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </Button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                          </TableCell>
+                          <TableCell className="py-2.5 px-3 text-right">
+                            <div className="flex items-center justify-end gap-1">
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                onClick={() => handleOpenEditSamsat(s)}
+                                className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                                aria-label={`Edit Samsat ${s.name || s.wilayah}`}
+                                title="Edit Samsat"
+                              >
+                                <Edit className="w-3.5 h-3.5" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                onClick={() => handleOpenDeleteSamsat(s)}
+                                className="h-7 w-7 text-rose-500 hover:text-rose-600 hover:bg-rose-500/10"
+                                aria-label={`Hapus Samsat ${s.name || s.wilayah}`}
+                                title="Hapus Samsat"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })
+                  )}
+                </TableBody>
+              </Table>
             </div>
           </Card>
         </div>
@@ -926,10 +944,10 @@ export function WilayahSamsatManager() {
           </div>
 
           <DialogFooter className="mt-4 gap-2 pt-3 border-t border-border/60">
-            <Button variant="outline" size="sm" onClick={handleCancelAdd} className="h-9 text-xs px-4">
+            <Button variant="outline" onClick={handleCancelAdd} className="text-xs px-4">
               Batal
             </Button>
-            <Button size="sm" onClick={handleSaveAddSamsat} disabled={isSubmitting} className="h-9 text-xs px-4 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold shadow-xs flex items-center gap-1.5">
+            <Button onClick={handleSaveAddSamsat} disabled={isSubmitting} className="text-xs px-4 font-semibold gap-1.5">
               <Plus className="w-3.5 h-3.5" />
               <span>{isSubmitting ? "Menyimpan..." : "Simpan & Daftarkan"}</span>
             </Button>
@@ -1049,10 +1067,10 @@ export function WilayahSamsatManager() {
           </div>
 
           <DialogFooter className="mt-4 gap-2 pt-3 border-t border-border/60">
-            <Button variant="outline" size="sm" onClick={handleCancelEdit} className="h-9 text-xs px-4">
+            <Button variant="outline" onClick={handleCancelEdit} className="text-xs px-4">
               Batal
             </Button>
-            <Button size="sm" onClick={handleSaveEditSamsat} disabled={isSubmitting} className="h-9 text-xs px-4 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold shadow-xs flex items-center gap-1.5">
+            <Button onClick={handleSaveEditSamsat} disabled={isSubmitting} className="text-xs px-4 font-semibold gap-1.5">
               <CheckCircle2 className="w-3.5 h-3.5" />
               <span>{isSubmitting ? "Menyimpan..." : "Simpan Perubahan"}</span>
             </Button>

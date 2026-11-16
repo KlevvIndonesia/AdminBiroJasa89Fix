@@ -3,6 +3,7 @@
  * Admin SUN89 — Biro Jasa Management System
  */
 
+import crypto from "crypto";
 import { dbFinanceRepository } from "../repositories/dbFinanceRepository";
 import { dbOrderRepository } from "../repositories/dbOrderRepository";
 import { dbAuditRepository } from "../repositories/dbAuditRepository";
@@ -62,8 +63,13 @@ export class FinanceService {
     return dbFinanceRepository.getAllInvoices();
   }
 
-  public getProfitList(): any[] {
-    return dbFinanceRepository.getProfitList();
+  public getProfitList(filters?: {
+    paymentMethodId?: string;
+    startDate?: string;
+    endDate?: string;
+    category?: string;
+  }): any[] {
+    return dbFinanceRepository.getProfitList(filters);
   }
 
   public getCanonicalLabaRugiSummary(
@@ -456,6 +462,9 @@ export class FinanceService {
       if (!targetInvoice) {
         // Fallback: auto-create/ensure invoice exists for this order
         const totalEstimasi = targetOrder.payment?.totalBiaya || targetOrder.totalEstimasi || 0;
+        const isPartialEstimateOrder =
+          targetOrder.costCompletenessStatus === "PARTIAL_ESTIMATE" ||
+          targetOrder.isCostVerified === false;
         const invId = this.financeRepo.saveInvoice({
           invoiceNo: targetOrder.payment?.invoiceNo || `INV-${orderNo.replace(/^ORD-/, "")}`,
           orderNo: orderNo,
@@ -466,7 +475,11 @@ export class FinanceService {
           dibayar: 0,
           sisa: totalEstimasi,
           status: "UNPAID",
-        });
+          costVerificationStatus: isPartialEstimateOrder ? "PENDING_VERIFICATION" : "VERIFIED",
+          isDraftEstimate: isPartialEstimateOrder,
+          isCostVerified: Boolean(targetOrder.isCostVerified),
+          costCompletenessStatus: targetOrder.costCompletenessStatus,
+        } as any);
         targetInvoice = this.financeRepo.getInvoiceById(invId)!;
       }
 
@@ -924,7 +937,7 @@ export class FinanceService {
     // Pre-Reset Hardening Guard 1: Authorization for Opening Balance / Modal Awal
     const isModalAwal = item.kategori === "MODAL_AWAL";
     if (isModalAwal) {
-      if (user && user.role !== "admin" && user.role !== "supervisor" && user.role !== "svp") {
+      if (user && user.role !== "administrator" && user.role !== "admin") {
         throw new ApiError(403, "FORBIDDEN", "Hanya Administrator atau Supervisor yang berwenang menyetor modal awal / opening balance.");
       }
     }
@@ -974,7 +987,7 @@ export class FinanceService {
       }, activeDb);
 
       dbAuditRepository.save({
-        id: `log-kas-${Date.now()}`,
+        id: `log-kas-${crypto.randomUUID()}`,
         userId: user?.userId || "usr-finance",
         userName: user?.nama || "Finance User",
         userRole: user?.role || "finance",
@@ -983,9 +996,233 @@ export class FinanceService {
         details: `Transaksi Kas: ${item.keterangan} (${created.status}) Rp ${(created.debit || created.kredit).toLocaleString("id-ID")}`,
         metadata: { item: created },
         createdAt: new Date().toISOString(),
-      });
+      }, activeDb);
 
       return created;
+    }, activeDb);
+  }
+
+  public updateKasKantor(
+    id: number,
+    updates: Partial<KasKantorItem> & {
+      nominal?: number;
+      reason?: string;
+      editReason?: string;
+      payment_method_id?: string | null;
+      payment_method_snapshot?: string | null;
+      paymentMethodId?: string | null;
+      paymentMethodSnapshot?: string | null;
+    },
+    user?: TokenPayload | null,
+    targetDb?: DatabaseSync
+  ): KasKantorItem {
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new ApiError(400, "INVALID_ID", "ID transaksi Kas Kantor tidak valid.");
+    }
+    const role = String(user?.role || "").toLowerCase();
+    if (role && !["administrator", "finance"].includes(role)) {
+      throw new ApiError(403, "FORBIDDEN", "Hanya Administrator atau Finance yang berhak mengedit transaksi Kas Kantor.");
+    }
+
+    const rawReason = updates.reason !== undefined ? updates.reason : updates.editReason;
+    if (rawReason !== undefined && (typeof rawReason !== "string" || !rawReason.trim())) {
+      throw new ApiError(400, "INVALID_REASON", "Alasan perubahan tidak boleh kosong.");
+    }
+    const cleanReason = typeof rawReason === "string" && rawReason.trim()
+      ? rawReason.trim()
+      : "Koreksi transaksi Kas Kantor";
+
+    const activeDb = targetDb ?? db;
+
+    return runInTransaction(() => {
+      const existing = dbFinanceRepository.getKasKantorById(id, activeDb);
+      if (!existing) {
+        throw new ApiError(404, "NOT_FOUND", `Entri Kas Kantor #${id} tidak ditemukan.`);
+      }
+
+      const payCheck = activeDb.prepare("SELECT COUNT(*) as count FROM invoice_payments WHERE kas_kantor_id = ?").get(id) as any;
+      if (payCheck && payCheck.count > 0) {
+        throw new ApiError(
+          409,
+          "SYSTEM_ENTRY_PROTECTED",
+          `Entri Kas Kantor #${id} terhubung dengan pembayaran tagihan dan tidak dapat diedit langsung.`
+        );
+      }
+
+      const origKet = String(existing.keterangan || "");
+      if (
+        origKet.startsWith("Pembayaran: INV-") ||
+        origKet.startsWith("Pencairan Reimbursement:") ||
+        origKet.startsWith("Pengembalian kelebihan bayar:") ||
+        origKet.startsWith("Pencairan komisi rekanan:")
+      ) {
+        throw new ApiError(
+          409,
+          "SYSTEM_ENTRY_PROTECTED",
+          "Transaksi kas otomatis dari pelunasan tagihan atau pencairan cashback/reimbursement tidak dapat diedit langsung."
+        );
+      }
+
+      const nextTanggal = updates.tanggal !== undefined
+        ? validateAndNormalizeBusinessDate(updates.tanggal)
+        : validateAndNormalizeBusinessDate(existing.tanggal);
+
+      const nextKet = updates.keterangan !== undefined ? String(updates.keterangan).trim() : origKet.trim();
+      if (!nextKet) {
+        throw new ApiError(400, "VALIDATION_ERROR", "Keterangan transaksi Kas Kantor wajib diisi.");
+      }
+
+      const rawStatusStr = updates.status !== undefined ? String(updates.status).trim() : String(existing.status || "Debit");
+      const lowerStatus = rawStatusStr.toLowerCase();
+      const hasNominal = updates.nominal !== undefined && updates.nominal !== null && String(updates.nominal).trim() !== "";
+
+      let nextDebit: number;
+      let nextKredit: number;
+      let normalizedStatus: "Debit" | "Kredit";
+
+      if (lowerStatus.includes("kredit") || lowerStatus === "pengeluaran") {
+        normalizedStatus = "Kredit";
+      } else if (lowerStatus.includes("debit") || lowerStatus === "pemasukan") {
+        normalizedStatus = "Debit";
+      } else {
+        throw new ApiError(400, "VALIDATION_ERROR", `Status kas kantor '${rawStatusStr}' tidak valid.`);
+      }
+
+      if (hasNominal) {
+        const numNom = Number(updates.nominal);
+        if (!Number.isFinite(numNom) || numNom < 0) {
+          throw new ApiError(400, "INVALID_TRANSACTION_AMOUNTS", "Nominal transaksi harus berupa angka non-negatif yang valid.");
+        }
+        nextDebit = normalizedStatus === "Debit" ? numNom : 0;
+        nextKredit = normalizedStatus === "Kredit" ? numNom : 0;
+      } else if (updates.debit !== undefined || updates.kredit !== undefined) {
+        nextDebit = Number(updates.debit !== undefined ? updates.debit : (updates.status !== undefined ? (normalizedStatus === "Debit" ? Math.max(existing.debit || 0, existing.kredit || 0) : 0) : existing.debit || 0));
+        nextKredit = Number(updates.kredit !== undefined ? updates.kredit : (updates.status !== undefined ? (normalizedStatus === "Kredit" ? Math.max(existing.debit || 0, existing.kredit || 0) : 0) : existing.kredit || 0));
+      } else if (updates.status !== undefined && rawStatusStr.toLowerCase() !== String(existing.status || "").toLowerCase()) {
+        const mag = Number(existing.debit || 0) > 0 ? Number(existing.debit) : Number(existing.kredit || 0);
+        nextDebit = normalizedStatus === "Debit" ? mag : 0;
+        nextKredit = normalizedStatus === "Kredit" ? mag : 0;
+      } else {
+        nextDebit = Number(existing.debit || 0);
+        nextKredit = Number(existing.kredit || 0);
+      }
+
+      if (!Number.isFinite(nextDebit) || !Number.isFinite(nextKredit) || nextDebit < 0 || nextKredit < 0) {
+        throw new ApiError(400, "INVALID_TRANSACTION_AMOUNTS", "Nominal debit dan kredit tidak boleh bernilai negatif.");
+      }
+      if (nextDebit > 0 && nextKredit > 0) {
+        throw new ApiError(400, "INVALID_TRANSACTION_AMOUNTS", "Nominal debit dan kredit bersifat mutually exclusive.");
+      }
+      const nextKategori = updates.kategori !== undefined ? (updates.kategori || null) : ((existing as any).kategori || null);
+      const isModalAwal = String(nextKategori || "").toUpperCase() === "MODAL_AWAL";
+      if (nextDebit === 0 && nextKredit === 0 && !isModalAwal) {
+        throw new ApiError(400, "ZERO_TRANSACTION_AMOUNT", "Nominal transaksi tidak boleh nol.");
+      }
+
+      const rawOrderNo = updates.orderNo !== undefined
+        ? (String(updates.orderNo || "").trim() || null)
+        : ((existing as any).orderNo || null);
+      if (rawOrderNo && rawOrderNo !== "-") {
+        const ord = activeDb.prepare("SELECT order_no FROM orders WHERE order_no = ?").get(rawOrderNo);
+        if (!ord) {
+          throw new ApiError(404, "ORDER_NOT_FOUND", `Order '${rawOrderNo}' tidak ditemukan.`);
+        }
+      }
+
+      const rawInvoiceNo = updates.invoiceNo !== undefined
+        ? (String(updates.invoiceNo || "").trim() || null)
+        : ((existing as any).invoiceNo || null);
+      if (rawInvoiceNo && rawInvoiceNo !== "-") {
+        const inv = activeDb.prepare("SELECT id FROM finance_invoices WHERE invoice_no = ?").get(rawInvoiceNo);
+        if (!inv) {
+          throw new ApiError(404, "INVOICE_NOT_FOUND", `Invoice '${rawInvoiceNo}' tidak ditemukan.`);
+        }
+      }
+
+      let pmId: string | null = (existing as any).paymentMethodId || null;
+      let pmSnapshot: string | null = (existing as any).paymentMethodSnapshot || null;
+      const requestedPmId = updates.payment_method_id !== undefined
+        ? updates.payment_method_id
+        : updates.paymentMethodId;
+      if (requestedPmId !== undefined) {
+        if (requestedPmId) {
+          const pm = activeDb.prepare("SELECT * FROM payment_methods WHERE id = ?").get(requestedPmId) as any;
+          if (!pm || pm.status?.trim().toLowerCase() !== "aktif") {
+            throw new ApiError(400, "INVALID_PAYMENT_METHOD", "Metode pembayaran tidak valid atau tidak aktif.");
+          }
+          pmId = pm.id;
+          pmSnapshot = JSON.stringify({
+            id: pm.id,
+            nama_metode: pm.nama_metode,
+            bank: pm.bank,
+            nama_rekening: pm.nama_rekening || "",
+            nomor_rekening: pm.nomor_rekening || "",
+          });
+        } else if (isModalAwal) {
+          pmId = null;
+          pmSnapshot = null;
+        } else {
+          throw new ApiError(400, "INVALID_PAYMENT_METHOD", "Metode pembayaran wajib dipilih untuk transaksi kas kantor operasional.");
+        }
+      }
+
+      const beforeSnapshot = { ...existing };
+      const updated = dbFinanceRepository.updateKasKantor(
+        id,
+        {
+          tanggal: nextTanggal,
+          keterangan: nextKet,
+          status: normalizedStatus,
+          debit: nextDebit,
+          kredit: nextKredit,
+          penanggungJawab: updates.penanggungJawab !== undefined ? (updates.penanggungJawab || null) : (existing.penanggungJawab || null),
+          kategori: nextKategori,
+          orderNo: rawOrderNo && rawOrderNo !== "-" ? rawOrderNo : null,
+          invoiceNo: rawInvoiceNo && rawInvoiceNo !== "-" ? rawInvoiceNo : null,
+          payment_method_id: pmId,
+          payment_method_snapshot: pmSnapshot,
+        },
+        activeDb
+      );
+
+      if (!updated) {
+        throw new ApiError(404, "NOT_FOUND", `Entri Kas Kantor #${id} tidak ditemukan.`);
+      }
+
+      const negRow = activeDb.prepare(
+        "SELECT id, tanggal, saldo FROM kas_kantor WHERE saldo < -0.001 ORDER BY substr(tanggal, 1, 10) ASC, created_at ASC, id ASC LIMIT 1"
+      ).get() as { id: number; tanggal: string; saldo: number } | undefined;
+
+      if (negRow) {
+        throw new ApiError(
+          409,
+          "NEGATIVE_BALANCE_VIOLATION",
+          `Perubahan entri Kas Kantor #${id} ditolak karena menyebabkan saldo berjalan menjadi negatif (Rp ${Number(negRow.saldo).toLocaleString("id-ID")} pada baris #${negRow.id}, tanggal ${negRow.tanggal}).`
+        );
+      }
+
+      const nowIso = new Date().toISOString();
+      dbAuditRepository.save({
+        id: `audit-upd-kaskantor-${crypto.randomUUID()}`,
+        userId: user?.userId || "usr-finance",
+        userName: user?.nama || "Finance User",
+        userRole: user?.role || "finance",
+        action: "UPDATE_KAS_KANTOR",
+        module: "Kas Kantor",
+        details: `Mengedit Kas Kantor #${id}: ${updated.keterangan} (${updated.status} Rp ${(updated.debit || updated.kredit).toLocaleString("id-ID")}). Alasan: ${cleanReason}`,
+        metadata: {
+          id,
+          before: beforeSnapshot,
+          after: updated,
+          actorId: user?.userId || null,
+          actorRole: user?.role || null,
+          reason: cleanReason,
+          timestamp: nowIso,
+        },
+        createdAt: nowIso,
+      }, activeDb);
+
+      return updated;
     }, activeDb);
   }
 
@@ -1248,10 +1485,12 @@ export class FinanceService {
         penanggungJawab: user?.nama || "Finance User",
         orderNo: inv.orderNo || undefined,
         invoiceNo: inv.invoiceNo || `INV-${id}`,
-      });
+        kategori: pType === "KELEBIHAN" ? "Pengembalian Kelebihan Bayar" : "Cashback",
+        classification: pType === "KELEBIHAN" ? "CUSTOMER_REFUND" : "PARTNER_COMMISSION",
+      } as any);
 
       // 2. Create distinct PayoutTransactionRecord
-      const payoutId = (payoutData as any).payoutId || `payout-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      const payoutId = (payoutData as any).payoutId || `payout-${crypto.randomUUID()}`;
       const payoutRecord: PayoutTransactionRecord = {
         id: payoutId,
         invoiceId: id,
@@ -1287,6 +1526,9 @@ export class FinanceService {
         updates.remainingRefund = newRemainingRefund;
         (updates as any).refundProcessedAt = nowStr;
         (updates as any).refundProcessedBy = user?.nama || "Finance User";
+        if (newRemainingRefund === 0) {
+          updates.cashbackCompletionStatus = "PAID";
+        }
         (updates as any).refundProof = proof;
         (updates as any).refundAccount = isCash ? {
           penerima: payoutData.penerima,
@@ -1302,6 +1544,7 @@ export class FinanceService {
       }
       if (pType === "KOMISI" || pType === "ALL") {
         updates.cashbackStatus = "REALIZED";
+        updates.cashbackCompletionStatus = "PAID";
         updates.cashbackPaidAmount = Number(inv.cashback || 0);
         (updates as any).cashbackPaidAt = nowStr;
         (updates as any).cashbackPaidBy = user?.nama || "Finance User";
@@ -1364,7 +1607,7 @@ export class FinanceService {
 
       // Audit Log
       dbAuditRepository.save({
-        id: `log-cashback-pay-${Date.now()}`,
+        id: `log-cashback-pay-${crypto.randomUUID()}`,
         userId: user?.userId || "usr-finance",
         userName: user?.nama || "Finance User",
         userRole: user?.role || "finance",
@@ -1379,9 +1622,193 @@ export class FinanceService {
     });
   }
 
+  /**
+   * Batch 4: Persist Cashback Completion ("Selesai") to Database with Atomic Validation & Audit Trail.
+   * Removes item from active queue while preserving history permanently without duplicate cash journals.
+   */
+  public completeCashback(
+    id: number,
+    payload?: {
+      catatan?: string;
+      idempotencyKey?: string;
+      expectedVersion?: number;
+    },
+    user?: TokenPayload | null
+  ): InvoiceBillingRecord {
+    return runInTransaction(() => {
+      const inv = this.getInvoiceById(id);
+      if (!inv) {
+        throw new ApiError(404, "NOT_FOUND", `Invoice #${id} tidak ditemukan.`);
+      }
+
+      const rawIdemKey = payload?.idempotencyKey;
+      const cleanIdemKey = typeof rawIdemKey === "string" && rawIdemKey.trim() ? rawIdemKey.trim() : null;
+      const cleanNotes = typeof payload?.catatan === "string" ? payload.catatan.trim() : "";
+      const requestHash = `${id}:complete-cashback:${cleanNotes}`;
+
+      if (cleanIdemKey) {
+        const existingRecord = dbFinanceRepository.getIdempotencyRecord(cleanIdemKey, "cashback_complete");
+        if (existingRecord) {
+          if (existingRecord.request_hash === requestHash) {
+            return this.getInvoiceById(id)!;
+          }
+          throw new ApiError(
+            409,
+            "IDEMPOTENCY_CONFLICT",
+            `Idempotency key '${cleanIdemKey}' sudah digunakan untuk penyelesaian cashback dengan parameter berbeda.`
+          );
+        }
+      }
+
+      // Duplicate completion protection (no double audit log / silent overwrite)
+      if ((inv as any).cashbackCompletionStatus === "COMPLETED" || Boolean((inv as any).cashbackCompletedAt)) {
+        throw new ApiError(
+          409,
+          "CASHBACK_ALREADY_COMPLETED",
+          `Transaksi cashback untuk invoice '${inv.invoiceNo || `INV-${id}`}' sudah ditandai Selesai pada ${(inv as any).cashbackCompletedAt || "sebelumnya"}.`
+        );
+      }
+
+      const currentVersion = Number((inv as any).payoutVersion ?? (inv.payoutHistory || []).length);
+      if (payload?.expectedVersion !== undefined && payload?.expectedVersion !== null) {
+        const expVer = Number(payload.expectedVersion);
+        if (!Number.isInteger(expVer) || expVer < 0) {
+          throw new ApiError(400, "INVALID_EXPECTED_VERSION", "expectedVersion harus berupa bilangan bulat non-negatif.");
+        }
+        if (expVer !== currentVersion) {
+          throw new ApiError(
+            409,
+            "CONCURRENT_MODIFICATION",
+            `Data cashback invoice telah berubah di server (versi server: ${currentVersion}, versi request: ${expVer}). Silakan muat ulang data.`
+          );
+        }
+      }
+
+      const isCancelled =
+        String(inv.status || "").trim().toUpperCase() === "CANCELLED" ||
+        String((inv as any).billingStatus || "").trim().toUpperCase() === "CANCELLED" ||
+        Boolean((inv as any).isCancelled);
+
+      const cashbackNominal = Number(inv.cashback || 0);
+      const overpayment = Number(inv.overpayment || 0);
+      const hasCashbackLiability = cashbackNominal > 0;
+      const hasOverpaymentLiability = overpayment > 0;
+
+      if (!hasCashbackLiability && !hasOverpaymentLiability) {
+        throw new ApiError(
+          400,
+          "NO_CASHBACK_LIABILITY",
+          `Invoice '${inv.invoiceNo || `INV-${id}`}' tidak memiliki kewajiban cashback atau kelebihan bayar untuk diselesaikan.`
+        );
+      }
+
+      if (hasCashbackLiability && !isCancelled) {
+        if (String(inv.cashbackStatus || "").toUpperCase() !== "REALIZED") {
+          throw new ApiError(
+            400,
+            "CASHBACK_NOT_PAID",
+            "Cashback/komisi rekanan belum dicairkan. Proses pencairan terlebih dahulu sebelum menandai Selesai."
+          );
+        }
+      }
+
+      if (hasOverpaymentLiability && (isCancelled || String(inv.refundStatus || "").toUpperCase() === "PENDING" || String(inv.refundStatus || "").toUpperCase() === "PARTIALLY_REFUNDED")) {
+        const remainingRefund = inv.remainingRefund !== undefined ? Number(inv.remainingRefund) : overpayment;
+        if (String(inv.refundStatus || "").toUpperCase() !== "PROCESSED" || remainingRefund > 0) {
+          throw new ApiError(
+            400,
+            "REFUND_NOT_COMPLETED",
+            "Pengembalian kelebihan bayar pelanggan belum selesai dicairkan sehingga belum dapat ditandai Selesai."
+          );
+        }
+      }
+
+      const nowStr = new Date().toISOString();
+      const actorName = user?.nama || "Finance User";
+      const actorId = user?.userId || "usr-finance";
+      const actorRole = user?.role || "finance";
+
+      const success = dbFinanceRepository.updateInvoice(id, {
+        cashbackCompletionStatus: "COMPLETED",
+        cashbackCompletedAt: nowStr,
+        cashbackCompletedBy: actorName,
+        cashbackCompletionNotes: cleanNotes || undefined,
+        payoutVersion: currentVersion + 1,
+      });
+
+      if (!success) {
+        throw new ApiError(500, "UPDATE_FAILED", "Gagal menyimpan status penyelesaian cashback ke database.");
+      }
+
+      if (cleanIdemKey) {
+        dbFinanceRepository.saveIdempotencyRecord({
+          key: cleanIdemKey,
+          scope: "cashback_complete",
+          user_id: user?.userId || null,
+          request_hash: requestHash,
+          resource_id: String(id),
+          response_json: JSON.stringify({
+            invoiceId: id,
+            cashbackCompletionStatus: "COMPLETED",
+            cashbackCompletedAt: nowStr,
+            cashbackCompletedBy: actorName,
+            payoutVersion: currentVersion + 1,
+          }),
+        });
+      }
+
+      dbAuditRepository.save({
+        id: `log-cashback-complete-${crypto.randomUUID()}`,
+        userId: actorId,
+        userName: actorName,
+        userRole: actorRole,
+        action: "COMPLETE_CASHBACK",
+        module: "Cashback Terpending",
+        details: `Menyelesaikan transaksi cashback/refund ${inv.invoiceNo || `INV-${id}`} (${inv.orderNo || "-"}) dan memindahkan ke Riwayat Cashback${cleanNotes ? `: ${cleanNotes}` : ""}`,
+        metadata: {
+          invoiceId: id,
+          invoiceNo: inv.invoiceNo,
+          orderNo: inv.orderNo,
+          cashbackNominal,
+          overpayment,
+          catatan: cleanNotes || undefined,
+        },
+        createdAt: nowStr,
+      });
+
+      return this.getInvoiceById(id)!;
+    });
+  }
+
+  public getCashbackHistory(): InvoiceBillingRecord[] {
+    const all = dbFinanceRepository.getAllInvoices();
+    return all
+      .filter((inv: any) => {
+        const isCompleted = inv.cashbackCompletionStatus === "COMPLETED" || Boolean(inv.cashbackCompletedAt);
+        const isLegacyRealized =
+          (Number(inv.cashback || 0) > 0 && String(inv.cashbackStatus || "").toUpperCase() === "REALIZED" && inv.cashbackCompletionStatus !== "PAID") ||
+          (Boolean(inv.status === "CANCELLED" || inv.billingStatus === "CANCELLED" || inv.isCancelled) &&
+            Number(inv.overpayment || 0) > 0 &&
+            String(inv.refundStatus || "").toUpperCase() === "PROCESSED" &&
+            inv.cashbackCompletionStatus !== "PAID");
+        return isCompleted || isLegacyRealized;
+      })
+      .sort((a: any, b: any) => {
+        const tA = new Date(a.cashbackCompletedAt || a.cashbackPaidAt || a.refundProcessedAt || a.tanggal || 0).getTime();
+        const tB = new Date(b.cashbackCompletedAt || b.cashbackPaidAt || b.refundProcessedAt || b.tanggal || 0).getTime();
+        return tB - tA;
+      });
+  }
+
   public completeInvoice(id: number, user?: TokenPayload | null): InvoiceBillingRecord {
     return runInTransaction(() => {
       const inv = this.getInvoiceById(id);
+      if (
+        String(inv.status || "").trim().toUpperCase() === "CANCELLED" ||
+        String((inv as any).billingStatus || "").trim().toUpperCase() === "CANCELLED"
+      ) {
+        throw new ApiError(400, "ORDER_CANCELLED", "Invoice dari order yang sudah dibatalkan tidak dapat diselesaikan.");
+      }
       const paid = Number(inv.terbayar ?? inv.dibayar) || 0;
       const total = Number(inv.totalTagihan) || 0;
       const sisa = inv.sisa !== undefined ? Number(inv.sisa) : Math.max(0, total - paid);
@@ -1490,7 +1917,7 @@ export class FinanceService {
       }
 
       dbAuditRepository.save({
-        id: `log-inv-complete-${Date.now()}`,
+        id: `log-inv-complete-${crypto.randomUUID()}`,
         userId: user?.userId || "usr-finance",
         userName: user?.nama || "Finance User",
         userRole: user?.role || "finance",
@@ -1516,15 +1943,11 @@ export class FinanceService {
     id: number | string,
     paymentId: number | string,
     voidReason: string,
-    user?: TokenPayload | null
+    user?: TokenPayload | null,
+    options?: { allowCancelledOrderCorrection?: boolean }
   ): InvoiceBillingRecord {
     const userRole = (user?.role || "").toLowerCase();
-    const isSpvOrAdmin =
-      userRole === "administrator" ||
-      userRole === "supervisor" ||
-      userRole === "spv" ||
-      userRole === "svp" ||
-      (user as any)?.jabatan === "SVP";
+    const isSpvOrAdmin = userRole === "administrator";
 
     if (!isSpvOrAdmin) {
       throw new ApiError(
@@ -1547,6 +1970,17 @@ export class FinanceService {
       const inv = this.getInvoiceById(id);
       if (!inv) {
         throw new ApiError(404, "NOT_FOUND", `Invoice #${id} tidak ditemukan.`);
+      }
+      if (
+        !options?.allowCancelledOrderCorrection &&
+        (String(inv.status || "").trim().toUpperCase() === "CANCELLED" ||
+          String((inv as any).billingStatus || "").trim().toUpperCase() === "CANCELLED")
+      ) {
+        throw new ApiError(
+          400,
+          "ORDER_CANCELLED",
+          "Pembayaran pada invoice yang sudah dibatalkan (CANCELLED) tidak dapat di-void melalui jalur ini."
+        );
       }
 
       const payment = dbFinanceRepository.getInvoicePaymentById(paymentId);
@@ -1671,7 +2105,7 @@ export class FinanceService {
         id: `log-void-pay-${Date.now()}`,
         userId: user?.userId || "usr-spv",
         userName: user?.nama || "Supervisor",
-        userRole: user?.role || "supervisor",
+        userRole: user?.role || "administrator",
         action: "VOID_INVOICE_PAYMENT",
         module: "Finance Tagihan",
         details: `[VOID] Pembatalan pembayaran #${paymentId} (${invoiceNum}) sebesar Rp ${amount.toLocaleString("id-ID")} oleh ${user?.nama}. Alasan: ${reason}`,
@@ -1703,12 +2137,7 @@ export class FinanceService {
     options?: { payoutId?: string; payoutType?: "KELEBIHAN" | "KOMISI" }
   ): InvoiceBillingRecord {
     const userRole = (user?.role || "").toLowerCase();
-    const isSpvOrAdmin =
-      userRole === "administrator" ||
-      userRole === "supervisor" ||
-      userRole === "spv" ||
-      userRole === "svp" ||
-      (user as any)?.jabatan === "SVP";
+    const isSpvOrAdmin = userRole === "administrator";
 
     if (!isSpvOrAdmin) {
       throw new ApiError(
@@ -1731,6 +2160,14 @@ export class FinanceService {
       const inv = this.getInvoiceById(id);
       if (!inv) {
         throw new ApiError(404, "NOT_FOUND", `Invoice #${id} tidak ditemukan.`);
+      }
+
+      if ((inv as any).cashbackCompletionStatus === "COMPLETED" || Boolean((inv as any).cashbackCompletedAt)) {
+        throw new ApiError(
+          409,
+          "CASHBACK_ALREADY_COMPLETED",
+          `Transaksi cashback untuk invoice '${inv.invoiceNo || `INV-${id}`}' sudah ditandai Selesai dan diarsipkan sehingga tidak dapat dibatalkan (void).`
+        );
       }
 
       const payoutHistory: PayoutTransactionRecord[] = [...(inv.payoutHistory || [])];
@@ -1863,14 +2300,19 @@ export class FinanceService {
         // refundStatus is 100% UNTOUCHED
       }
 
+      updates.cashbackCompletionStatus = "PENDING";
+      updates.cashbackCompletedAt = undefined;
+      updates.cashbackCompletedBy = undefined;
+      updates.cashbackCompletionNotes = undefined;
+
       dbFinanceRepository.updateInvoice(id, updates);
 
       // 4. Immutable Audit Log
       dbAuditRepository.save({
-        id: `log-void-payout-${Date.now()}`,
+        id: `log-void-payout-${crypto.randomUUID()}`,
         userId: user?.userId || "usr-spv",
         userName: user?.nama || "Supervisor",
-        userRole: user?.role || "supervisor",
+        userRole: user?.role || "administrator",
         action: "VOID_CASHBACK_PAYOUT",
         module: "Cashback Terpending",
         details: `[VOID] Pembatalan pencairan ${targetType === "KELEBIHAN" ? "kelebihan bayar" : "komisi"} invoice #${id} (${invoiceNum}) sebesar Rp ${nominal.toLocaleString("id-ID")} oleh ${user?.nama}. Alasan: ${reason}`,
@@ -2269,7 +2711,7 @@ export class FinanceService {
       }, activeDb);
 
       dbAuditRepository.save({
-        id: `audit-kas-msg-${Date.now()}`,
+        id: `audit-kas-msg-${crypto.randomUUID()}`,
         userId: user?.userId || "usr-finance",
         userName: user?.nama || "Finance User",
         userRole: user?.role || "finance",
@@ -2278,10 +2720,241 @@ export class FinanceService {
         details: `Kas Messenger (${messengerName}): ${item.keterangan} [Masuk: Rp ${debit.toLocaleString("id-ID")}, Keluar: Rp ${kredit.toLocaleString("id-ID")}]`,
         metadata: { created },
         createdAt: new Date().toISOString(),
-      });
+      }, activeDb);
 
       return created;
     }, activeDb);
+  }
+
+  public updateKasMessenger(
+    id: number,
+    updates: Partial<KasMessengerItem> & {
+      reason?: string;
+      editReason?: string;
+      debit?: number;
+      kredit?: number;
+      messenger_id?: string | null;
+      messengerId?: string | null;
+      payment_method_id?: string | null;
+      payment_method_snapshot?: string | null;
+      paymentMethodId?: string | null;
+      paymentMethodSnapshot?: string | null;
+    },
+    user?: TokenPayload | null,
+    targetDb?: DatabaseSync
+  ): KasMessengerItem {
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new ApiError(400, "INVALID_ID", "ID transaksi Kas Messenger tidak valid.");
+    }
+    const role = String(user?.role || "").toLowerCase();
+    if (role && !["administrator", "finance", "admin"].includes(role)) {
+      throw new ApiError(403, "FORBIDDEN_COURIER_ACCESS", "Anda tidak memiliki hak untuk mengedit transaksi Kas Messenger.");
+    }
+
+    const rawReason = updates.reason !== undefined ? updates.reason : updates.editReason;
+    if (rawReason !== undefined && (typeof rawReason !== "string" || !rawReason.trim())) {
+      throw new ApiError(400, "INVALID_REASON", "Alasan perubahan tidak boleh kosong.");
+    }
+    const cleanReason = typeof rawReason === "string" && rawReason.trim()
+      ? rawReason.trim()
+      : "Koreksi transaksi Kas Messenger";
+
+    const activeDb = targetDb ?? db;
+
+    return runInTransaction(() => {
+      const existing = dbFinanceRepository.getKasMessengerById(id, activeDb);
+      if (!existing) {
+        throw new ApiError(404, "NOT_FOUND", `Entri Kas Messenger #${id} tidak ditemukan.`);
+      }
+
+      // Referential integrity protection: reimbursement payouts & reversals must not be mutated directly
+      const reimbCheck = activeDb.prepare("SELECT COUNT(*) as count FROM messenger_reimbursements WHERE kas_messenger_id = ?").get(id) as any;
+      if ((reimbCheck && reimbCheck.count > 0) || (existing as any).reimbursementId) {
+        throw new ApiError(
+          409,
+          "CANNOT_EDIT_LINKED_KAS_MESSENGER",
+          `Entri Kas Messenger #${id} terhubung dengan pencairan reimbursement dan dilindungi dari pengeditan langsung. Gunakan alur Void Reimbursement.`
+        );
+      }
+
+      const origKet = String(existing.keterangan || "");
+      if (origKet.startsWith("[VOID") || origKet.startsWith("[BATAL")) {
+        throw new ApiError(409, "SYSTEM_ENTRY_PROTECTED", "Entri reversal/void tidak dapat diedit secara langsung.");
+      }
+
+      const previousMessengerId = (existing as any).messengerId || null;
+
+      // Resolve target messenger if modified
+      let targetMessengerId = (updates as any).messenger_id ?? (updates as any).messengerId ?? previousMessengerId;
+      let targetMessengerName = updates.messenger !== undefined ? String(updates.messenger).trim() : existing.messenger;
+
+      if ((updates as any).messenger_id !== undefined || (updates as any).messengerId !== undefined) {
+        if (!targetMessengerId) {
+          throw new ApiError(400, "VALIDATION_ERROR", "ID kurir tidak boleh kosong.");
+        }
+        const mRow = activeDb.prepare(`
+          SELECT m.id, COALESCE(e.nama_lengkap, m.id) as nama
+          FROM messengers m
+          LEFT JOIN employees e ON m.employee_id = e.id
+          WHERE m.id = ? OR m.employee_id = ?
+        `).get(targetMessengerId, targetMessengerId) as { id: string; nama: string } | undefined;
+        if (!mRow) {
+          throw new ApiError(404, "MESSENGER_NOT_FOUND", `Kurir dengan ID '${targetMessengerId}' tidak ditemukan.`);
+        }
+        targetMessengerId = mRow.id;
+        targetMessengerName = mRow.nama;
+      } else if (updates.messenger !== undefined && updates.messenger.trim() !== existing.messenger) {
+        const mRow = activeDb.prepare(`
+          SELECT m.id, COALESCE(e.nama_lengkap, m.id) as nama
+          FROM messengers m
+          LEFT JOIN employees e ON m.employee_id = e.id
+          WHERE e.nama_lengkap = ? OR m.id = ? OR m.employee_id = ?
+          LIMIT 1
+        `).get(targetMessengerName, targetMessengerName, targetMessengerName) as { id: string; nama: string } | undefined;
+        if (!mRow) {
+          throw new ApiError(404, "MESSENGER_NOT_FOUND", `Kurir '${targetMessengerName}' tidak ditemukan.`);
+        }
+        targetMessengerId = mRow.id;
+        targetMessengerName = mRow.nama;
+      }
+
+      const nextTanggal = updates.tanggal !== undefined
+        ? validateAndNormalizeBusinessDate(updates.tanggal)
+        : validateAndNormalizeBusinessDate(existing.tanggal);
+
+      const nextJenis = updates.jenis !== undefined ? String(updates.jenis).trim() : String(existing.jenis || "").trim();
+      if (!nextJenis) {
+        throw new ApiError(400, "VALIDATION_ERROR", "Jenis transaksi Kas Messenger wajib diisi.");
+      }
+
+      const nextKet = updates.keterangan !== undefined ? String(updates.keterangan).trim() : origKet.trim();
+      if (!nextKet) {
+        throw new ApiError(400, "VALIDATION_ERROR", "Keterangan Kas Messenger wajib diisi.");
+      }
+
+      const rawIn = updates.in !== undefined ? updates.in : (updates.debit !== undefined ? updates.debit : existing.in);
+      const rawOut = updates.out !== undefined ? updates.out : (updates.kredit !== undefined ? updates.kredit : existing.out);
+      const nextDebit = Number(rawIn ?? 0);
+      const nextKredit = Number(rawOut ?? 0);
+
+      if (!Number.isFinite(nextDebit) || !Number.isFinite(nextKredit) || nextDebit < 0 || nextKredit < 0) {
+        throw new ApiError(400, "INVALID_TRANSACTION_AMOUNTS", "Nominal masuk (in/debit) dan keluar (out/kredit) tidak boleh negatif.");
+      }
+      if (nextDebit > 0 && nextKredit > 0) {
+        throw new ApiError(400, "INVALID_TRANSACTION_AMOUNTS", "Nominal masuk dan keluar bersifat mutually exclusive. Hanya satu yang boleh bernilai positif.");
+      }
+      if (nextDebit === 0 && nextKredit === 0) {
+        throw new ApiError(400, "ZERO_TRANSACTION_AMOUNT", "Nominal transaksi tidak boleh nol.");
+      }
+
+      const rawOrderNo = updates.orderNo !== undefined
+        ? (String(updates.orderNo || "").trim() || null)
+        : (existing.orderNo || null);
+      if (rawOrderNo && rawOrderNo !== "-") {
+        const orderExists = activeDb.prepare("SELECT order_no FROM orders WHERE order_no = ?").get(rawOrderNo);
+        if (!orderExists) {
+          throw new ApiError(404, "ORDER_NOT_FOUND", `Order '${rawOrderNo}' tidak ditemukan.`);
+        }
+      }
+
+      let pmId: string | null = (existing as any).paymentMethodId || null;
+      let pmSnapshot: string | null = (existing as any).paymentMethodSnapshot || null;
+      const requestedPmId = updates.payment_method_id !== undefined ? updates.payment_method_id : updates.paymentMethodId;
+
+      if (nextDebit > 0) {
+        if (requestedPmId !== undefined) {
+          if (!requestedPmId) {
+            throw new ApiError(400, "INVALID_PAYMENT_METHOD", "Metode pembayaran wajib dipilih untuk top up kas messenger.");
+          }
+          const pm = activeDb.prepare("SELECT * FROM payment_methods WHERE id = ?").get(requestedPmId) as any;
+          if (!pm || pm.status?.trim().toLowerCase() !== "aktif") {
+            throw new ApiError(400, "INVALID_PAYMENT_METHOD", "Metode pembayaran tidak valid atau tidak aktif.");
+          }
+          pmId = pm.id;
+          pmSnapshot = JSON.stringify({
+            id: pm.id,
+            nama_metode: pm.nama_metode,
+            bank: pm.bank,
+            nama_rekening: pm.nama_rekening || "",
+            nomor_rekening: pm.nomor_rekening || "",
+          });
+        } else if (!pmId) {
+          // If converting an outflow (NULL method) into an inflow top-up without specifying a payment method, reject!
+          if (Number(existing.in || 0) === 0) {
+            throw new ApiError(400, "INVALID_PAYMENT_METHOD", "Metode pembayaran wajib dipilih untuk top up kas messenger.");
+          }
+        }
+      } else {
+        pmId = null;
+        pmSnapshot = null;
+      }
+
+      const beforeSnapshot = { ...existing };
+      const updated = dbFinanceRepository.updateKasMessenger(
+        id,
+        {
+          tanggal: nextTanggal,
+          jenis: nextJenis,
+          messenger: targetMessengerName,
+          messengerId: targetMessengerId,
+          keterangan: nextKet,
+          debit: nextDebit,
+          kredit: nextKredit,
+          penanggungJawab: updates.penanggungJawab !== undefined ? (updates.penanggungJawab || null) : (existing.penanggungJawab || null),
+          orderNo: rawOrderNo && rawOrderNo !== "-" ? rawOrderNo : null,
+          kategori: updates.kategori !== undefined ? (updates.kategori || null) : (existing.kategori || null),
+          payment_method_id: pmId,
+          payment_method_snapshot: pmSnapshot,
+        },
+        previousMessengerId,
+        activeDb
+      );
+
+      if (!updated) {
+        throw new ApiError(404, "NOT_FOUND", `Entri Kas Messenger #${id} tidak ditemukan.`);
+      }
+
+      const affectedIds = [previousMessengerId, targetMessengerId].filter((v): v is string => Boolean(v));
+      for (const mId of affectedIds) {
+        const negRow = activeDb.prepare(
+          "SELECT id, tanggal, total FROM kas_messenger WHERE messenger_id = ? AND total < -0.001 ORDER BY substr(tanggal, 1, 10) ASC, created_at ASC, id ASC LIMIT 1"
+        ).get(mId) as { id: number; tanggal: string; total: number } | undefined;
+        if (negRow) {
+          throw new ApiError(
+            409,
+            "NEGATIVE_BALANCE_VIOLATION",
+            `Perubahan Kas Messenger #${id} ditolak karena menyebabkan saldo kurir '${mId}' menjadi negatif (Rp ${Number(negRow.total).toLocaleString("id-ID")} pada baris #${negRow.id}).`
+          );
+        }
+      }
+
+      const nowIso = new Date().toISOString();
+      dbAuditRepository.save({
+        id: `audit-upd-kas-msg-${crypto.randomUUID()}`,
+        userId: user?.userId || "usr-finance",
+        userName: user?.nama || "Finance User",
+        userRole: user?.role || "finance",
+        action: "UPDATE_KAS_MESSENGER",
+        module: "Kas Messenger",
+        details: `Mengedit Kas Messenger #${id} (${targetMessengerName}): ${updated.keterangan} [Masuk: Rp ${nextDebit.toLocaleString("id-ID")}, Keluar: Rp ${nextKredit.toLocaleString("id-ID")}]. Alasan: ${cleanReason}`,
+        metadata: {
+          id,
+          before: beforeSnapshot,
+          after: updated,
+          actorId: user?.userId || null,
+          actorRole: user?.role || null,
+          reason: cleanReason,
+          timestamp: nowIso,
+        },
+        createdAt: nowIso,
+      }, activeDb);
+
+      return updated;
+    }, activeDb);
+  }
+
+  public getCashLedgerReconciliation(targetDb?: DatabaseSync) {
+    return dbFinanceRepository.getCashLedgerReconciliation(targetDb);
   }
 
   public deleteKasMessenger(id: number, user: TokenPayload): boolean {

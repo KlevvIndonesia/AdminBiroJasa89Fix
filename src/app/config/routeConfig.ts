@@ -51,6 +51,14 @@ export const BIAYA_LAYANAN_SERVICES_MAP: Record<string, string> = {
 };
 
 export const CANONICAL_ROUTES: Record<string, RouteMeta> = {
+  "/": {
+    path: "/dashboard",
+    id: "dashboard",
+    title: "Dashboard",
+    description: "Ringkasan performa operasional dan finansial",
+    breadcrumbs: ["Dashboard"],
+    parentGroupId: "dashboard",
+  },
   "/dashboard": {
     path: "/dashboard",
     id: "dashboard",
@@ -327,7 +335,7 @@ export function getRouteMeta(pathname: string): RouteMeta {
   return {
     path: normalized,
     id: "unknown",
-    title: "Admin SUN89",
+    title: "Halaman Tidak Ditemukan",
     description: "Sistem Manajemen Biro Jasa",
     breadcrumbs: ["Beranda"],
   };

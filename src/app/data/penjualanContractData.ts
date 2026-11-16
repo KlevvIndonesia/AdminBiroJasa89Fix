@@ -870,7 +870,7 @@ export function projectOrderToContractRow(
           )
         : "-");
 
-  const bankUangKeluar = order.payment?.namaBank || invoice?.bank || "BCA";
+  const bankUangKeluar = (order as any).bankUangKeluar || order.payment?.namaBank || invoice?.bank || "-";
   
   // Tanggal Uang Keluar: based on actual Samsat / kas disbursement expenditure ONLY
   let tanggalUangKeluar = "-";
@@ -1044,24 +1044,3 @@ export function projectOrderToContractRow(
   };
 }
 
-/**
- * Initial Contract Datasets (Clean Initial State - Transactions Derived from Canonical Orders)
- */
-export const initialPerpanjangan1TahunContract: any[] = [];
-export const initialPerpanjangan5TahunContract: any[] = [];
-export const initialMutasiAsalContract: any[] = [];
-export const initialMutasiAntarDaerahContract: any[] = [];
-export const initialBalikNamaContract: any[] = [];
-export const initialTarikBerkasContract: any[] = [];
-export const initialDuplikatSTNKContract: any[] = [];
-export const initialLainnyaContract: any[] = [];
-
-// Backwards compatibility aliases
-export const initialMutasiLDContract: any[] = initialMutasiAntarDaerahContract;
-export const initialMutasiASContract: any[] = initialMutasiAsalContract;
-export const initialBBNContract: any[] = initialBalikNamaContract;
-export const initialPerpanjanganPajakContract: any[] = initialPerpanjangan1TahunContract;
-export const initialLainLainContract: any[] = initialTarikBerkasContract;
-export const initialBelumKurangBayarContract: any[] = [];
-export const initialProfitTerpendingContract: any[] = [];
-export const initialCashbackTerpendingContract: any[] = [];

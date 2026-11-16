@@ -8,6 +8,7 @@ import { verifyPassword, hashPassword, needsRehash, generateToken, TokenPayload 
 import { ApiError } from "../middleware/errorHandler";
 import { dbAuditRepository } from "../repositories/dbAuditRepository";
 import { db } from "../database/db";
+import { parsePositiveDbUserId, resolveCanonicalRoleFromUser } from "../utils/canonicalIdentity";
 
 /**
  * Validates and resolves the canonical employee identity for a messenger account.
@@ -104,16 +105,8 @@ export class AuthService {
       }
     }
 
-    // Map jabatan to canonical application role (BD-RBAC-04: 4 Canonical Roles, Fail-Closed)
-    const roleMap: Record<string, 'administrator' | 'finance' | 'admin' | 'messenger'> = {
-      SVP: "administrator",
-      ADMIN: "admin",
-      FINANCE: "finance",
-      MESSENGER: "messenger",
-      KURIR: "messenger",
-    };
-    const normalizedJabatan = (userEntity.jabatan || "").toUpperCase().trim();
-    const role = roleMap[normalizedJabatan];
+    // Map jabatan and stored role to canonical application role (BD-RBAC-04: 4 Canonical Roles, Fail-Closed)
+    const role = resolveCanonicalRoleFromUser(userEntity.jabatan, userEntity.role);
     if (!role) {
       throw new ApiError(403, "UNASSIGNED_ROLE", "Akun tidak memiliki jabatan kanonikal yang valid (fail-closed). Hubungi Administrator.");
     }
@@ -170,10 +163,12 @@ export class AuthService {
   }
 
   public getMe(userPayload: TokenPayload) {
-    const user = dbUserRepository.getById(userPayload.userId.replace("usr-", ""));
+    const numericId = parsePositiveDbUserId(userPayload.userId);
+    const user = numericId ? dbUserRepository.getById(numericId) : null;
     return {
       ...(user || {}),
       ...userPayload,
+      userId: user ? `usr-${user.id}` : userPayload.userId,
       role: userPayload.role,
       jabatan: userPayload.jabatan,
       employeeId: userPayload.employeeId,
@@ -216,9 +211,11 @@ export class AuthService {
       throw new ApiError(400, "VALIDATION_ERROR", "Kata sandi baru tidak boleh sama dengan kata sandi saat ini.");
     }
 
-    // 2. Fetch user strictly by authenticated token identity (Prevents IDOR)
-    const rawId = userPayload.userId.replace("usr-", "");
-    const user = dbUserRepository.getByIdWithCredentials(rawId) || dbUserRepository.getByEmailWithCredentials(userPayload.email);
+    // 2. Fetch user strictly by canonical authenticated token identity (Prevents IDOR)
+    const numericId = parsePositiveDbUserId(userPayload.userId);
+    const user =
+      (numericId ? dbUserRepository.getByIdWithCredentials(numericId) : null) ||
+      (userPayload.email ? dbUserRepository.getByEmailWithCredentials(userPayload.email) : null);
     if (!user) {
       throw new ApiError(404, "USER_NOT_FOUND", "Data akun pengguna tidak ditemukan.");
     }
@@ -240,14 +237,11 @@ export class AuthService {
       throw new ApiError(500, "DATABASE_ERROR", "Gagal memperbarui kata sandi di database.");
     }
 
-    // 5. Generate fresh token
-    const roleMap: Record<string, 'administrator' | 'finance' | 'admin' | 'messenger'> = {
-      SVP: "administrator",
-      ADMIN: "admin",
-      FINANCE: "finance",
-      MESSENGER: "messenger",
-    };
-    const role = roleMap[user.jabatan] || "admin";
+    // 5. Resolve canonical role fail-closed (NEVER fallback to 'admin') and generate fresh token
+    const role = resolveCanonicalRoleFromUser(user.jabatan, user.role);
+    if (!role) {
+      throw new ApiError(403, "UNASSIGNED_ROLE", "Akun tidak memiliki jabatan kanonikal yang valid (fail-closed). Hubungi Administrator.");
+    }
 
     let resolvedEmployeeId: string | undefined = user.employee_id || undefined;
     if (role === "messenger") {

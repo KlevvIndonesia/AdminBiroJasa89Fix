@@ -1,16 +1,13 @@
 import { useState } from "react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 import { Button } from "./ui/button";
-import { Input } from "./ui/input";
 import { Badge } from "./ui/badge";
-import { 
-  Plus, 
-  Download, 
-  Search, 
-  Edit, 
-  Trash2, 
-  FileText, 
-  RotateCcw
+import {
+  Plus,
+  Download,
+  Edit,
+  Trash2,
+  FileText,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -19,7 +16,7 @@ import {
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
 import { TablePagination } from "./ui/TablePagination";
-import { EmptyState } from "./ui/empty-state";
+import { DataTableShell, DataTableToolbar, DataTableEmptyRow } from "./ui/data-table";
 import { cn } from "./ui/utils";
 
 export interface ColumnDef {
@@ -124,174 +121,52 @@ export function EnhancedTable({
 
   return (
     <div className="flex-1 flex flex-col min-h-0 space-y-3">
-      {/* Header Actions */}
-      <div className="flex flex-col sm:flex-row gap-2">
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-          <Input
-            placeholder={searchPlaceholder}
-            className="pl-10 bg-input-background border-border h-9 text-xs"
-            value={searchTerm}
-            onChange={(e) => {
-              setSearchTerm(e.target.value);
-              setCurrentPage(1);
-            }}
-          />
-        </div>
-        {filterSlot && (
-          <div className="shrink-0 w-full sm:w-auto">
-            {filterSlot}
-          </div>
-        )}
-        <div className="flex flex-wrap gap-2 shrink-0">
-          {searchTerm && (
-            <Button 
-              variant="outline" 
-              size="sm"
-              onClick={handleResetSearch}
-              className="border-border text-xs h-9 gap-1 text-muted-foreground hover:text-foreground"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              Reset
-            </Button>
-          )}
-          {onAdd && (
-            <Button onClick={onAdd} className="bg-primary hover:bg-primary/90 h-9 text-xs">
-              <Plus className="w-4 h-4 mr-1.5" />
-              Tambah
-            </Button>
-          )}
-          {onExport && (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="outline" className="border-border h-9 text-xs gap-1.5">
-                  <Download className="w-4 h-4" />
-                  <span>Export</span>
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent>
-                <DropdownMenuItem onClick={() => onExport('csv', filteredData)} className="text-xs">
-                  <FileText className="w-4 h-4 mr-2" />
-                  Export CSV
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => onExport('pdf', filteredData)} className="text-xs">
-                  <FileText className="w-4 h-4 mr-2" />
-                  Export PDF
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
-        </div>
-      </div>
+      {/* Standardized Table Toolbar */}
+      <DataTableToolbar
+        searchValue={searchTerm}
+        onSearchChange={(value) => {
+          setSearchTerm(value);
+          setCurrentPage(1);
+        }}
+        searchPlaceholder={searchPlaceholder}
+        showReset={Boolean(searchTerm)}
+        onReset={handleResetSearch}
+        left={filterSlot}
+        right={
+          <>
+            {onAdd && (
+              <Button size="sm" onClick={onAdd} className="bg-primary hover:bg-primary/90 h-8 text-xs gap-1.5">
+                <Plus className="w-3.5 h-3.5" />
+                <span>Tambah</span>
+              </Button>
+            )}
+            {onExport && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="sm" className="border-border h-8 text-xs gap-1.5">
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Export</span>
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent>
+                  <DropdownMenuItem onClick={() => onExport('csv', filteredData)} className="text-xs">
+                    <FileText className="w-3.5 h-3.5 mr-2" />
+                    Export CSV
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => onExport('pdf', filteredData)} className="text-xs">
+                    <FileText className="w-3.5 h-3.5 mr-2" />
+                    Export PDF
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+          </>
+        }
+      />
 
-      {/* Table */}
-      <div className="rounded-xl border border-border/80 overflow-hidden shadow-xs bg-card flex-1 flex flex-col min-h-0">
-        <div className="w-full flex-1 flex flex-col min-h-0">
-          <Table 
-            containerClassName="overflow-y-auto overflow-x-auto max-h-[calc(100vh-270px)] sm:max-h-[calc(100vh-280px)] min-h-[160px]"
-            className={`w-full min-w-[550px] ${paginatedData.length === 0 ? "h-full" : ""}`}
-          >
-            <TableHeader className="sticky top-0 z-10 bg-card border-b border-border shadow-2xs">
-              <TableRow className="hover:bg-transparent">
-                {showRowNumber && (
-                  <TableHead className="w-[50px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-2">
-                    No
-                  </TableHead>
-                )}
-                {columns.map(col => {
-                  const align = getColAlignment(col);
-                  const alignClass = align === "right" ? "text-right" : align === "center" ? "text-center" : "text-left";
-                  return (
-                    <TableHead
-                      key={col.key}
-                      style={col.width ? { width: col.width } : undefined}
-                      className={cn(
-                        "h-9 px-3.5 text-xs font-semibold text-foreground/80 bg-card",
-                        alignClass
-                      )}
-                    >
-                      {col.label}
-                    </TableHead>
-                  );
-                })}
-                {(onEdit || onDelete) && (
-                  <TableHead className="text-center h-9 px-2 text-xs font-semibold text-foreground/80 w-[80px] bg-card">
-                    Aksi
-                  </TableHead>
-                )}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {paginatedData.length === 0 ? (
-                <TableRow className="h-full hover:bg-transparent">
-                  <TableCell colSpan={columns.length + (showRowNumber ? 1 : 0) + (onEdit || onDelete ? 1 : 0)} className="text-center py-8 align-middle p-0">
-                    <EmptyState
-                      title="Tidak ada data ditemukan"
-                      description="Belum ada data yang cocok dengan kriteria pencarian atau filter saat ini."
-                    />
-                  </TableCell>
-                </TableRow>
-              ) : (
-                paginatedData.map((item, idx) => (
-                  <TableRow
-                    key={item.id ?? idx}
-                    className="hover:bg-muted/30 transition-colors border-b border-border/60 last:border-0 h-10"
-                  >
-                    {showRowNumber && (
-                      <TableCell className="w-[50px] text-center text-xs text-muted-foreground font-mono px-2 py-2 align-middle">
-                        {startIndex + idx + 1}
-                      </TableCell>
-                    )}
-                    {columns.map(col => {
-                      const align = getColAlignment(col);
-                      const alignClass = align === "right" ? "text-right" : align === "center" ? "text-center" : "text-left";
-                      return (
-                        <TableCell 
-                          key={col.key} 
-                          style={col.width ? { width: col.width } : undefined}
-                          className={cn("px-3.5 py-2 text-xs align-middle", alignClass)}
-                        >
-                          {formatValue(item[col.key], col.key)}
-                        </TableCell>
-                      );
-                    })}
-                    {(onEdit || onDelete) && (
-                      <TableCell className="text-center px-2 py-1.5 align-middle w-[80px]">
-                        <div className="flex gap-1 justify-center items-center">
-                          {onEdit && (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => onEdit(item)}
-                              className="h-7 w-7 p-0 text-muted-foreground hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-500/10 rounded transition-colors"
-                              title="Edit data"
-                            >
-                              <Edit className="w-3.5 h-3.5" />
-                            </Button>
-                          )}
-                          {onDelete && (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => onDelete(item)}
-                              className="h-7 w-7 p-0 text-muted-foreground hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-500/10 rounded transition-colors"
-                              title="Hapus data"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </Button>
-                          )}
-                        </div>
-                      </TableCell>
-                    )}
-                  </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
-        </div>
-
-        {/* Standardized Table Pagination */}
-        <div className="border-t border-border/80 p-3 bg-card shrink-0 mt-auto">
+      {/* Standardized Table Shell + Pagination */}
+      <DataTableShell
+        footer={
           <TablePagination
             currentPage={currentPage}
             totalItems={filteredData.length}
@@ -303,8 +178,109 @@ export function EnhancedTable({
             }}
             pageSizeOptions={itemsPerPageOptions}
           />
-        </div>
-      </div>
+        }
+      >
+        <Table
+          containerClassName="overflow-y-auto overflow-x-auto max-h-[calc(100vh-270px)] sm:max-h-[calc(100vh-280px)] min-h-[160px]"
+          className={`w-full min-w-[550px] ${paginatedData.length === 0 ? "h-full" : ""}`}
+        >
+          <TableHeader className="sticky top-0 z-10 bg-card border-b border-border shadow-2xs">
+            <TableRow className="hover:bg-transparent">
+              {showRowNumber && (
+                <TableHead className="w-[50px] text-center text-xs h-9 font-semibold text-foreground/80 bg-card px-2">
+                  No
+                </TableHead>
+              )}
+              {columns.map(col => {
+                const align = getColAlignment(col);
+                const alignClass = align === "right" ? "text-right" : align === "center" ? "text-center" : "text-left";
+                return (
+                  <TableHead
+                    key={col.key}
+                    style={col.width ? { width: col.width } : undefined}
+                    className={cn(
+                      "h-9 px-3.5 text-xs font-semibold text-foreground/80 bg-card",
+                      alignClass
+                    )}
+                  >
+                    {col.label}
+                  </TableHead>
+                );
+              })}
+              {(onEdit || onDelete) && (
+                <TableHead className="text-center h-9 px-2 text-xs font-semibold text-foreground/80 w-[80px] bg-card">
+                  Aksi
+                </TableHead>
+              )}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {paginatedData.length === 0 ? (
+              <DataTableEmptyRow
+                colSpan={columns.length + (showRowNumber ? 1 : 0) + (onEdit || onDelete ? 1 : 0)}
+                title="Tidak ada data ditemukan"
+                description="Belum ada data yang cocok dengan kriteria pencarian atau filter saat ini."
+              />
+            ) : (
+              paginatedData.map((item, idx) => (
+                <TableRow
+                  key={item.id ?? idx}
+                  className="hover:bg-muted/30 transition-colors border-b border-border/60 last:border-0 h-10"
+                >
+                  {showRowNumber && (
+                    <TableCell className="w-[50px] text-center text-xs text-muted-foreground font-mono px-2 py-2 align-middle">
+                      {startIndex + idx + 1}
+                    </TableCell>
+                  )}
+                  {columns.map(col => {
+                    const align = getColAlignment(col);
+                    const alignClass = align === "right" ? "text-right" : align === "center" ? "text-center" : "text-left";
+                    return (
+                      <TableCell
+                        key={col.key}
+                        style={col.width ? { width: col.width } : undefined}
+                        className={cn("px-3.5 py-2 text-xs align-middle", alignClass)}
+                      >
+                        {formatValue(item[col.key], col.key)}
+                      </TableCell>
+                    );
+                  })}
+                  {(onEdit || onDelete) && (
+                    <TableCell className="text-center px-2 py-1.5 align-middle w-[80px]">
+                      <div className="flex gap-1 justify-center items-center">
+                        {onEdit && (
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            onClick={() => onEdit(item)}
+                            className="finance-action-btn h-7 w-7 text-muted-foreground hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-500/10"
+                            aria-label="Edit data"
+                            title="Edit data"
+                          >
+                            <Edit className="w-3.5 h-3.5" />
+                          </Button>
+                        )}
+                        {onDelete && (
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            onClick={() => onDelete(item)}
+                            className="finance-action-btn h-7 w-7 text-muted-foreground hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-500/10"
+                            aria-label="Hapus data"
+                            title="Hapus data"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </Button>
+                        )}
+                      </div>
+                    </TableCell>
+                  )}
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      </DataTableShell>
     </div>
   );
 }

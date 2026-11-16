@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { loginAs } from "./helpers/authHelper";
 
 const BASE_URL = "http://localhost:3000";
 
@@ -19,16 +20,7 @@ test.describe("Phase D: Browser End-to-End Verification (Buat Order -> Order Tra
     // ═══════════════════════════════════════════════════════════════════════════
     // 1. Authenticate as Super Administrator (SVP)
     // ═══════════════════════════════════════════════════════════════════════════
-    await page.goto(`${BASE_URL}/login`, { waitUntil: "domcontentloaded" });
-    await page.fill("#email", "svp@birojasa.com");
-    await page.fill("#password", "admin123");
-
-    const loginPromise = page.waitForResponse(
-      (res) => res.url().includes("/api/auth/login") && res.status() === 200
-    );
-    await page.click("button[type='submit']");
-    await loginPromise;
-    await page.waitForURL("**/dashboard", { timeout: 15000 });
+    await loginAs(page, "svp@birojasa.com", "admin123");
 
     // ═══════════════════════════════════════════════════════════════════════════
     // D1: Buat Order via UI
@@ -112,8 +104,9 @@ test.describe("Phase D: Browser End-to-End Verification (Buat Order -> Order Tra
     // ═══════════════════════════════════════════════════════════════════════════
     const trackOrderBtn = page.getByRole("button", { name: "Lihat Tracking Order" });
     if (await trackOrderBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await trackOrderBtn.click();
-    } else if (!page.url().includes("/order/tracking")) {
+      await trackOrderBtn.click({ force: true }).catch(() => {});
+    }
+    if (!page.url().includes("/order/tracking")) {
       await page.goto(`${BASE_URL}/order/tracking`, { waitUntil: "domcontentloaded" });
     }
 

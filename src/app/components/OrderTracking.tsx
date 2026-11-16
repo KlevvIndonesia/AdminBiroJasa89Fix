@@ -3,6 +3,7 @@ import { motion } from "motion/react";
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
+import { Textarea } from "./ui/textarea";
 import { Label } from "./ui/label";
 import { Badge, getStatusBadgeClass } from "./ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
@@ -87,7 +88,6 @@ import {
   getDefaultSamsatProcesses,
   STAGES,
 } from "../data/orderStore";
-import { APP_CONFIG } from "../config/appConfig";
 import { recoverSamsatPickupKendalaAction } from "../data/messengerTaskAdapter";
 import type { OrderCostBreakdownItem } from "../../domain/pricing/types";
 
@@ -107,8 +107,13 @@ import {
 } from "../data/pricingReference";
 import { permissionStore } from "../data/permissionStore";
 import { useKaryawanPengguna } from "../data/karyawanPenggunaAdapter";
-import { KNOWN_MESSENGERS, getMessengerTasksForEmployee } from "../data/messengerTaskAdapter";
+import { getMessengerTasksForEmployee } from "../data/messengerTaskAdapter";
 import { generateDocumentSvgUrl, downloadDataUrl } from "../utils/documentSvgGenerator";
+import {
+  getWibTodayString,
+  normalizeOrderCalendarDate,
+  validateSamsatScheduleDates,
+} from "../utils/orderDateUtils";
 
 // 8 Workflow stages as specified
 export const trackingSteps = [
@@ -163,15 +168,6 @@ const bulanOptions = [
   "Juli", "Agustus", "September", "Oktober", "November", "Desember"
 ];
 
-// Helper to get local date in YYYY-MM-DD
-function getLocalDateString(): string {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
 // Helper to render structured address with fallback
 function renderAddress(addr?: StructuredAddress, fallbackDetail?: string, fallbackDomisili?: string) {
   if (addr && (addr.detail || addr.kota || addr.kecamatan)) {
@@ -222,30 +218,19 @@ export function OrderTracking({
   userName = 'Admin Operasional',
   userId = 'usr-admin',
 }: OrderTrackingProps) {
-  const { activeOrders, advanceOrder, advanceOrderAsync, rollbackOrderAsync, archiveOrder, archiveOrderAsync, updateOrder, updateOrderAsync, verifyPayment, verifyPaymentAsync, processRefund, addRekapDocument, addRekapDocumentAsync, approveDocumentsAsync } = useOrderStore();
-  const { karyawan, isLoading: isKaryawanLoading, error: karyawanError, refresh: refreshKaryawan } = useKaryawanPengguna();
-  const isApiMode = APP_CONFIG.dataProvider === "api";
+  const { activeOrders, advanceOrder, advanceOrderAsync, rollbackOrderAsync, archiveOrder, archiveOrderAsync, updateOrder, updateOrderAsync, verifyPayment, verifyPaymentAsync, processRefund, addRekapDocument, addRekapDocumentAsync, approveDocumentsAsync, completeDeliveryDirectAsync } = useOrderStore();
+  const { karyawan, isKaryawanLoading, karyawanError, refresh: refreshKaryawanBase } = useKaryawanPengguna();
+  const refreshKaryawan = () => refreshKaryawanBase({ target: "employees" });
   const actionFeedback = useActionFeedback();
   const activeMessengers = useMemo(() => {
-    const active = (karyawan || [])
+    return (karyawan || [])
       .filter((k) => (k.jabatan || "").toUpperCase() === "MESSENGER" && k.status === "Aktif")
       .map((k) => ({
         id: k.id,
         nama: k.nama,
         wilayah: k.wilayah,
       }));
-    if (active.length > 0) return active;
-    // In API mode: never fallback to dummy KNOWN_MESSENGERS
-    if (isApiMode) {
-      return [];
-    }
-    // Isolated demo/mock mode only
-    return KNOWN_MESSENGERS.map((nama, idx) => ({
-      id: idx === 0 ? "EMP-0004" : idx === 1 ? "EMP-0005" : `EMP-000${idx + 4}`,
-      nama,
-      wilayah: "Jakarta",
-    }));
-  }, [karyawan, isApiMode]);
+  }, [karyawan]);
 
   const messengers = useMemo(() => activeMessengers.map((m) => m.nama), [activeMessengers]);
 
@@ -276,7 +261,6 @@ export function OrderTracking({
   const [directHandoverData, setDirectHandoverData] = useState<{
     recipientName: string;
     relationship: string;
-    notes: string;
     fileUrl?: string;
     fileName?: string;
     fileType?: "image" | "pdf";
@@ -284,7 +268,6 @@ export function OrderTracking({
   }>({
     recipientName: "",
     relationship: "Pemilik Langsung",
-    notes: "",
   });
   const [isCompressingHandover, setIsCompressingHandover] = useState(false);
   const [deliveryMode, setDeliveryMode] = useState<"jadwal" | "langsung">("jadwal");
@@ -322,14 +305,12 @@ export function OrderTracking({
   const [scheduleData, setScheduleData] = useState({
     tanggalJemput: "",
     messenger: "",
-    catatanPenjadwalan: "",
   });
 
   // Samsat schedule form state
   const [samsatScheduleData, setSamsatScheduleData] = useState({
     tanggalProsesSamsat: "",
     samsatMessenger: "",
-    catatanSamsat: "",
   });
 
   // Samsat result pickup assignment form state
@@ -690,11 +671,10 @@ export function OrderTracking({
   const [deliveryData, setDeliveryData] = useState({
     tanggalPengantaran: "",
     messenger: "",
-    catatanPengantaran: "",
   });
 
-  // Permission check for Supervisi editing (Administrator & Finance)
-  const canEditVerified = userRole === 'administrator' || userRole === 'finance';
+  // Permission check for Cost Verification / Supervisi editing (synced with Dynamic RBAC Stage 5 & 6)
+  const canEditVerified = canManage(5) || canManage(6);
 
   // Filter orders by search keyword
   const currentOrders = activeOrders[currentTab as StageName] || [];
@@ -729,7 +709,6 @@ export function OrderTracking({
     stage6ApprovedAt?: string;
     stage6Notes?: string;
   }>({});
-  const [docApprovalNoteInput, setDocApprovalNoteInput] = useState("");
   const [isSubmittingApproval, setIsSubmittingApproval] = useState(false);
 
   // Unified Stage Advance Confirmation Modal State
@@ -828,103 +807,6 @@ export function OrderTracking({
       {
         entityLabel: "bukti pembayaran",
         actionLabel: "mengunggah bukti pembayaran",
-        onError: (classified) => {
-          toast.error(classified.message);
-        },
-      }
-    );
-  };
-
-  // Stage 1: Upload lampiran dokumen klien (opsional)
-  const handleUploadStage1ClientDoc = async (
-    docKey: string,
-    docLabel: string,
-    file: File
-  ) => {
-    const orderNo = selectedOrder?.orderNo;
-    if (!orderNo) return;
-    const actionKey = `m1-doc:${docKey}:${orderNo}`;
-
-    await actionFeedback.runAction(
-      actionKey,
-      async () => {
-        const processed = await processDocumentUpload(file);
-        const uploaded = await documentRepository.uploadDocument(processed.file, {
-          orderNo,
-          documentType: docKey,
-        });
-        const updatedDocs = {
-          ...(selectedOrder.clientDocuments || {}),
-          [docKey]: {
-            name: processed.fileName,
-            status: "Baru Diupload",
-            updatedAt: new Date().toISOString().split("T")[0],
-            fileType: processed.fileType === "pdf" ? "pdf" : "image",
-            fileUrl: uploaded.fileUrl,
-            documentId: uploaded.id,
-            fileSize: formatFileSize(processed.fileSize),
-            isOptional: true,
-          },
-        };
-        const ok = await updateOrderAsync(orderNo, { clientDocuments: updatedDocs });
-        if (!ok) {
-          throw new ActionApiError(
-            500,
-            "INTERNAL_SERVER_ERROR",
-            `Gagal menyimpan lampiran ${docLabel} ke server.`
-          );
-        }
-        setSelectedOrder((prev: any) =>
-          prev && prev.orderNo === orderNo ? { ...prev, clientDocuments: updatedDocs } : prev
-        );
-        toast.success(`${docLabel} (${file.name}) berhasil diunggah.`);
-      },
-      {
-        entityLabel: docLabel,
-        actionLabel: `mengunggah ${docLabel}`,
-        onError: (classified) => {
-          toast.error(classified.message);
-        },
-      }
-    );
-  };
-
-  // Stage 1: Hapus lampiran dokumen klien (opsional)
-  const handleRemoveStage1ClientDoc = async (docKey: string, docLabel: string, documentId?: string) => {
-    const orderNo = selectedOrder?.orderNo;
-    if (!orderNo) return;
-    const actionKey = `m1-doc-remove:${docKey}:${orderNo}`;
-
-    await actionFeedback.runAction(
-      actionKey,
-      async () => {
-        if (documentId && isApiMode) {
-          await documentRepository.deleteDocument(documentId);
-        }
-        const updatedDocs = {
-          ...(selectedOrder.clientDocuments || {}),
-          [docKey]: {
-            name: "",
-            status: "Belum Tersedia",
-            isOptional: true,
-          },
-        };
-        const ok = await updateOrderAsync(orderNo, { clientDocuments: updatedDocs });
-        if (!ok) {
-          throw new ActionApiError(
-            500,
-            "INTERNAL_SERVER_ERROR",
-            `Gagal menghapus lampiran ${docLabel} dari server.`
-          );
-        }
-        setSelectedOrder((prev: any) =>
-          prev && prev.orderNo === orderNo ? { ...prev, clientDocuments: updatedDocs } : prev
-        );
-        toast.info(`Lampiran ${docLabel} dihapus.`);
-      },
-      {
-        entityLabel: docLabel,
-        actionLabel: `menghapus lampiran ${docLabel}`,
         onError: (classified) => {
           toast.error(classified.message);
         },
@@ -1115,80 +997,6 @@ export function OrderTracking({
     if (!selectedOrder) return;
     const orderNo = selectedOrder.orderNo;
     const actionKey = `m2-save:${orderNo}`;
-    actionFeedback.clearError(`m2-advance:${orderNo}`);
-
-    if (!scheduleData.tanggalJemput) {
-      const msg = "Harap tentukan tanggal jemput dokumen!";
-      actionFeedback.setError(actionKey, {
-        statusCode: 422,
-        code: "VALIDATION_ERROR",
-        message: msg,
-        field: "tanggalJemput",
-      });
-      toast.error(msg);
-      return;
-    }
-    if (!scheduleData.messenger) {
-      const msg = "Harap pilih messenger penjemput!";
-      actionFeedback.setError(actionKey, {
-        statusCode: 422,
-        code: "VALIDATION_ERROR",
-        message: msg,
-        field: "messenger",
-      });
-      toast.error(msg);
-      return;
-    }
-    const selectedMessengerObj = activeMessengers.find(
-      (m) => m.nama === scheduleData.messenger || m.id === scheduleData.messenger
-    );
-    if (!selectedMessengerObj) {
-      const msg = "Messenger yang dipilih tidak valid atau tidak aktif!";
-      actionFeedback.setError(actionKey, {
-        statusCode: 422,
-        code: "VALIDATION_ERROR",
-        message: msg,
-        field: "messenger",
-      });
-      toast.error(msg);
-      return;
-    }
-
-    await actionFeedback.runAction(
-      actionKey,
-      async () => {
-        const ok = await updateOrderAsync(orderNo, {
-          tanggalJemput: scheduleData.tanggalJemput,
-          messenger: selectedMessengerObj.nama,
-          assignedMessengerId: selectedMessengerObj.id,
-          assignedMessengerName: selectedMessengerObj.nama,
-          catatanPenjadwalan: scheduleData.catatanPenjadwalan,
-          isScheduled: true,
-          messengerTaskStatus: "Terjadwal Jemput",
-        });
-        if (!ok) {
-          throw new ActionApiError(500, "INTERNAL_SERVER_ERROR", "Gagal menyimpan jadwal penjemputan ke server.");
-        }
-        setIsScheduleWorkspaceOpen(false);
-        toast.success(`Jadwal jemput untuk ${orderNo} berhasil disimpan (${selectedMessengerObj.nama})!`);
-        setSelectedOrder(null);
-      },
-      {
-        entityLabel: `jadwal order ${orderNo}`,
-        actionLabel: "menyimpan jadwal penjemputan",
-        onError: (classified) => {
-          toast.error(classified.message);
-        },
-      }
-    );
-  };
-
-  // Stage 2 -> Stage 3 (Save schedule & Advance directly from modal)
-  const handleSaveScheduleAndAdvance = () => {
-    if (!selectedOrder) return;
-    const orderNo = selectedOrder.orderNo;
-    const actionKey = `m2-advance:${orderNo}`;
-    actionFeedback.clearError(`m2-save:${orderNo}`);
     actionFeedback.clearError(actionKey);
 
     if (!scheduleData.tanggalJemput) {
@@ -1228,31 +1036,33 @@ export function OrderTracking({
       return;
     }
 
-    confirmAndAdvance(
-      orderNo,
-      "Stage 3 — Verifikasi Dokumen Fisik",
-      `Simpan jadwal jemput (${selectedMessengerObj.nama}), konfirmasi penjemputan berkas selesai, dan lanjutkan order ke Verifikasi Dokumen?`,
+    const normalizedTanggalJemput =
+      normalizeOrderCalendarDate(scheduleData.tanggalJemput) || scheduleData.tanggalJemput;
+
+    await actionFeedback.runAction(
+      actionKey,
       async () => {
-        const nowIso = new Date().toISOString();
-        const updated = await advanceOrderAsync(orderNo, "Verifikasi Dokumen", {
-          tanggalJemput: scheduleData.tanggalJemput,
+        const ok = await updateOrderAsync(orderNo, {
+          tanggalJemput: normalizedTanggalJemput,
           messenger: selectedMessengerObj.nama,
           assignedMessengerId: selectedMessengerObj.id,
           assignedMessengerName: selectedMessengerObj.nama,
-          catatanPenjadwalan: scheduleData.catatanPenjadwalan,
           isScheduled: true,
-          pickupCompleted: true,
-          pickupCompletedAt: nowIso,
-          messengerTaskStatus: "Dokumen Sudah Tersedia",
+          messengerTaskStatus: "Terjadwal Jemput",
         });
-        if (!updated) {
-          throw new ActionApiError(500, "INTERNAL_SERVER_ERROR", "Gagal memindahkan order ke Verifikasi Dokumen.");
+        if (!ok) {
+          throw new ActionApiError(500, "INTERNAL_SERVER_ERROR", "Gagal menyimpan jadwal penjemputan ke server.");
         }
-
         setIsScheduleWorkspaceOpen(false);
-        setCurrentTab("Verifikasi Dokumen");
-        toast.success(`Jadwal jemput untuk ${orderNo} disimpan & order berlanjut ke Verifikasi Dokumen!`);
+        toast.success(`Jadwal jemput untuk ${orderNo} berhasil disimpan (${selectedMessengerObj.nama})!`);
         setSelectedOrder(null);
+      },
+      {
+        entityLabel: `jadwal order ${orderNo}`,
+        actionLabel: "menyimpan jadwal penjemputan",
+        onError: (classified) => {
+          toast.error(classified.message);
+        },
       }
     );
   };
@@ -1276,7 +1086,7 @@ export function OrderTracking({
       "Stage 3 — Verifikasi Dokumen Fisik",
       "Apakah Anda yakin berkas fisik telah tiba dan siap diverifikasi kelengkapannya di kantor?",
       async () => {
-        const updated = await advanceOrderAsync(order.orderNo, "Verifikasi Dokumen", { pickupCompleted: true });
+        const updated = await advanceOrderAsync(order.orderNo, "Verifikasi Dokumen", {});
         if (!updated) {
           throw new ActionApiError(500, "INTERNAL_SERVER_ERROR", "Gagal memajukan order ke Verifikasi Dokumen.");
         }
@@ -1284,11 +1094,6 @@ export function OrderTracking({
         toast.success(`Dokumen order ${order.orderNo} siap diverifikasi fisik di kantor!`);
       }
     );
-  };
-
-  // Stage 2 -> Stage 3 (Legacy modal fallback handler maintained for compatibility)
-  const handleSaveSchedule = () => {
-    handleSaveScheduleAndAdvance();
   };
 
   // Stage 3 -> Stage 4 (Verifikasi Dokumen -> Proses Samsat)
@@ -1403,10 +1208,9 @@ export function OrderTracking({
       "Stage 8 — Dokumen Telah Diterima",
       "Apakah Anda yakin dokumen fisik telah diserahkan dan diterima oleh pihak pemesan?",
       async () => {
-        const dateStr = new Date().toISOString().split('T')[0];
+        const dateStr = getWibTodayString();
         const updated = await advanceOrderAsync(order.orderNo, "Dokumen Telah Diterima", {
           tanggalDiterima: dateStr,
-          isReceived: true,
         });
         if (!updated) {
           throw new ActionApiError(500, "INTERNAL_SERVER_ERROR", "Gagal memajukan order ke Dokumen Telah Diterima.");
@@ -1577,9 +1381,7 @@ export function OrderTracking({
     await actionFeedback.runAction(
       actionKey,
       async () => {
-        if (isApiMode) {
-          await documentRepository.deleteDocument(docId);
-        }
+        await documentRepository.deleteDocument(docId);
 
         const remainingUploaded = uploadedNewDocs.filter((d) => d.id !== docId);
         const remainingNames = remainingUploaded.map((d) => d.name);
@@ -1641,11 +1443,12 @@ export function OrderTracking({
           ...Object.keys(docState).filter(k => docState[k].status === "Lengkap" || docState[k].fileUrl).map(k => docState[k].name || k),
           ...uploadedNewDocs.map(d => d.name)
         ];
+        const existingStage5Notes = selectedOrder.documentApproval?.stage5Notes || undefined;
         const ok = await approveDocumentsAsync(
           orderNo,
           5,
           { name: userName || "Admin Loket", role: userRole || "admin" },
-          docApprovalNoteInput,
+          existingStage5Notes,
           allDocNames
         );
         if (!ok) {
@@ -1657,7 +1460,7 @@ export function OrderTracking({
           ...prev,
           stage5VerifiedBy: userName || "Admin Loket",
           stage5VerifiedAt: nowIso,
-          stage5Notes: docApprovalNoteInput,
+          stage5Notes: existingStage5Notes || prev.stage5Notes || "",
         }));
         setSelectedOrder((prev: any) =>
           prev && prev.orderNo === orderNo
@@ -1669,7 +1472,7 @@ export function OrderTracking({
                   stage5Verified: true,
                   stage5VerifiedBy: userName || "Admin Loket",
                   stage5VerifiedAt: nowIso,
-                  stage5Notes: docApprovalNoteInput,
+                  ...(existingStage5Notes ? { stage5Notes: existingStage5Notes } : {}),
                 },
               }
             : prev
@@ -1693,7 +1496,7 @@ export function OrderTracking({
     const orderNo = selectedOrder.orderNo;
     const actionKey = `m6-approve-docs:${orderNo}`;
     if (!canManage(6)) {
-      const msg = "Akses Ditolak: Hanya Supervisor atau Administrator yang dapat menyetujui dokumen di Stage 6.";
+      const msg = "Akses Ditolak: Stage 6 (Supervisi) bersifat eksklusif untuk SVP.";
       actionFeedback.setError(actionKey, { statusCode: 403, code: "FORBIDDEN", message: msg });
       toast.error(msg);
       return;
@@ -1707,11 +1510,12 @@ export function OrderTracking({
           ...Object.keys(docState).filter(k => docState[k].status === "Lengkap" || docState[k].fileUrl).map(k => docState[k].name || k),
           ...uploadedNewDocs.map(d => d.name)
         ];
+        const existingStage6Notes = selectedOrder.documentApproval?.stage6Notes || undefined;
         const ok = await approveDocumentsAsync(
           orderNo,
           6,
-          { name: userName || "Supervisor", role: userRole || "supervisor" },
-          docApprovalNoteInput,
+          { name: userName || "Supervisor", role: userRole || "administrator" },
+          existingStage6Notes,
           allDocNames
         );
         if (!ok) {
@@ -1723,7 +1527,7 @@ export function OrderTracking({
           ...prev,
           stage6ApprovedBy: userName || "Supervisor",
           stage6ApprovedAt: nowIso,
-          stage6Notes: docApprovalNoteInput,
+          stage6Notes: existingStage6Notes || prev.stage6Notes || "",
         }));
         setSelectedOrder((prev: any) =>
           prev && prev.orderNo === orderNo
@@ -1736,7 +1540,7 @@ export function OrderTracking({
                   stage6Approved: true,
                   stage6ApprovedBy: userName || "Supervisor",
                   stage6ApprovedAt: nowIso,
-                  stage6Notes: docApprovalNoteInput,
+                  ...(existingStage6Notes ? { stage6Notes: existingStage6Notes } : {}),
                 },
               }
             : prev
@@ -1821,7 +1625,14 @@ export function OrderTracking({
     const finalBiayaJasa = jasaItem
       ? (jasaItem.actualCost !== undefined ? Number(jasaItem.actualCost) : Number(jasaItem.amount || 0))
       : (parseFloat(finalCostData.finalBiayaJasa || "0") || selectedOrder.biayaJasa || selectedOrder.costSnapshot?.biayaJasa || 0);
-    const totalBiayaSamsat = Math.max(0, totalFinal - finalBiayaJasa);
+    const courierItem = editableBreakdown.find(
+      (item) => String(item.category || "") === "Antar Jemput" || item.itemId === "biaya-antar-jemput" || (item.name || "").toLowerCase().includes("antar jemput")
+    );
+    const finalCourierInTotal = courierItem
+      ? (courierItem.actualCost !== undefined ? Number(courierItem.actualCost) : Number(courierItem.amount || 0))
+      : 0;
+    const finalBiayaLainnya = parseFloat(finalCostData.finalBiayaLainnya || "0") || 0;
+    const totalBiayaSamsat = Math.max(0, totalFinal - finalBiayaJasa - finalCourierInTotal - finalBiayaLainnya);
 
     const paid = selectedOrder.payment?.dibayar || 0;
     const difference = totalFinal - paid;
@@ -2025,7 +1836,7 @@ export function OrderTracking({
     const selectedMessengerObj = activeMessengers.find(
       (m) => m.nama === deliveryMessengerName || m.id === deliveryMessengerName
     );
-    if (isApiMode && !selectedMessengerObj) {
+    if (!selectedMessengerObj) {
       const msg = "Messenger pengantar yang dipilih tidak valid atau tidak aktif!";
       actionFeedback.setError(actionKey, {
         statusCode: 422,
@@ -2046,7 +1857,6 @@ export function OrderTracking({
           messengerPengantar: finalMessengerName,
           assignedMessengerId: selectedMessengerObj?.id || selectedOrder.assignedMessengerId,
           assignedMessengerName: finalMessengerName,
-          catatanPengantaran: deliveryData.catatanPengantaran,
           isDeliveryScheduled: true,
           deliveryStatus: "Terjadwal Antar",
         });
@@ -2137,7 +1947,7 @@ export function OrderTracking({
       return;
     }
     const nowIso = new Date().toISOString();
-    const dateStr = nowIso.split("T")[0];
+    const dateStr = getWibTodayString();
     const proof = {
       recipientName: directHandoverData.recipientName.trim(),
       relationship: directHandoverData.relationship || "Pemilik Langsung",
@@ -2145,7 +1955,7 @@ export function OrderTracking({
       fileName: directHandoverData.fileName,
       fileType: directHandoverData.fileType,
       fileSize: directHandoverData.fileSize,
-      notes: directHandoverData.notes.trim() || undefined,
+      ...(selectedOrder.deliveryHandover?.notes ? { notes: selectedOrder.deliveryHandover.notes } : {}),
       completedAt: nowIso,
     };
 
@@ -2154,10 +1964,16 @@ export function OrderTracking({
       "Stage 8 — Dokumen Telah Diterima",
       `Apakah Anda yakin serah terima dokumen kepada ${proof.recipientName} (${proof.relationship}) sudah benar dan order dipindahkan ke tahap Dokumen Telah Diterima?`,
       async () => {
+        if (selectedOrder.deliveryStatus !== "Dokumen Diserahkan" && !selectedOrder.isReceived) {
+          const completed = await completeDeliveryDirectAsync(orderNo, {
+            receiverName: proof.recipientName,
+            photoUrl: proof.photoProofUrl,
+          });
+          if (!completed) {
+            throw new ActionApiError(500, "INTERNAL_SERVER_ERROR", "Gagal mencatat serah terima dokumen.");
+          }
+        }
         const updated = await advanceOrderAsync(orderNo, "Dokumen Telah Diterima", {
-          deliveryStatus: "Dokumen Diserahkan",
-          isReceived: true,
-          receiverName: proof.recipientName,
           tanggalDiterima: dateStr,
           deliveryHandover: proof,
         });
@@ -2271,9 +2087,8 @@ export function OrderTracking({
     actionFeedback.clearByPrefix("m2-");
     setSelectedOrder(order);
     setScheduleData({
-      tanggalJemput: order.tanggalJemput || new Date().toISOString().split('T')[0],
+      tanggalJemput: normalizeOrderCalendarDate(order.tanggalJemput) || getWibTodayString(),
       messenger: order.messenger || "",
-      catatanPenjadwalan: order.catatanPenjadwalan || "",
     });
     setIsScheduleWorkspaceOpen(true);
   };
@@ -2303,7 +2118,7 @@ export function OrderTracking({
     actionFeedback.clearByPrefix("m4a-");
     setSelectedOrder(order);
 
-    const defaultDate = order.tanggalProsesSamsat || getLocalDateString();
+    const defaultDate = normalizeOrderCalendarDate(order.tanggalProsesSamsat) || getWibTodayString();
 
     let defaultMessengerNama = "";
     if (order.samsatMessengerNama && activeMessengers.some((m) => m.nama === order.samsatMessengerNama || m.id === order.samsatMessengerId)) {
@@ -2356,7 +2171,6 @@ export function OrderTracking({
     setSamsatScheduleData({
       tanggalProsesSamsat: defaultDate,
       samsatMessenger: defaultMessengerNama || activeMessengers[0]?.nama || "",
-      catatanSamsat: order.catatanSamsat || "",
     });
     setIsSamsatScheduleModalOpen(true);
   };
@@ -2367,37 +2181,20 @@ export function OrderTracking({
     const actionKey = `m4a-save:${orderNo}`;
     actionFeedback.clearError(actionKey);
 
-    if (!samsatScheduleData.tanggalProsesSamsat) {
-      const msg = "Harap tentukan tanggal mulai proses Samsat!";
-      actionFeedback.setError(actionKey, { statusCode: 422, code: "VALIDATION_ERROR", message: msg, field: "tanggalProsesSamsat" });
-      toast.error(msg);
+    const dateValidation = validateSamsatScheduleDates({
+      tanggalProsesSamsat: samsatScheduleData.tanggalProsesSamsat,
+      tanggalMasukBerkas: selectedOrder.tanggalMasukBerkas,
+      today: getWibTodayString(),
+    });
+    if (!dateValidation.valid) {
+      actionFeedback.setError(actionKey, {
+        statusCode: 422,
+        code: "VALIDATION_ERROR",
+        message: dateValidation.message,
+        ...(dateValidation.field ? { field: dateValidation.field } : {}),
+      });
+      toast.error(dateValidation.message);
       return;
-    }
-
-    const todayStr = getLocalDateString();
-    if (samsatScheduleData.tanggalProsesSamsat < todayStr) {
-      const msg = "Tanggal mulai proses Samsat tidak boleh sebelum hari ini.";
-      actionFeedback.setError(actionKey, { statusCode: 422, code: "VALIDATION_ERROR", message: msg, field: "tanggalProsesSamsat" });
-      toast.error(msg);
-      return;
-    }
-
-    if (selectedOrder.tanggalMasukBerkas) {
-      const masukDate = selectedOrder.tanggalMasukBerkas.split("T")[0];
-      if (masukDate) {
-        if (isNaN(Date.parse(masukDate))) {
-          const msg = "Format tanggal berkas diterima tidak valid pada order ini.";
-          actionFeedback.setError(actionKey, { statusCode: 422, code: "VALIDATION_ERROR", message: msg });
-          toast.error(msg);
-          return;
-        }
-        if (samsatScheduleData.tanggalProsesSamsat < masukDate) {
-          const msg = `Tanggal mulai proses Samsat tidak boleh sebelum tanggal berkas diterima (${masukDate}).`;
-          actionFeedback.setError(actionKey, { statusCode: 422, code: "VALIDATION_ERROR", message: msg, field: "tanggalProsesSamsat" });
-          toast.error(msg);
-          return;
-        }
-      }
     }
 
     if (!samsatScheduleData.samsatMessenger) {
@@ -2422,11 +2219,10 @@ export function OrderTracking({
         const messengerNama = selectedMessengerObj.nama;
         const messengerId = selectedMessengerObj.id;
         const ok = await updateOrderAsync(orderNo, {
-          tanggalProsesSamsat: samsatScheduleData.tanggalProsesSamsat,
+          tanggalProsesSamsat: dateValidation.normalizedProsesDate,
           samsatMessengerId: messengerId,
           samsatMessengerNama: messengerNama,
           samsatMessenger: messengerNama,
-          catatanSamsat: samsatScheduleData.catatanSamsat,
           samsatStatus: "Terjadwal Samsat",
           isSamsatScheduled: true,
         });
@@ -2451,7 +2247,7 @@ export function OrderTracking({
     actionFeedback.clearByPrefix("m4b-");
     setSelectedOrder(order);
     setSamsatPickupData({
-      samsatPickupDate: order.samsatPickupDate || new Date().toISOString().split('T')[0],
+      samsatPickupDate: order.samsatPickupDate || getWibTodayString(),
       samsatPickupMessenger: order.samsatPickupMessengerNama || order.samsatMessengerNama || order.messenger || (activeMessengers[0]?.nama || ""),
       samsatPickupNotes: order.samsatPickupNotes || "Ambil notice pajak dan STNK baru dari Samsat, serahkan ke kantor.",
     });
@@ -2849,7 +2645,6 @@ export function OrderTracking({
       stage6ApprovedAt: approval?.stage6ApprovedAt || (order.approvedBySpv ? order.spvApprovedAt : undefined),
       stage6Notes: approval?.stage6Notes || "",
     });
-    setDocApprovalNoteInput("");
 
     setIsFinalCostDialogOpen(true);
   };
@@ -2858,14 +2653,12 @@ export function OrderTracking({
     actionFeedback.clearByPrefix("m7-");
     setSelectedOrder(order);
     setDeliveryData({
-      tanggalPengantaran: order.tanggalPengantaran || new Date().toISOString().split('T')[0],
-      messenger: order.messengerPengantar || order.messenger || messengers[0],
-      catatanPengantaran: order.catatanPengantaran || "Antar ke alamat pengantaran dokumen.",
+      tanggalPengantaran: normalizeOrderCalendarDate(order.tanggalPengantaran) || getWibTodayString(),
+      messenger: order.messengerPengantar || order.messenger || messengers[0] || "",
     });
     setDirectHandoverData({
       recipientName: order.deliveryHandover?.recipientName || order.receiverName || order.customer || "",
       relationship: order.deliveryHandover?.relationship || "Pemilik Langsung",
-      notes: order.deliveryHandover?.notes || "",
       fileUrl: order.deliveryHandover?.photoProofUrl,
       fileName: order.deliveryHandover?.fileName,
       fileType: order.deliveryHandover?.fileType,
@@ -3051,7 +2844,7 @@ export function OrderTracking({
                             <div className="flex items-center gap-1.5 flex-wrap">
                               <span>{order.orderNo}</span>
                               {Boolean(order.isCancelled || order.currentStageName === "Dibatalkan" || order.status === "Dibatalkan") && (
-                                <Badge status="error" className="text-[9px] px-1 py-0 font-sans">
+                                <Badge status="error" className="text-[11px] px-1.5 py-0 font-sans">
                                   Dibatalkan
                                 </Badge>
                               )}
@@ -3068,14 +2861,26 @@ export function OrderTracking({
                           </TableCell>
                           <TableCell className="text-right">
                             {/* ONE PRIMARY ACTION: Verifikasi (View + Verifikasi Dialog) */}
-                            <Button
-                              size="sm"
-                              className="h-8 gap-1.5"
-                              onClick={() => openVerifyWorkspace(order)}
-                            >
-                              <CheckCircle className="w-3.5 h-3.5" />
-                              Verifikasi
-                            </Button>
+                            {canManage(1) ? (
+                              <Button
+                                size="sm"
+                                className="h-8 gap-1.5"
+                                onClick={() => openVerifyWorkspace(order)}
+                              >
+                                <CheckCircle className="w-3.5 h-3.5" />
+                                Verifikasi
+                              </Button>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-8 gap-1.5 text-muted-foreground hover:text-foreground"
+                                onClick={() => openVerifyWorkspace(order)}
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                                Lihat Detail
+                              </Button>
+                            )}
                           </TableCell>
                         </TableRow>
                       ))
@@ -3153,7 +2958,7 @@ export function OrderTracking({
                             <div className="flex items-center gap-1.5 flex-wrap">
                               <span>{order.orderNo}</span>
                               {Boolean(order.isCancelled || order.currentStageName === "Dibatalkan" || order.status === "Dibatalkan") && (
-                                <Badge status="error" className="text-[9px] px-1 py-0 font-sans">
+                                <Badge status="error" className="text-[11px] px-1.5 py-0 font-sans">
                                   Dibatalkan
                                 </Badge>
                               )}
@@ -3180,25 +2985,37 @@ export function OrderTracking({
                           </TableCell>
                           <TableCell className="text-right">
                             <div className="flex flex-col items-end gap-1">
-                              {order.pickupCompleted || order.messengerTaskStatus === "Dokumen Sudah Tersedia" ? (
-                                <Button
-                                  size="sm"
-                                  disabled={actionFeedback.isLoading(`row-stage2-advance:${order.orderNo}`) || isAdvancing}
-                                  className="h-8 gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-medium"
-                                  onClick={() => handleAdvanceFromPickup(order)}
-                                >
-                                  <ArrowRight className="w-3.5 h-3.5" />
-                                  Lanjut ke Verifikasi Dokumen
-                                </Button>
+                              {canManage(2) ? (
+                                order.pickupCompleted || order.messengerTaskStatus === "Dokumen Sudah Tersedia" ? (
+                                  <Button
+                                    size="sm"
+                                    disabled={actionFeedback.isLoading(`row-stage2-advance:${order.orderNo}`) || isAdvancing}
+                                    className="h-8 gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-medium"
+                                    onClick={() => handleAdvanceFromPickup(order)}
+                                  >
+                                    <ArrowRight className="w-3.5 h-3.5" />
+                                    Lanjut ke Verifikasi Dokumen
+                                  </Button>
+                                ) : (
+                                  <Button
+                                    size="sm"
+                                    variant={order.isScheduled ? "outline" : "default"}
+                                    className="h-8 gap-1.5"
+                                    onClick={() => openScheduleWorkspace(order)}
+                                  >
+                                    <Calendar className="w-3.5 h-3.5" />
+                                    {order.isScheduled ? "Ubah Jadwal" : "Jadwalkan"}
+                                  </Button>
+                                )
                               ) : (
                                 <Button
                                   size="sm"
-                                  variant={order.isScheduled ? "outline" : "default"}
-                                  className="h-8 gap-1.5"
+                                  variant="outline"
+                                  className="h-8 gap-1.5 text-muted-foreground hover:text-foreground"
                                   onClick={() => openScheduleWorkspace(order)}
                                 >
-                                  <Calendar className="w-3.5 h-3.5" />
-                                  {order.isScheduled ? "Ubah Jadwal" : "Jadwalkan"}
+                                  <Eye className="w-3.5 h-3.5" />
+                                  Lihat Detail
                                 </Button>
                               )}
                               <ActionInlineError
@@ -3285,7 +3102,7 @@ export function OrderTracking({
                             <div className="flex items-center gap-1.5 flex-wrap">
                               <span>{order.orderNo}</span>
                               {Boolean(order.isCancelled || order.currentStageName === "Dibatalkan" || order.status === "Dibatalkan") && (
-                                <Badge status="error" className="text-[9px] px-1 py-0 font-sans">
+                                <Badge status="error" className="text-[11px] px-1.5 py-0 font-sans">
                                   Dibatalkan
                                 </Badge>
                               )}
@@ -3310,14 +3127,26 @@ export function OrderTracking({
                           </TableCell>
                           <TableCell className="text-right">
                             {/* ONE PRIMARY ACTION: Verifikasi Dokumen */}
-                            <Button
-                              size="sm"
-                              className="h-8 gap-1.5"
-                              onClick={() => openDocVerificationWorkspace(order)}
-                            >
-                              <FileCheck className="w-3.5 h-3.5" />
-                              Verifikasi Dokumen
-                            </Button>
+                            {canManage(3) ? (
+                              <Button
+                                size="sm"
+                                className="h-8 gap-1.5"
+                                onClick={() => openDocVerificationWorkspace(order)}
+                              >
+                                <FileCheck className="w-3.5 h-3.5" />
+                                Verifikasi Dokumen
+                              </Button>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-8 gap-1.5 text-muted-foreground hover:text-foreground"
+                                onClick={() => openDocVerificationWorkspace(order)}
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                                Lihat Detail
+                              </Button>
+                            )}
                           </TableCell>
                         </TableRow>
                       ))
@@ -3394,12 +3223,12 @@ export function OrderTracking({
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <span>{order.orderNo}</span>
                             {Boolean(order.isCancelled || order.currentStageName === "Dibatalkan" || order.status === "Dibatalkan") && (
-                              <Badge status="error" className="text-[9px] px-1 py-0 font-sans">
+                              <Badge status="error" className="text-[11px] px-1.5 py-0 font-sans">
                                 Dibatalkan
                               </Badge>
                             )}
                             {Boolean(order.isFinancialAnomaly || (order as any).financialAnomalyReason) && (
-                              <Badge status="error" className="text-[9px] px-1 py-0 font-sans bg-rose-500/10 text-rose-600 border border-rose-300">
+                              <Badge status="error" className="text-[11px] px-1.5 py-0 font-sans bg-rose-500/10 text-rose-600 border border-rose-300">
                                 Anomali Biaya (S &gt; T)
                               </Badge>
                             )}
@@ -3467,7 +3296,7 @@ export function OrderTracking({
                         </TableCell>
                         <TableCell className="text-right">
                           <div className="flex flex-col items-end gap-1">
-                            {order.samsatPickupStatus === "Terkendala" ? (
+                            {canManage(4) && order.samsatPickupStatus === "Terkendala" ? (
                               <Button
                                 size="sm"
                                 variant="outline"
@@ -3487,7 +3316,7 @@ export function OrderTracking({
                                   </>
                                 )}
                               </Button>
-                            ) : order.samsatPickupStatus === "Dokumen Samsat Diterima di Kantor" ? (
+                            ) : canManage(4) && order.samsatPickupStatus === "Dokumen Samsat Diterima di Kantor" ? (
                               <Button
                                 size="sm"
                                 disabled={actionFeedback.isLoading(`row-stage4-advance:${order.orderNo}`) || isAdvancing}
@@ -3497,7 +3326,7 @@ export function OrderTracking({
                                 <ArrowRight className="w-3.5 h-3.5" />
                                 Lanjut ke Verifikasi Biaya
                               </Button>
-                            ) : order.samsatStatus === "Selesai" && order.samsatPickupStatus !== "Sedang Jemput Dokumen Samsat" && order.samsatPickupStatus !== "Terjadwal Jemput Samsat" ? (
+                            ) : canManage(4) && order.samsatStatus === "Selesai" && order.samsatPickupStatus !== "Sedang Jemput Dokumen Samsat" && order.samsatPickupStatus !== "Terjadwal Jemput Samsat" ? (
                               <Button
                                 size="sm"
                                 className="h-8 gap-1.5 font-medium"
@@ -3506,7 +3335,7 @@ export function OrderTracking({
                                 <Truck className="w-3.5 h-3.5" />
                                 Tugaskan Jemput Hasil
                               </Button>
-                            ) : order.samsatPickupStatus === "Terjadwal Jemput Samsat" ? (
+                            ) : canManage(4) && order.samsatPickupStatus === "Terjadwal Jemput Samsat" ? (
                               <Button
                                 size="sm"
                                 variant="outline"
@@ -3518,15 +3347,17 @@ export function OrderTracking({
                               </Button>
                             ) : order.samsatStatus !== "Belum Terjadwal" && (order.samsatStatus === "Terjadwal Samsat" || (order.isSamsatScheduled && order.tanggalProsesSamsat)) && order.samsatStatus !== "Menuju Samsat" && order.samsatStatus !== "Sedang Proses Samsat" && !order.samsatSubstatus ? (
                               <div className="flex items-center justify-end gap-1.5">
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  className="h-8 gap-1.5"
-                                  onClick={() => openSamsatScheduleModal(order)}
-                                >
-                                  <Calendar className="w-3.5 h-3.5" />
-                                  Ubah Jadwal
-                                </Button>
+                                {canManage(4) && (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-8 gap-1.5"
+                                    onClick={() => openSamsatScheduleModal(order)}
+                                  >
+                                    <Calendar className="w-3.5 h-3.5" />
+                                    Ubah Jadwal
+                                  </Button>
+                                )}
                                 <Button
                                   size="sm"
                                   variant="outline"
@@ -3537,7 +3368,7 @@ export function OrderTracking({
                                   Detail
                                 </Button>
                               </div>
-                            ) : order.samsatStatus === "Menuju Samsat" || order.samsatStatus === "Sedang Proses Samsat" || order.samsatSubstatus || order.samsatPickupStatus === "Sedang Jemput Dokumen Samsat" ? (
+                            ) : order.samsatStatus === "Menuju Samsat" || order.samsatStatus === "Sedang Proses Samsat" || order.samsatSubstatus || order.samsatPickupStatus === "Sedang Jemput Dokumen Samsat" || !canManage(4) ? (
                               <Button
                                 size="sm"
                                 variant="outline"
@@ -3655,12 +3486,12 @@ export function OrderTracking({
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <span>{order.orderNo}</span>
                             {Boolean(order.isCancelled || order.currentStageName === "Dibatalkan" || order.status === "Dibatalkan") && (
-                              <Badge status="error" className="text-[9px] px-1 py-0 font-sans">
+                              <Badge status="error" className="text-[11px] px-1.5 py-0 font-sans">
                                 Dibatalkan
                               </Badge>
                             )}
                             {Boolean(order.isFinancialAnomaly || (order as any).financialAnomalyReason) && (
-                              <Badge status="error" className="text-[9px] px-1 py-0 font-sans bg-rose-500/10 text-rose-600 border border-rose-300">
+                              <Badge status="error" className="text-[11px] px-1.5 py-0 font-sans bg-rose-500/10 text-rose-600 border border-rose-300">
                                 Anomali Biaya (S &gt; T)
                               </Badge>
                             )}
@@ -3710,14 +3541,26 @@ export function OrderTracking({
                           </TableCell>
                           <TableCell className="text-right">
                             {/* ONE PRIMARY ACTION: Verifikasi Ulang */}
-                            <Button
-                              size="sm"
-                              className="h-8 gap-1.5"
-                              onClick={() => openFinalCostWorkspace(order)}
-                            >
-                              <Calculator className="w-3.5 h-3.5" />
-                              Verifikasi Ulang
-                            </Button>
+                            {canManage(5) ? (
+                              <Button
+                                size="sm"
+                                className="h-8 gap-1.5"
+                                onClick={() => openFinalCostWorkspace(order)}
+                              >
+                                <Calculator className="w-3.5 h-3.5" />
+                                Verifikasi Ulang
+                              </Button>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-8 gap-1.5 text-muted-foreground hover:text-foreground"
+                                onClick={() => openFinalCostWorkspace(order)}
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                                Lihat Detail
+                              </Button>
+                            )}
                           </TableCell>
                         </TableRow>
                       );
@@ -3799,12 +3642,12 @@ export function OrderTracking({
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <span>{order.orderNo}</span>
                             {Boolean(order.isCancelled || order.currentStageName === "Dibatalkan" || order.status === "Dibatalkan") && (
-                              <Badge status="error" className="text-[9px] px-1 py-0 font-sans">
+                              <Badge status="error" className="text-[11px] px-1.5 py-0 font-sans">
                                 Dibatalkan
                               </Badge>
                             )}
                             {Boolean(order.isFinancialAnomaly || (order as any).financialAnomalyReason) && (
-                              <Badge status="error" className="text-[9px] px-1 py-0 font-sans bg-rose-500/10 text-rose-600 border border-rose-300">
+                              <Badge status="error" className="text-[11px] px-1.5 py-0 font-sans bg-rose-500/10 text-rose-600 border border-rose-300">
                                 Anomali Biaya (S &gt; T)
                               </Badge>
                             )}
@@ -3817,7 +3660,7 @@ export function OrderTracking({
                             <div className="flex flex-col items-end">
                               <span>Rp {finalTotal.toLocaleString('id-ID')}</span>
                               {(order.costCompletenessStatus === "PARTIAL_ESTIMATE" || !order.isCostVerified) && (
-                                <span className="text-[9px] px-1 py-0.2 rounded font-semibold bg-amber-500/10 text-amber-600 border border-amber-500/20">
+                                <span className="text-[11px] px-1.5 py-0.5 rounded font-semibold bg-amber-500/10 text-amber-600 border border-amber-500/20">
                                   Estimasi
                                 </span>
                               )}
@@ -3935,12 +3778,12 @@ export function OrderTracking({
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <span>{order.orderNo}</span>
                             {Boolean(order.isCancelled || order.currentStageName === "Dibatalkan" || order.status === "Dibatalkan") && (
-                              <Badge status="error" className="text-[9px] px-1 py-0 font-sans">
+                              <Badge status="error" className="text-[11px] px-1.5 py-0 font-sans">
                                 Dibatalkan
                               </Badge>
                             )}
                             {Boolean(order.isFinancialAnomaly || (order as any).financialAnomalyReason) && (
-                              <Badge status="error" className="text-[9px] px-1 py-0 font-sans bg-rose-500/10 text-rose-600 border border-rose-300">
+                              <Badge status="error" className="text-[11px] px-1.5 py-0 font-sans bg-rose-500/10 text-rose-600 border border-rose-300">
                                 Anomali Biaya (S &gt; T)
                               </Badge>
                             )}
@@ -3986,25 +3829,37 @@ export function OrderTracking({
                         </TableCell>
                         <TableCell className="text-right">
                           <div className="flex flex-col items-end gap-1">
-                            {order.deliveryStatus === "Dokumen Diserahkan" || order.isReceived ? (
-                              <Button
-                                size="sm"
-                                disabled={actionFeedback.isLoading(`row-stage7-advance:${order.orderNo}`) || isAdvancing}
-                                className="h-8 gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-medium"
-                                onClick={() => handleAdvanceFromDelivery(order)}
-                              >
-                                <CheckCircle2 className="w-3.5 h-3.5" />
-                                Selesaikan Order
-                              </Button>
+                            {canManage(7) ? (
+                              order.deliveryStatus === "Dokumen Diserahkan" || order.isReceived ? (
+                                <Button
+                                  size="sm"
+                                  disabled={actionFeedback.isLoading(`row-stage7-advance:${order.orderNo}`) || isAdvancing}
+                                  className="h-8 gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-medium"
+                                  onClick={() => handleAdvanceFromDelivery(order)}
+                                >
+                                  <CheckCircle2 className="w-3.5 h-3.5" />
+                                  Selesaikan Order
+                                </Button>
+                              ) : (
+                                <Button
+                                  size="sm"
+                                  variant={order.isDeliveryScheduled ? "outline" : "default"}
+                                  className="h-8 gap-1.5"
+                                  onClick={() => openDeliveryWorkspace(order)}
+                                >
+                                  <Truck className="w-3.5 h-3.5" />
+                                  {order.isDeliveryScheduled ? "Ubah Jadwal Antar" : "Atur Pengantaran"}
+                                </Button>
+                              )
                             ) : (
                               <Button
                                 size="sm"
-                                variant={order.isDeliveryScheduled ? "outline" : "default"}
-                                className="h-8 gap-1.5"
+                                variant="outline"
+                                className="h-8 gap-1.5 text-muted-foreground hover:text-foreground"
                                 onClick={() => openDeliveryWorkspace(order)}
                               >
-                                <Truck className="w-3.5 h-3.5" />
-                                {order.isDeliveryScheduled ? "Ubah Jadwal Antar" : "Atur Pengantaran"}
+                                <Eye className="w-3.5 h-3.5" />
+                                Lihat Detail
                               </Button>
                             )}
                             <ActionInlineError
@@ -4096,12 +3951,12 @@ export function OrderTracking({
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <span>{order.orderNo}</span>
                             {Boolean(order.isCancelled || order.currentStageName === "Dibatalkan" || order.status === "Dibatalkan") && (
-                              <Badge status="error" className="text-[9px] px-1 py-0 font-sans">
+                              <Badge status="error" className="text-[11px] px-1.5 py-0 font-sans">
                                 Dibatalkan
                               </Badge>
                             )}
                             {Boolean(order.isFinancialAnomaly || (order as any).financialAnomalyReason) && (
-                              <Badge status="error" className="text-[9px] px-1 py-0 font-sans bg-rose-500/10 text-rose-600 border border-rose-300">
+                              <Badge status="error" className="text-[11px] px-1.5 py-0 font-sans bg-rose-500/10 text-rose-600 border border-rose-300">
                                 Anomali Biaya (S &gt; T)
                               </Badge>
                             )}
@@ -4177,14 +4032,26 @@ export function OrderTracking({
                           </TableCell>
                           <TableCell className="text-right">
                             {/* ACTION: Selesai */}
-                            <Button
-                              size="sm"
-                              className="h-8 gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white"
-                              onClick={() => openArchiveWorkspace(order)}
-                            >
-                              <CheckCircle2 className="w-3.5 h-3.5" />
-                              Selesai
-                            </Button>
+                            {canManage(8) ? (
+                              <Button
+                                size="sm"
+                                className="h-8 gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white"
+                                onClick={() => openArchiveWorkspace(order)}
+                              >
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                Selesai
+                              </Button>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-8 gap-1.5 text-muted-foreground hover:text-foreground"
+                                onClick={() => openArchiveWorkspace(order)}
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                                Lihat Detail
+                              </Button>
+                            )}
                           </TableCell>
                         </TableRow>
                       );
@@ -4406,7 +4273,7 @@ export function OrderTracking({
                               : "Total Tagihan"}
                           </span>
                           {(selectedOrder.costCompletenessStatus === "PARTIAL_ESTIMATE" || !selectedOrder.isCostVerified) && (
-                            <span className="text-[9px] px-1 py-0.2 rounded font-semibold bg-amber-500/10 text-amber-600 border border-amber-500/20">
+                            <span className="text-[11px] px-1.5 py-0.5 rounded font-semibold bg-amber-500/10 text-amber-600 border border-amber-500/20">
                               Estimasi
                             </span>
                           )}
@@ -4810,10 +4677,6 @@ export function OrderTracking({
                       const item = selectedOrder.clientDocuments?.[doc.key];
                       const isAvailable = Boolean(item?.name && item?.status !== "Belum Tersedia");
                       const fileName = item?.name;
-                      const uploadKey = `m1-doc:${doc.key}:${selectedOrder.orderNo}`;
-                      const removeKey = `m1-doc-remove:${doc.key}:${selectedOrder.orderNo}`;
-                      const isUploadingDoc = actionFeedback.isLoading(uploadKey);
-                      const isRemovingDoc = actionFeedback.isLoading(removeKey);
 
                       return (
                         <div
@@ -4829,103 +4692,46 @@ export function OrderTracking({
                                 {item?.fileType === "pdf" ? <FileIcon className="w-4 h-4" /> : <FileText className="w-4 h-4" />}
                               </div>
                               <div className="min-w-0">
-                                <div className="flex items-center gap-2">
+                                <div className="flex flex-wrap items-center gap-2">
                                   <p className="font-semibold text-foreground text-xs">{doc.label}</p>
                                   <Badge status={isAvailable ? "success" : "default"} className="text-[10px] px-1.5 py-0">
                                     {isAvailable ? (item?.status || "Tersedia") : "Belum Tersedia"}
                                   </Badge>
-                                  {item?.fileType && (
+                                  {isAvailable && item?.fileType && (
                                     <Badge variant="outline" className="text-[10px] px-1 py-0 border-border text-muted-foreground uppercase">
                                       {item.fileType}
                                     </Badge>
                                   )}
                                 </div>
                                 <p className="text-[11px] text-muted-foreground truncate mt-0.5">
-                                  {fileName ? fileName : "Berkas fisik belum diunggah"}
+                                  {isAvailable && fileName ? fileName : "Berkas fisik belum diunggah"}
                                 </p>
                               </div>
                             </div>
 
-                            <div className="flex items-center gap-1.5 shrink-0 pl-11 sm:pl-0">
-                              {fileName && (
-                                <>
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    variant="outline"
-                                    className="h-7 text-xs gap-1"
-                                    onClick={() =>
-                                      handleOpenPreview(
-                                        fileName,
-                                        doc.label,
-                                        item?.fileUrl,
-                                        item?.fileType,
-                                        (item as any)?.documentId
-                                      )
-                                    }
-                                  >
-                                    <Eye className="w-3.5 h-3.5" />
-                                    Preview
-                                  </Button>
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    variant="ghost"
-                                    disabled={isRemovingDoc || isUploadingDoc}
-                                    className="h-7 text-xs px-2 gap-1 text-destructive hover:bg-destructive/10"
-                                    onClick={() => handleRemoveStage1ClientDoc(doc.key, doc.label, (item as any)?.documentId)}
-                                  >
-                                    {isRemovingDoc ? (
-                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                    ) : (
-                                      <Trash2 className="w-3.5 h-3.5" />
-                                    )}
-                                  </Button>
-                                </>
-                              )}
-
-                              <label className={cn(isUploadingDoc || isRemovingDoc ? "pointer-events-none opacity-60" : "cursor-pointer")}>
-                                <span className="inline-flex items-center justify-center h-7 px-2.5 rounded-md text-xs font-medium border border-border bg-muted/40 hover:bg-muted text-foreground transition-colors gap-1">
-                                  {isUploadingDoc ? (
-                                    <>
-                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                      Mengunggah...
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Upload className="w-3.5 h-3.5" />
-                                      {fileName ? "Ganti" : "Upload"}
-                                    </>
-                                  )}
-                                </span>
-                                <input
-                                  type="file"
-                                  accept=".pdf,.jpg,.jpeg,.png,.heic,.HEIC"
-                                  disabled={isUploadingDoc || isRemovingDoc}
-                                  className="hidden"
-                                  onChange={(e) => {
-                                    const file = e.target.files?.[0];
-                                    e.target.value = "";
-                                    if (file) {
-                                      handleUploadStage1ClientDoc(doc.key, doc.label, file);
-                                    }
-                                  }}
-                                />
-                              </label>
-                            </div>
+                            {isAvailable && fileName && (
+                              <div className="flex items-center gap-1.5 shrink-0 pl-11 sm:pl-0">
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-7 text-xs gap-1"
+                                  onClick={() =>
+                                    handleOpenPreview(
+                                      fileName,
+                                      doc.label,
+                                      item?.fileUrl,
+                                      item?.fileType,
+                                      (item as any)?.documentId
+                                    )
+                                  }
+                                >
+                                  <Eye className="w-3.5 h-3.5" />
+                                  Preview
+                                </Button>
+                              </div>
+                            )}
                           </div>
-                          <ActionInlineError
-                            compact
-                            actionKey={uploadKey}
-                            error={actionFeedback.getError(uploadKey)}
-                            onDismiss={() => actionFeedback.clearError(uploadKey)}
-                          />
-                          <ActionInlineError
-                            compact
-                            actionKey={removeKey}
-                            error={actionFeedback.getError(removeKey)}
-                            onDismiss={() => actionFeedback.clearError(removeKey)}
-                          />
                         </div>
                       );
                     })}
@@ -4964,23 +4770,25 @@ export function OrderTracking({
                 >
                   Tutup
                 </Button>
-                <Button
-                  onClick={handleVerifyOrder}
-                  disabled={isVerifyingPayment || isAdvancing || actionFeedback.isAnyLoading("m1-")}
-                  className="gap-2 w-full sm:w-auto"
-                >
-                  {(isVerifyingPayment || Boolean(selectedOrder && actionFeedback.isLoading(`m1-advance:${selectedOrder.orderNo}`))) ? (
-                    <>
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      Memproses...
-                    </>
-                  ) : (
-                    <>
-                      <CheckCircle className="w-4 h-4" />
-                      Verifikasi & Lanjut
-                    </>
-                  )}
-                </Button>
+                {canManage(1) && (
+                  <Button
+                    onClick={handleVerifyOrder}
+                    disabled={isVerifyingPayment || isAdvancing || actionFeedback.isAnyLoading("m1-")}
+                    className="gap-2 w-full sm:w-auto"
+                  >
+                    {(isVerifyingPayment || Boolean(selectedOrder && actionFeedback.isLoading(`m1-advance:${selectedOrder.orderNo}`))) ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Memproses...
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle className="w-4 h-4" />
+                        Verifikasi & Lanjut
+                      </>
+                    )}
+                  </Button>
+                )}
               </div>
             </div>
           </DialogFooter>
@@ -5137,19 +4945,6 @@ export function OrderTracking({
                       )}
                     </div>
                   </div>
-
-                  <div className="space-y-1.5">
-                    <Label className="text-xs text-foreground">Catatan Penjemputan (Opsional)</Label>
-                    <Input
-                      placeholder="Contoh: Jemput dokumen sebelum jam 12 siang, hubungi satpam komplek"
-                      value={scheduleData.catatanPenjadwalan}
-                      onChange={(e) => {
-                        actionFeedback.clearByPrefix("m2-");
-                        setScheduleData({ ...scheduleData, catatanPenjadwalan: e.target.value });
-                      }}
-                      className="bg-input-background h-9 text-xs"
-                    />
-                  </div>
                 </Card>
               </div>
             )}
@@ -5157,22 +4952,14 @@ export function OrderTracking({
 
           <DialogFooter className="p-3 sm:p-4 border-t border-border bg-muted/10 shrink-0 flex flex-col gap-2.5">
             {selectedOrder && (
-              <>
-                <ActionInlineError
-                  actionKey={`m2-save:${selectedOrder.orderNo}`}
-                  error={actionFeedback.getError(`m2-save:${selectedOrder.orderNo}`)}
-                  onRetry={handleSaveScheduleOnly}
-                  isRetrying={actionFeedback.isLoading(`m2-save:${selectedOrder.orderNo}`)}
-                  onDismiss={() => actionFeedback.clearError(`m2-save:${selectedOrder.orderNo}`)}
-                  className="w-full"
-                />
-                <ActionInlineError
-                  actionKey={`m2-advance:${selectedOrder.orderNo}`}
-                  error={actionFeedback.getError(`m2-advance:${selectedOrder.orderNo}`)}
-                  onDismiss={() => actionFeedback.clearError(`m2-advance:${selectedOrder.orderNo}`)}
-                  className="w-full"
-                />
-              </>
+              <ActionInlineError
+                actionKey={`m2-save:${selectedOrder.orderNo}`}
+                error={actionFeedback.getError(`m2-save:${selectedOrder.orderNo}`)}
+                onRetry={handleSaveScheduleOnly}
+                isRetrying={actionFeedback.isLoading(`m2-save:${selectedOrder.orderNo}`)}
+                onDismiss={() => actionFeedback.clearError(`m2-save:${selectedOrder.orderNo}`)}
+                className="w-full"
+              />
             )}
             <div className="flex flex-col-reverse sm:flex-row gap-2 justify-end w-full">
               <Button
@@ -5181,34 +4968,27 @@ export function OrderTracking({
                 disabled={isAdvancing || actionFeedback.isAnyLoading("m2-")}
                 className="w-full sm:w-auto"
               >
-                Batal
+                {canManage(2) ? "Batal" : "Tutup"}
               </Button>
-              <Button
-                variant="secondary"
-                onClick={handleSaveScheduleOnly}
-                disabled={actionFeedback.isAnyLoading("m2-") || isAdvancing || isKaryawanLoading || activeMessengers.length === 0 || !scheduleData.messenger || !activeMessengers.some((m) => m.nama === scheduleData.messenger || m.id === scheduleData.messenger)}
-                className="gap-1.5 w-full sm:w-auto font-medium"
-              >
-                {selectedOrder && actionFeedback.isLoading(`m2-save:${selectedOrder.orderNo}`) ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    Menyimpan...
-                  </>
-                ) : (
-                  <>
-                    <Calendar className="w-4 h-4" />
-                    Simpan Jadwal
-                  </>
-                )}
-              </Button>
-              <Button
-                onClick={handleSaveScheduleAndAdvance}
-                disabled={actionFeedback.isAnyLoading("m2-") || isAdvancing || isKaryawanLoading || activeMessengers.length === 0 || !scheduleData.messenger || !activeMessengers.some((m) => m.nama === scheduleData.messenger || m.id === scheduleData.messenger)}
-                className="gap-1.5 w-full sm:w-auto font-medium bg-primary text-primary-foreground"
-              >
-                <ArrowRight className="w-4 h-4" />
-                Simpan Jadwal & Lanjut ke Verifikasi Dokumen
-              </Button>
+              {canManage(2) && (
+                <Button
+                  onClick={handleSaveScheduleOnly}
+                  disabled={actionFeedback.isAnyLoading("m2-") || isAdvancing || isKaryawanLoading || activeMessengers.length === 0 || !scheduleData.messenger || !activeMessengers.some((m) => m.nama === scheduleData.messenger || m.id === scheduleData.messenger)}
+                  className="gap-1.5 w-full sm:w-auto font-medium bg-primary text-primary-foreground"
+                >
+                  {selectedOrder && actionFeedback.isLoading(`m2-save:${selectedOrder.orderNo}`) ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Menyimpan...
+                    </>
+                  ) : (
+                    <>
+                      <Calendar className="w-4 h-4" />
+                      Simpan Jadwal
+                    </>
+                  )}
+                </Button>
+              )}
             </div>
           </DialogFooter>
         </DialogContent>
@@ -5527,16 +5307,18 @@ export function OrderTracking({
                 onClick={() => setIsDocVerificationWorkspaceOpen(false)}
                 className="w-full sm:w-auto"
               >
-                Batal
+                {canManage(3) ? "Batal" : "Tutup"}
               </Button>
-              <Button
-                onClick={handleVerifyDocuments}
-                disabled={actionFeedback.isAnyLoading("m3-") || isAdvancing}
-                className="gap-2 w-full sm:w-auto"
-              >
-                <CheckCircle className="w-4 h-4" />
-                Verifikasi & Lanjut ke Samsat
-              </Button>
+              {canManage(3) && (
+                <Button
+                  onClick={handleVerifyDocuments}
+                  disabled={actionFeedback.isAnyLoading("m3-") || isAdvancing}
+                  className="gap-2 w-full sm:w-auto"
+                >
+                  <CheckCircle className="w-4 h-4" />
+                  Verifikasi & Lanjut ke Samsat
+                </Button>
+              )}
             </div>
           </DialogFooter>
         </DialogContent>
@@ -6049,19 +5831,6 @@ export function OrderTracking({
                         </p>
                       )}
                     </div>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <Label className="text-xs text-foreground">Catatan / Instruksi Samsat (Opsional)</Label>
-                    <Input
-                      placeholder="Contoh: Utamakan antrean loket mutasi pagi hari, cek blokir dahulu"
-                      value={samsatScheduleData.catatanSamsat}
-                      onChange={(e) => {
-                        actionFeedback.clearByPrefix("m4a-");
-                        setSamsatScheduleData({ ...samsatScheduleData, catatanSamsat: e.target.value });
-                      }}
-                      className="bg-input-background h-9 text-xs"
-                    />
                   </div>
                 </Card>
               </div>
@@ -6822,10 +6591,12 @@ export function OrderTracking({
                                 </div>
                                 {isEditingFinalCost && (
                                   <Button
-                                    size="sm"
+                                    size="icon-sm"
                                     variant="ghost"
-                                    className="h-7 w-7 p-0 text-destructive hover:bg-destructive/10"
+                                    className="h-7 w-7 text-destructive hover:bg-destructive/10"
                                     onClick={() => setCustomCostItems(prev => prev.filter(c => c.id !== item.id))}
+                                    aria-label={`Hapus biaya ${item.name || "kustom"}`}
+                                    title="Hapus biaya"
                                   >
                                     <Trash2 className="w-3.5 h-3.5" />
                                   </Button>
@@ -7073,43 +6844,51 @@ export function OrderTracking({
                         Diteruskan ke Belum & Kurang Bayar atau Cashback Terpending
                       </span>
                     </div>
-                    <textarea
+                    <Textarea
                       rows={2}
                       value={finalCostAlasan}
                       onChange={(e) => setFinalCostAlasan(e.target.value)}
                       placeholder="Masukkan alasan atau sumber status pembayaran..."
-                      className="w-full p-2.5 rounded-md border border-border bg-input-background text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary font-normal resize-none"
+                      className="text-xs font-normal resize-none min-h-14"
                     />
                     <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                      <span className="text-[10px] text-muted-foreground font-medium">Rekomendasi Cepat:</span>
-                      <button
+                      <span className="text-[11px] text-muted-foreground font-medium">Rekomendasi Cepat:</span>
+                      <Button
                         type="button"
+                        variant="outline"
+                        size="sm"
                         onClick={() => setFinalCostAlasan("Masih terdapat sisa tagihan yang belum dibayar")}
-                        className="text-[10px] px-2 py-0.5 rounded bg-muted hover:bg-muted/80 text-foreground transition-colors border border-border"
+                        className="h-7 px-2 text-[11px] font-normal"
                       >
                         Kurang Bayar
-                      </button>
-                      <button
+                      </Button>
+                      <Button
                         type="button"
+                        variant="outline"
+                        size="sm"
                         onClick={() => setFinalCostAlasan("Terdapat kelebihan pembayaran konsumen yang perlu dikembalikan")}
-                        className="text-[10px] px-2 py-0.5 rounded bg-muted hover:bg-muted/80 text-foreground transition-colors border border-border"
+                        className="h-7 px-2 text-[11px] font-normal"
                       >
                         Kelebihan Bayar
-                      </button>
-                      <button
+                      </Button>
+                      <Button
                         type="button"
+                        variant="outline"
+                        size="sm"
                         onClick={() => setFinalCostAlasan("Pembayaran belum diterima dari customer")}
-                        className="text-[10px] px-2 py-0.5 rounded bg-muted hover:bg-muted/80 text-foreground transition-colors border border-border"
+                        className="h-7 px-2 text-[11px] font-normal"
                       >
                         Belum Bayar
-                      </button>
-                      <button
+                      </Button>
+                      <Button
                         type="button"
+                        variant="outline"
+                        size="sm"
                         onClick={() => setFinalCostAlasan("Pembayaran telah lunas")}
-                        className="text-[10px] px-2 py-0.5 rounded bg-muted hover:bg-muted/80 text-foreground transition-colors border border-border"
+                        className="h-7 px-2 text-[11px] font-normal"
                       >
                         Lunas
-                      </button>
+                      </Button>
                     </div>
                   </Card>
 
@@ -7195,7 +6974,7 @@ export function OrderTracking({
                                       <FileCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
                                       <div className="min-w-0">
                                         <span className="text-[11px] text-foreground font-medium truncate block">{doc.name}</span>
-                                        {doc.fileSize && <span className="text-[9px] text-muted-foreground block">{doc.fileSize}</span>}
+                                        {doc.fileSize && <span className="text-[11px] text-muted-foreground block">{doc.fileSize}</span>}
                                       </div>
                                     </div>
                                     <div className="flex items-center gap-1 shrink-0">
@@ -7326,15 +7105,6 @@ export function OrderTracking({
                                 Pastikan berkas fisik asli klien (STNK/BPKB/KTP) dan dokumen hasil Samsat (Notice Pajak baru, STNK baru) telah diperiksa keabsahannya.
                               </p>
                             </div>
-                            <div className="space-y-1.5">
-                              <Label className="text-[11px] font-medium text-foreground">Catatan Verifikasi Dokumen (Opsional):</Label>
-                              <Input
-                                value={docApprovalNoteInput}
-                                onChange={(e) => setDocApprovalNoteInput(e.target.value)}
-                                placeholder="Contoh: Seluruh berkas fisik asli dan notice pajak baru valid..."
-                                className="h-8 text-xs bg-background"
-                              />
-                            </div>
                             <ActionInlineError
                               actionKey={`m5-approve-docs:${selectedOrder.orderNo}`}
                               error={actionFeedback.getError(`m5-approve-docs:${selectedOrder.orderNo}`)}
@@ -7342,27 +7112,29 @@ export function OrderTracking({
                               isRetrying={isSubmittingApproval}
                               onDismiss={() => actionFeedback.clearError(`m5-approve-docs:${selectedOrder.orderNo}`)}
                             />
-                            <div className="flex justify-end">
-                              <Button
-                                type="button"
-                                size="sm"
-                                onClick={handleApproveStage5Documents}
-                                disabled={isSubmittingApproval}
-                                className="h-8 text-xs font-semibold gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white"
-                              >
-                                {isSubmittingApproval ? (
-                                  <>
-                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                    Menyimpan...
-                                  </>
-                                ) : (
-                                  <>
-                                    <CheckCircle2 className="w-3.5 h-3.5" />
-                                    Setujui Dokumen (Stage 5)
-                                  </>
-                                )}
-                              </Button>
-                            </div>
+                            {canManage(5) && (
+                              <div className="flex justify-end">
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  onClick={handleApproveStage5Documents}
+                                  disabled={isSubmittingApproval}
+                                  className="h-8 text-xs font-semibold gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white"
+                                >
+                                  {isSubmittingApproval ? (
+                                    <>
+                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                      Menyimpan...
+                                    </>
+                                  ) : (
+                                    <>
+                                      <CheckCircle2 className="w-3.5 h-3.5" />
+                                      Setujui Dokumen (Stage 5)
+                                    </>
+                                  )}
+                                </Button>
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>
@@ -7435,15 +7207,6 @@ export function OrderTracking({
                             </div>
                             {canManage(6) ? (
                               <>
-                                <div className="space-y-1.5">
-                                  <Label className="text-[11px] font-medium text-foreground">Catatan Supervisor (Opsional):</Label>
-                                  <Input
-                                    value={docApprovalNoteInput}
-                                    onChange={(e) => setDocApprovalNoteInput(e.target.value)}
-                                    placeholder="Contoh: Dokumen lengkap dan sah sesuai standar operasional..."
-                                    className="h-8 text-xs bg-background"
-                                  />
-                                </div>
                                 <ActionInlineError
                                   actionKey={`m6-approve-docs:${selectedOrder.orderNo}`}
                                   error={actionFeedback.getError(`m6-approve-docs:${selectedOrder.orderNo}`)}
@@ -7475,7 +7238,7 @@ export function OrderTracking({
                               </>
                             ) : (
                               <p className="text-[11px] text-muted-foreground italic">
-                                * Anda login sebagai Admin Operasional. Hanya Supervisor atau Administrator yang dapat menyetujui dokumen tahap ini.
+                                * Anda tidak memiliki izin aksi untuk menyetujui dokumen tahap Supervisi (Stage 6).
                               </p>
                             )}
                           </div>
@@ -7536,10 +7299,10 @@ export function OrderTracking({
                 ) : (
                   <div className="flex items-center gap-2 text-xs text-muted-foreground italic">
                     <ShieldAlert className="w-4 h-4 text-amber-500 shrink-0" />
-                    <span>Mode Tinjauan: Approval supervisi hanya dapat dilakukan oleh Supervisor / SVP</span>
+                    <span>Mode Tinjauan: Anda tidak memiliki izin aksi Supervisi (Stage 6)</span>
                   </div>
                 )
-              ) : (
+              ) : canManage(5) ? (
                 <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                   {!isStage5DocApproved && (
                     <span className="text-[11px] text-amber-600 dark:text-amber-400 flex items-center gap-1">
@@ -7564,6 +7327,11 @@ export function OrderTracking({
                       </>
                     )}
                   </Button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground italic">
+                  <ShieldAlert className="w-4 h-4 text-amber-500 shrink-0" />
+                  <span>Mode Tinjauan: Hanya tampilan detail</span>
                 </div>
               )}
             </div>
@@ -7768,19 +7536,6 @@ export function OrderTracking({
                         </Select>
                       </div>
                     </div>
-
-                    <div className="space-y-1.5">
-                      <Label className="text-xs text-foreground">Catatan Pengantaran (Opsional)</Label>
-                      <Input
-                        placeholder="Contoh: Serahkan langsung ke pelanggan, minta bukti tanda terima ttd"
-                        value={deliveryData.catatanPengantaran}
-                        onChange={(e) => {
-                          actionFeedback.clearError(`m7-save-schedule:${selectedOrder.orderNo}`);
-                          setDeliveryData({ ...deliveryData, catatanPengantaran: e.target.value });
-                        }}
-                        className="bg-input-background h-9 text-xs"
-                      />
-                    </div>
                   </Card>
                 ) : (
                   /* Direct Handover Form */
@@ -7823,16 +7578,6 @@ export function OrderTracking({
                           </SelectContent>
                         </Select>
                       </div>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <Label className="text-xs text-foreground">Catatan Serah Terima (Opsional)</Label>
-                      <Input
-                        placeholder="Contoh: Berkas asli STNK, Plat nomor & Notice Pajak diserahkan lengkap di loket"
-                        value={directHandoverData.notes}
-                        onChange={(e) => setDirectHandoverData({ ...directHandoverData, notes: e.target.value })}
-                        className="bg-input-background h-9 text-xs"
-                      />
                     </div>
 
                     <div className="space-y-2 pt-1 border-t border-border">
@@ -7928,38 +7673,40 @@ export function OrderTracking({
                 onClick={() => setIsDeliveryWorkspaceOpen(false)}
                 className="w-full sm:w-auto"
               >
-                Batal
+                {canManage(7) ? "Batal" : "Tutup"}
               </Button>
-              <div className="flex flex-col sm:flex-row gap-2">
-                {deliveryMode === "langsung" ? (
-                  <Button
-                    onClick={handleSaveDirectHandover}
-                    disabled={isCompressingHandover || actionFeedback.isAnyLoading("m7-") || isAdvancing}
-                    className="gap-2 bg-emerald-600 hover:bg-emerald-700 text-white w-full sm:w-auto font-medium"
-                  >
-                    <CheckCircle2 className="w-4 h-4" />
-                    Simpan & Selesaikan Serah Terima (Ke Tahap 8)
-                  </Button>
-                ) : (
-                  <Button
-                    onClick={handleSaveDelivery}
-                    disabled={isCompressingHandover || actionFeedback.isAnyLoading("m7-") || isAdvancing}
-                    className="gap-2 w-full sm:w-auto font-medium"
-                  >
-                    {selectedOrder && actionFeedback.isLoading(`m7-save-schedule:${selectedOrder.orderNo}`) ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        Menyimpan...
-                      </>
-                    ) : (
-                      <>
-                        <Truck className="w-4 h-4" />
-                        Simpan Jadwal Pengantaran
-                      </>
-                    )}
-                  </Button>
-                )}
-              </div>
+              {canManage(7) && (
+                <div className="flex flex-col sm:flex-row gap-2">
+                  {deliveryMode === "langsung" ? (
+                    <Button
+                      onClick={handleSaveDirectHandover}
+                      disabled={isCompressingHandover || actionFeedback.isAnyLoading("m7-") || isAdvancing}
+                      className="gap-2 bg-emerald-600 hover:bg-emerald-700 text-white w-full sm:w-auto font-medium"
+                    >
+                      <CheckCircle2 className="w-4 h-4" />
+                      Simpan & Selesaikan Serah Terima (Ke Tahap 8)
+                    </Button>
+                  ) : (
+                    <Button
+                      onClick={handleSaveDelivery}
+                      disabled={isCompressingHandover || actionFeedback.isAnyLoading("m7-") || isAdvancing}
+                      className="gap-2 w-full sm:w-auto font-medium"
+                    >
+                      {selectedOrder && actionFeedback.isLoading(`m7-save-schedule:${selectedOrder.orderNo}`) ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          Menyimpan...
+                        </>
+                      ) : (
+                        <>
+                          <Truck className="w-4 h-4" />
+                          Simpan Jadwal Pengantaran
+                        </>
+                      )}
+                    </Button>
+                  )}
+                </div>
+              )}
             </div>
           </DialogFooter>
         </DialogContent>
@@ -8270,16 +8017,18 @@ export function OrderTracking({
                 onClick={() => setIsArchiveDialogOpen(false)}
                 className="w-full sm:w-auto"
               >
-                Batal
+                {canManage(8) ? "Batal" : "Tutup"}
               </Button>
-              <Button
-                onClick={handleArchiveOrder}
-                disabled={actionFeedback.isAnyLoading("m8-") || isAdvancing}
-                className="gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white w-full sm:w-auto"
-              >
-                <Check className="w-4 h-4" />
-                Selesaikan Alur & Arsipkan Order
-              </Button>
+              {canManage(8) && (
+                <Button
+                  onClick={handleArchiveOrder}
+                  disabled={actionFeedback.isAnyLoading("m8-") || isAdvancing}
+                  className="gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white w-full sm:w-auto"
+                >
+                  <Check className="w-4 h-4" />
+                  Selesaikan Alur & Arsipkan Order
+                </Button>
+              )}
             </div>
           </DialogFooter>
         </DialogContent>

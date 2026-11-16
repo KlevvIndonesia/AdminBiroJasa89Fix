@@ -17,7 +17,7 @@ serviceRouter.get("/:id", requireAuth, getServiceById);
 serviceRouter.put(
   "/:id",
   requireAuth,
-  requireRoles("administrator", "admin", "svp"),
+  requireRoles("administrator", "admin"),
   updateService
 );
 

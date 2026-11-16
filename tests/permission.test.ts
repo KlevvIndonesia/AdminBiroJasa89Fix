@@ -11,24 +11,33 @@ test("Permission - Administrator and SVP have full authority over all 8 stages",
     );
     assert.strictEqual(
       permissionStore.canManageStage("svp", stage),
-      true,
-      `SVP should be allowed to manage stage ${stage}`
+      false,
+      `Legacy 'svp' alias must fail closed on stage ${stage}`
     );
   }
 });
 
-test("Permission - Admin role stage authorization matrix conforms to business rules", () => {
-  // Admin can manage verification, scheduling, doc verification, re-verification, delivery, received
-  assert.strictEqual(permissionStore.canManageStage("admin", 1), true, "Admin can manage Stage 1 (Verifikasi)");
-  assert.strictEqual(permissionStore.canManageStage("admin", 2), true, "Admin can manage Stage 2 (Penjadwalan)");
-  assert.strictEqual(permissionStore.canManageStage("admin", 3), true, "Admin can manage Stage 3 (Verifikasi Dokumen)");
-  assert.strictEqual(permissionStore.canManageStage("admin", 5), true, "Admin can manage Stage 5 (Verifikasi Ulang)");
-  assert.strictEqual(permissionStore.canManageStage("admin", 7), true, "Admin can manage Stage 7 (Pengantaran)");
-  assert.strictEqual(permissionStore.canManageStage("admin", 8), true, "Admin can manage Stage 8 (Dokumen Telah Diterima)");
+test("Permission - Admin role has full Order, Order Tracking (Stages 1-5, 7-8), and Rekap Order authority, with Stage 6 strictly SVP-only", () => {
+  // Admin can manage Stages 1-5 & 7-8; Stage 6 (Supervisi) is strictly SVP-only
+  for (let stage = 1; stage <= 8; stage++) {
+    const expected = stage !== 6;
+    assert.strictEqual(
+      permissionStore.canManageStage("admin", stage),
+      expected,
+      `Admin Stage ${stage} authority should be ${expected}`
+    );
+  }
 
-  // Admin cannot manage Stage 4 (Proses Samsat, done by Messenger) and Stage 6 (Supervisi, done by SVP)
-  assert.strictEqual(permissionStore.canManageStage("admin", 4), false, "Admin cannot manage Stage 4 (Proses Samsat)");
-  assert.strictEqual(permissionStore.canManageStage("admin", 6), false, "Admin cannot manage Stage 6 (Supervisi)");
+  // Order & Rekap Order modules are full view+manage
+  for (const mod of ["buat-order", "order-menu", "order-tracking", "order-history"] as const) {
+    assert.strictEqual(permissionStore.canViewPage("admin", mod), true, `Admin can view ${mod}`);
+    assert.strictEqual(permissionStore.canManageModule("admin", mod), true, `Admin can manage ${mod}`);
+  }
+
+  // Admin stays distinct from SVP globally: Access Management & Finance reports remain restricted
+  assert.strictEqual(permissionStore.canViewPage("admin", "access-management"), false, "Admin cannot view access-management");
+  assert.strictEqual(permissionStore.canManageModule("admin", "access-management"), false, "Admin cannot manage access-management");
+  assert.strictEqual(permissionStore.canViewPage("admin", "finance-profit"), false, "Admin cannot view finance-profit");
 });
 
 test("Permission - Finance role can verify payment at Stage 1, but cannot manage operational stages 2-8", () => {

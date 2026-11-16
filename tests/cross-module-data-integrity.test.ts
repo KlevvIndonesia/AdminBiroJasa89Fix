@@ -20,14 +20,14 @@ import { runInTransaction, db } from "../server/src/database/db";
 import { getFinancialKPIs } from "../src/app/data/dashboardAdapter";
 import { isFullyPaid, toCanonicalPaymentStatus, toOrderPaymentStatus, toFinancePaymentStatus } from "../src/domain/finance/paymentMapping";
 import { FinanceRepository } from "../src/data/repositories/financeRepository";
-import { MockFinanceProvider } from "./fixtures/mock/mockFinanceProvider";
 import { ApiFinanceProvider } from "../src/data/api/apiFinanceProvider";
 import { PricingRepository } from "../src/data/repositories/pricingRepository";
-import { MockPricingProvider } from "./fixtures/mock/mockPricingProvider";
 import { ApiPricingProvider } from "../src/data/api/apiPricingProvider";
 import { UserRepository } from "../src/data/repositories/userRepository";
-import { MockUserProvider } from "./fixtures/mock/mockUserProvider";
 import { ApiUserProvider } from "../src/data/api/apiUserProvider";
+import type { IFinanceDataProvider } from "../src/domain/finance/types";
+import type { IPricingDataProvider } from "../src/domain/pricing/types";
+import type { IUserDataProvider } from "../src/domain/user/types";
 
 function startTestServer(): Promise<{ server: http.Server; baseUrl: string }> {
   return new Promise((resolve) => {
@@ -341,25 +341,71 @@ test("Data Integrity 5: Dashboard financial KPI derivation normalizes PAID and L
   assert.strictEqual(kpis.realizedProfitTotal, 400000);
 });
 
-test("Data Integrity 6: Cross-Module Provider Swapping functions without consumer disruption", () => {
-  // Finance Repository
-  const finRepo = new FinanceRepository(new MockFinanceProvider());
-  assert.ok(Array.isArray(finRepo.getInvoices()), "MockFinanceProvider returns invoices array");
-  const apiFinProvider = new ApiFinanceProvider();
-  finRepo.setProvider(apiFinProvider);
-  assert.strictEqual(finRepo.getProvider(), apiFinProvider, "FinanceProvider swapped successfully");
+test("Data Integrity 6: Cross-Module Provider Swapping functions without consumer disruption", async () => {
+  const { server, baseUrl } = await startTestServer();
+  const prevToken = process.env.AUTH_TOKEN;
+  try {
+    process.env.AUTH_TOKEN = await loginAdmin(baseUrl);
 
-  // Pricing Repository
-  const pricingRepo = new PricingRepository(new MockPricingProvider());
-  assert.ok(pricingRepo.getSamsatItems().length > 0, "MockPricingProvider returns items");
-  const apiPricingProvider = new ApiPricingProvider();
-  pricingRepo.setProvider(apiPricingProvider);
-  assert.strictEqual(pricingRepo.getProvider(), apiPricingProvider, "PricingProvider swapped successfully");
+    // Finance Repository
+    const customFinanceDouble: IFinanceDataProvider = {
+      getInvoices: () => [{ id: 1, invoiceNo: "INV-DBL-1" } as any],
+      getTagihanList: () => [],
+      getCompletedTagihanList: () => [],
+      getInvoiceById: () => undefined,
+      getInvoiceByOrderNo: () => undefined,
+      getProfitList: () => [],
+      getKasKantorList: () => [],
+      getKasMessengerList: () => [],
+      getPengeluaranList: () => [],
+      recordPayment: () => false,
+      resolveInvoice: () => false,
+      completeInvoice: () => false,
+      subscribe: () => () => {},
+    };
+    const finRepo = new FinanceRepository(customFinanceDouble);
+    assert.ok(Array.isArray(finRepo.getInvoices()), "Custom finance provider returns invoices array");
+    const apiFinProvider = new ApiFinanceProvider(`${baseUrl}/api`);
+    await apiFinProvider.initFromApi();
+    finRepo.setProvider(apiFinProvider);
+    assert.strictEqual(finRepo.getProvider(), apiFinProvider, "FinanceProvider swapped successfully");
 
-  // User Repository
-  const userRepo = new UserRepository(new MockUserProvider());
-  assert.ok(userRepo.getAll().length > 0, "MockUserProvider returns users");
-  const apiUserProvider = new ApiUserProvider();
-  userRepo.setProvider(apiUserProvider);
-  assert.strictEqual(userRepo.getProvider(), apiUserProvider, "UserProvider swapped successfully");
+    // Pricing Repository
+    const customPricingDouble: IPricingDataProvider = {
+      getSamsatItems: () => [{ id: "mutasi-cf", code: "CF", name: "Cek Fisik", category: "Mutasi Keluar", active: true, basePrice: 50000 }],
+      getSamsatItemById: () => undefined,
+      updateSamsatItem: () => false,
+      addSamsatItem: (item) => ({ ...item, id: "custom-1" }),
+      subscribe: () => () => {},
+    };
+    const pricingRepo = new PricingRepository(customPricingDouble);
+    assert.ok(pricingRepo.getSamsatItems().length > 0, "Custom pricing provider returns items");
+    const apiPricingProvider = new ApiPricingProvider(`${baseUrl}/api`);
+    await apiPricingProvider.initFromApi();
+    pricingRepo.setProvider(apiPricingProvider);
+    assert.strictEqual(pricingRepo.getProvider(), apiPricingProvider, "PricingProvider swapped successfully");
+    assert.ok(pricingRepo.getSamsatItems().length > 0, "ApiPricingProvider returns SQLite pricing items");
+
+    // User Repository
+    const customUserDouble: IUserDataProvider = {
+      getAll: () => [{ id: 1, nama: "Double User", jabatan: "ADMIN", email: "dbl@birojasa.com", status: "Aktif" }],
+      getById: () => undefined,
+      getByEmail: () => undefined,
+      createUser: (u) => ({ ...u, id: 1 }),
+      updateUser: () => false,
+      deleteUser: () => false,
+      subscribe: () => () => {},
+      authenticate: async () => null,
+    };
+    const userRepo = new UserRepository(customUserDouble);
+    assert.ok(userRepo.getAll().length > 0, "Custom user provider returns users");
+    const apiUserProvider = new ApiUserProvider(`${baseUrl}/api`);
+    await apiUserProvider.initFromApi();
+    userRepo.setProvider(apiUserProvider);
+    assert.strictEqual(userRepo.getProvider(), apiUserProvider, "UserProvider swapped successfully");
+    assert.ok(userRepo.getAll().length > 0, "ApiUserProvider returns SQLite users");
+  } finally {
+    process.env.AUTH_TOKEN = prevToken;
+    server.close();
+  }
 });

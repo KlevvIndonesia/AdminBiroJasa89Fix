@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { loginAs } from "./helpers/authHelper";
 
 const BASE_URL = "http://localhost:3000";
 
@@ -13,16 +14,7 @@ test.describe("Data Penjualan — Mutation Feedback, Validation, Error Handling 
     const expectedPlate = `B ${suffix} EFT`;
 
     // 1. Login as SVP
-    await page.goto(`${BASE_URL}/login`, { waitUntil: "domcontentloaded" });
-    await page.fill("#email", "svp@birojasa.com");
-    await page.fill("#password", "admin123");
-
-    const loginResPromise = page.waitForResponse(
-      (res) => res.url().includes("/api/auth/login") && res.status() === 200
-    );
-    await page.click("button[type='submit']");
-    await loginResPromise;
-    await page.waitForURL("**/dashboard", { timeout: 15000 });
+    await loginAs(page, "svp@birojasa.com", "admin123");
 
     // 2. Navigate to Data Penjualan
     await page.goto(`${BASE_URL}/finance/data-penjualan/perpanjangan-1-tahun`, {

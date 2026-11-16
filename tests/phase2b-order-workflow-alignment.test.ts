@@ -4,7 +4,10 @@ import http from "node:http";
 import { createApp } from "../server/src/app";
 import { APP_CONFIG } from "../src/app/config/appConfig";
 import { orderStore } from "../src/app/data/orderStore";
-import { permissionStore } from "../src/app/data/permissionStore";
+import { permissionStore, normalizeRole } from "../src/app/data/permissionStore";
+import { resolveCanonicalRoleFromUser } from "../server/src/utils/canonicalIdentity";
+import { dbPermissionRepository } from "../server/src/repositories/dbPermissionRepository";
+import { CANONICAL_PERMISSIONS } from "../server/src/config/defaultPermissions";
 import {
   UserContext,
   declineMessengerTaskAction,
@@ -70,6 +73,10 @@ test("PHASE 2B: ORDER WORKFLOW ALIGNMENT SUITE", async (t) => {
   const adminAuth = await loginUser(baseUrl, "admin@birojasa.com", "admin123");
   const svpAuth = await loginUser(baseUrl, "svp@birojasa.com", "admin123");
   const courierAuth = await loginUser(baseUrl, "budi.messenger@birojasa.com", "messenger123");
+
+  // Sync canonical Admin permissions in isolated test sandbox
+  dbPermissionRepository.saveRole("admin", JSON.parse(JSON.stringify(CANONICAL_PERMISSIONS.admin)));
+  dbPermissionRepository.saveRole("finance", JSON.parse(JSON.stringify(CANONICAL_PERMISSIONS.finance)));
 
   const courierUserContext: UserContext = {
     userId: String(courierAuth.user.id),
@@ -274,11 +281,15 @@ test("PHASE 2B: ORDER WORKFLOW ALIGNMENT SUITE", async (t) => {
     assert.equal(order.pickupProof?.photoProofUrl, "https://example.com/pickup.jpg");
   });
 
-  await t.test("4. BD-WF-02: Admin authority on Stage 4 office operations & Stage 6 restriction", async () => {
-    // 1. PermissionStore contract
+  await t.test("4. BD-WF-02: Admin parity authority on Stage 1-5 & 7-8, Stage 6 SVP-only & DB-authoritative Stage 4->5 prerequisites", async () => {
+    // 1. PermissionStore contract: Admin authorized Stages 1-5 & 7-8, Stage 6 strictly SVP-only, barred from Access Management
     assert.equal(permissionStore.canManageStage("admin", 4), true, "Admin must be authorized for Stage 4");
-    assert.equal(permissionStore.canManageStage("admin", 6), false, "Admin must be strictly forbidden on Stage 6");
-    assert.equal(permissionStore.canManageStage("svp", 6), true, "SVP is authorized on Stage 6");
+    assert.equal(permissionStore.canManageStage("admin", 6), false, "Stage 6 is strictly SVP-only and locked for Admin");
+    assert.equal(permissionStore.canViewPage("admin", "access-management"), false, "Admin remains blocked from access-management");
+    assert.equal(permissionStore.canManageStage("administrator", 6), true, "Canonical administrator (SVP) is authorized on Stage 6");
+    assert.equal(permissionStore.canManageStage("svp", 6), false, "Non-canonical standalone 'svp' fails closed in permissionStore");
+    assert.equal(normalizeRole("svp"), "unknown", "permissionStore.normalizeRole rejects uncanonical standalone 'svp'");
+    assert.equal(resolveCanonicalRoleFromUser("SVP", "svp"), "administrator", "Backend legacy boundary maps jabatan='SVP' / role='svp' to canonical administrator");
 
     // 2. OrderTracking UI action gating: advancing to Stage 5 requires canManage(4) AND docs in office
     const orderTrackingCanAdvance = (role: string, samsatPickupStatus?: string) => {
@@ -291,23 +302,82 @@ test("PHASE 2B: ORDER WORKFLOW ALIGNMENT SUITE", async (t) => {
     assert.equal(orderTrackingCanAdvance("admin", "Dokumen Samsat Diterima di Kantor"), true, "Admin CAN advance once docs arrive at office");
     assert.equal(orderTrackingCanAdvance("courier", "Dokumen Samsat Diterima di Kantor"), false, "Courier cannot advance Stage 4");
 
-    // 3. Live backend progression
+    // 3. Live backend progression via real operational endpoints (no forged bypass flags)
     const orderNo = await createLiveOrder();
 
-    // Progress through Stage 1 -> 2 -> 3 -> 4
-    await advanceOrderOnServer(orderNo, "Penjadwalan");
-    await advanceOrderOnServer(orderNo, "Verifikasi Dokumen", { pickupCompleted: true });
-    await advanceOrderOnServer(orderNo, "Proses Samsat", { documentsVerified: true });
+    // Stage 1 -> 2: schedule pickup to courier
+    await advanceOrderOnServer(orderNo, "Penjadwalan", {
+      messenger: courierUserContext.userName,
+      assignedMessengerName: courierUserContext.userName,
+      assignedMessengerId: courierUserContext.employeeId,
+      tanggalJemput: "2026-11-10",
+    });
 
-    // When all Samsat loket components are COMPLETED, advance to Stage 5 succeeds
-    const successAdvanceRes = await advanceOrderOnServer(orderNo, "Verifikasi Ulang", {
+    // Courier executes real pickup completion
+    mockStorage.setItem("auth_token", courierAuth.token);
+    mockStorage.setItem("auth_user", JSON.stringify(courierAuth.user));
+    const startP = await startPickupTaskAction(orderNo, courierUserContext);
+    assert.equal(startP.success, true, "Courier start pickup must succeed");
+    const completeP = await completePickupTaskAction(
+      orderNo,
+      { pickupChecklist: { stnkAsli: true, bpkbAsli: true, ktpAsli: true }, photoProofUrl: "https://example.com/p.jpg" },
+      courierUserContext
+    );
+    assert.equal(completeP.success, true, "Courier complete pickup must succeed");
+
+    // Stage 2 -> 3 -> 4
+    const s23 = await advanceOrderOnServer(orderNo, "Verifikasi Dokumen");
+    assert.equal(s23.status, 200, "Stage 2 -> 3 must succeed after DB pickup");
+    const s34 = await advanceOrderOnServer(orderNo, "Proses Samsat", {
+      documentsVerified: true,
+      samsatMessengerId: courierUserContext.employeeId,
+      samsatMessengerName: courierUserContext.userName,
       samsatProcesses: [
         { id: "comp-1", name: "Pendaftaran Samsat", status: "COMPLETED" },
         { id: "comp-2", name: "Kasir Pembayaran", status: "COMPLETED" },
       ],
-      samsatPickupStatus: "Dokumen Samsat Diterima di Kantor",
     });
-    assert.equal(successAdvanceRes.status, 200, "Admin can advance Stage 4 to Stage 5 when requirements met");
+    assert.equal(s34.status, 200, "Stage 3 -> 4 must succeed");
+
+    // Complete Samsat via real endpoint (with components)
+    const compSamsat = await fetch(`${baseUrl}/api/orders/${encodeURIComponent(orderNo)}/samsat/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${courierAuth.token}` },
+      body: JSON.stringify({
+        components: [
+          { id: "comp-1", name: "Pendaftaran Samsat", status: "COMPLETED", isCompleted: true },
+          { id: "comp-2", name: "Kasir Pembayaran", status: "COMPLETED", isCompleted: true },
+        ],
+      }),
+    });
+    assert.equal(compSamsat.status, 200, "Samsat complete must succeed");
+
+    // Schedule Jemput Hasil Samsat + Courier accept + complete pickup Samsat
+    const schedPickup = await fetch(`${baseUrl}/api/orders/${encodeURIComponent(orderNo)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminAuth.token}` },
+      body: JSON.stringify({
+        samsatPickupStatus: "Terjadwal Jemput Samsat",
+        samsatPickupDate: "2026-11-11",
+        samsatPickupMessenger: courierUserContext.userName,
+        samsatPickupMessengerId: courierUserContext.employeeId,
+      }),
+    });
+    assert.equal(schedPickup.status, 200, "Scheduling Jemput Hasil Samsat must succeed");
+
+    const accJemput = await acceptMessengerTaskAction(orderNo, "Jemput Hasil Samsat", courierUserContext);
+    assert.equal(accJemput.success, true, "Accepting Jemput Hasil Samsat must succeed");
+
+    const compJemput = await fetch(`${baseUrl}/api/orders/${encodeURIComponent(orderNo)}/samsat-pickup/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${courierAuth.token}` },
+      body: JSON.stringify({}),
+    });
+    assert.equal(compJemput.status, 200, "Completing Jemput Hasil Samsat must succeed");
+
+    // Stage 4 -> 5 succeeds now that DB confirms Samsat + Jemput Hasil Samsat completed
+    const successAdvanceRes = await advanceOrderOnServer(orderNo, "Verifikasi Ulang", {});
+    assert.equal(successAdvanceRes.status, 200, "Admin can advance Stage 4 to Stage 5 when DB requirements met");
   });
 
   await t.test("5. WF-05: Non-sequential jumps (1 -> 4, 1 -> 7) are rejected by backend", async () => {
@@ -325,26 +395,60 @@ test("PHASE 2B: ORDER WORKFLOW ALIGNMENT SUITE", async (t) => {
   await t.test("6. WF-07: Canonical Samsat pickup status is 'Sedang Jemput Dokumen Samsat'", async () => {
     const orderNo = await createLiveOrder();
 
-    // Advance to Stage 4 with Samsat processing completed
-    await advanceOrderOnServer(orderNo, "Penjadwalan");
-    await advanceOrderOnServer(orderNo, "Verifikasi Dokumen", { pickupCompleted: true });
-    await advanceOrderOnServer(orderNo, "Proses Samsat", {
-      documentsVerified: true,
-      samsatStatus: "Selesai",
-      samsatPickupMessenger: courierUserContext.userName,
-      samsatPickupMessengerId: courierUserContext.employeeId,
-      samsatPickupStatus: "Tugas Baru",
+    // Progress through real Stage 1 -> 2 -> courier pickup -> Stage 3 -> 4 -> Samsat complete -> schedule Jemput Hasil
+    await advanceOrderOnServer(orderNo, "Penjadwalan", {
+      messenger: courierUserContext.userName,
+      assignedMessengerName: courierUserContext.userName,
+      assignedMessengerId: courierUserContext.employeeId,
+      tanggalJemput: "2026-11-10",
     });
 
     mockStorage.setItem("auth_token", courierAuth.token);
     mockStorage.setItem("auth_user", JSON.stringify(courierAuth.user));
+    const startP6 = await startPickupTaskAction(orderNo, courierUserContext);
+    assert.equal(startP6.success, true, `WF-07 start pickup failed: ${startP6.error}`);
+    const compP6 = await completePickupTaskAction(
+      orderNo,
+      { pickupChecklist: { stnkAsli: true, bpkbAsli: true, ktpAsli: true, stnk: true, bpkb: true, ktp: true }, photoProofUrl: "https://example.com/p6.jpg" },
+      courierUserContext
+    );
+    assert.equal(compP6.success, true, `WF-07 complete pickup failed: ${compP6.error}`);
+
+    const adv3 = await advanceOrderOnServer(orderNo, "Verifikasi Dokumen");
+    assert.equal(adv3.status, 200, "WF-07 Stage 2->3 must succeed");
+    const adv4 = await advanceOrderOnServer(orderNo, "Proses Samsat", {
+      documentsVerified: true,
+      samsatMessengerId: courierUserContext.employeeId,
+      samsatMessengerName: courierUserContext.userName,
+      samsatProcesses: [{ id: "comp-1", name: "Pendaftaran Samsat", status: "COMPLETED" }],
+    });
+    assert.equal(adv4.status, 200, "WF-07 Stage 3->4 must succeed");
+
+    const csRes = await fetch(`${baseUrl}/api/orders/${encodeURIComponent(orderNo)}/samsat/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${courierAuth.token}` },
+      body: JSON.stringify({ components: [{ id: "comp-1", name: "Pendaftaran Samsat", status: "COMPLETED", isCompleted: true }] }),
+    });
+    assert.equal(csRes.status, 200, "WF-07 samsat/complete must succeed");
+
+    const schedRes = await fetch(`${baseUrl}/api/orders/${encodeURIComponent(orderNo)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminAuth.token}` },
+      body: JSON.stringify({
+        samsatPickupStatus: "Terjadwal Jemput Samsat",
+        samsatPickupDate: "2026-11-11",
+        samsatPickupMessenger: courierUserContext.userName,
+        samsatPickupMessengerId: courierUserContext.employeeId,
+      }),
+    });
+    assert.equal(schedRes.status, 200, "WF-07 scheduling Jemput Hasil Samsat must succeed");
 
     const acceptRes = await acceptMessengerTaskAction(
       orderNo,
       "Jemput Hasil Samsat",
       courierUserContext
     );
-    assert.equal(acceptRes.success, true, "Courier accepting Samsat pickup must succeed");
+    assert.equal(acceptRes.success, true, `Courier accepting Samsat pickup must succeed: ${acceptRes.error}`);
 
     const getRes = await fetch(`${baseUrl}/api/orders/${encodeURIComponent(orderNo)}`, {
       headers: { Authorization: `Bearer ${adminAuth.token}` },

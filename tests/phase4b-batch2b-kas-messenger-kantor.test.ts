@@ -62,8 +62,8 @@ const cashSnapshotJson = JSON.stringify({
 // Test Actor Contexts
 const testAdminActor = { id: "1", role: "admin", nama: "Admin User", status: "Aktif" };
 const testFinanceActor = { id: "2", role: "finance", nama: "Finance User", status: "Aktif" };
-const testSvpActor = { id: "3", role: "svp", nama: "Supervisor User", status: "Aktif" };
-const testInactiveActor = { id: "98", role: "svp", nama: "Inactive SVP", status: "Nonaktif" };
+const testSvpActor = { id: "3", role: "administrator", nama: "Supervisor User", status: "Aktif" };
+const testInactiveActor = { id: "98", role: "administrator", nama: "Inactive SVP", status: "Nonaktif" };
 const testDemotedActor = { id: "99", role: "viewer", nama: "Viewer User", status: "Aktif" };
 
 function setupTestActors(): void {
@@ -71,10 +71,10 @@ function setupTestActors(): void {
     INSERT OR REPLACE INTO users (id, email, password_hash, password_salt, nama, jabatan, role, status)
     VALUES (?, ?, 'hash', 'salt', ?, ?, ?, ?)
   `);
-  insertOrReplaceUser.run(testAdminActor.id, "admin-test@sun89.com", testAdminActor.nama, "Admin", testAdminActor.role, testAdminActor.status);
-  insertOrReplaceUser.run(testFinanceActor.id, "finance-test@sun89.com", testFinanceActor.nama, "Finance", testFinanceActor.role, testFinanceActor.status);
-  insertOrReplaceUser.run(testSvpActor.id, "svp-test@sun89.com", testSvpActor.nama, "Supervisor", testSvpActor.role, testSvpActor.status);
-  insertOrReplaceUser.run(testInactiveActor.id, "inactive-test@sun89.com", testInactiveActor.nama, "Supervisor", testInactiveActor.role, testInactiveActor.status);
+  insertOrReplaceUser.run(testAdminActor.id, "admin-test@sun89.com", testAdminActor.nama, "ADMIN", testAdminActor.role, testAdminActor.status);
+  insertOrReplaceUser.run(testFinanceActor.id, "finance-test@sun89.com", testFinanceActor.nama, "FINANCE", testFinanceActor.role, testFinanceActor.status);
+  insertOrReplaceUser.run(testSvpActor.id, "svp-test@sun89.com", testSvpActor.nama, "SVP", testSvpActor.role, testSvpActor.status);
+  insertOrReplaceUser.run(testInactiveActor.id, "inactive-test@sun89.com", testInactiveActor.nama, "SVP", testInactiveActor.role, testInactiveActor.status);
   insertOrReplaceUser.run(testDemotedActor.id, "demoted-test@sun89.com", testDemotedActor.nama, "Staff", testDemotedActor.role, testDemotedActor.status);
 }
 
@@ -1151,7 +1151,7 @@ test("Phase 4B Batch 2B Acceptance Test Suite (Revision 2.8-FINAL.7)", async (t)
       `).get(`%${idemKey}%`) as any;
 
       assert.ok(auditEntry, "audit_logs row must be present");
-      assert.strictEqual(Number(auditEntry.user_id), Number(testSvpActor.id));
+      assert.strictEqual(auditEntry.user_id, `usr-${testSvpActor.id}`);
       assert.strictEqual(auditEntry.action, "PERMANENT_DELETE");
       const metadata = JSON.parse(auditEntry.metadata_json);
       assert.ok(metadata.deletedSnapshot, "deletedSnapshot must be captured in metadata_json");

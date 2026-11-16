@@ -21,6 +21,8 @@ import { createApp } from "../server/src/app";
 import { hashPassword, verifyPassword, needsRehash, generateToken, verifyToken } from "../server/src/utils/crypto";
 import { loginRateLimiter } from "../server/src/middleware/rateLimiter";
 import { dbOrderRepository } from "../server/src/repositories/dbOrderRepository";
+import { dbPermissionRepository } from "../server/src/repositories/dbPermissionRepository";
+import { CANONICAL_PERMISSIONS } from "../server/src/config/defaultPermissions";
 
 function startTestServer(): Promise<{ server: http.Server; baseUrl: string }> {
   return new Promise((resolve) => {
@@ -307,10 +309,13 @@ test("Security 5: Role-Based Access Control & Stage Authority (403)", async (t) 
     });
     assert.strictEqual(financeAdvanceRes.status, 403, "Finance role must be rejected on operational stage transitions");
 
-    // Advance order to Stage 6 Supervisi to test strict SVP gate
+    // Sync canonical admin permissions in isolated sandbox
+    dbPermissionRepository.saveRole("admin", JSON.parse(JSON.stringify(CANONICAL_PERMISSIONS.admin)));
+
+    // Advance order to Stage 6 Supervisi to test Stage 6 authority
     dbOrderRepository.updateOrder(testOrderNo, { currentStep: 6, currentStageName: "Supervisi" });
 
-    // 3. Admin role attempting Stage 6 Supervisi -> Forbidden (403, SVP only)
+    // 3. Admin role managing Stage 6 Supervisi -> STRICTLY 403 FORBIDDEN (Stage 6 is SVP-only)
     const operationalAdminToken = generateToken({
       userId: "usr-2",
       email: "admin.ops@birojasa.com",
@@ -330,9 +335,31 @@ test("Security 5: Role-Based Access Control & Stage Authority (403)", async (t) 
         updates: {},
       }),
     });
-    assert.strictEqual(adminSupervisiRes.status, 403, "Admin role must not manage Stage 6 Supervisi (SVP only)");
+    assert.strictEqual(adminSupervisiRes.status, 403, "Admin must receive 403 at Stage 6 Supervisi (SVP-only)");
 
-    // 4. SVP managing Stage 6 Supervisi -> Allowed
+    // 3b. Even if persistence saveRole receives stage6_supervisi: true, normalization keeps it false & 403
+    const currentAdminPerms = dbPermissionRepository.getByRole("admin")!;
+    dbPermissionRepository.saveRole("admin", {
+      ...currentAdminPerms,
+      stages: { ...currentAdminPerms.stages, stage6_supervisi: true },
+    });
+    const savedAdminPerms = dbPermissionRepository.getByRole("admin")!;
+    assert.strictEqual(savedAdminPerms.stages.stage6_supervisi, false, "Persistence normalization forces Admin stage6_supervisi = false");
+    const forgedAdminSupervisiRes = await fetch(`${baseUrl}/api/orders/${testOrderNo}/advance`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${operationalAdminToken}`,
+      },
+      body: JSON.stringify({
+        targetStage: "Supervisi",
+        updates: {},
+      }),
+    });
+    assert.strictEqual(forgedAdminSupervisiRes.status, 403, "Admin must continue receiving 403 at Stage 6 Supervisi");
+    dbPermissionRepository.saveRole("admin", JSON.parse(JSON.stringify(CANONICAL_PERMISSIONS.admin)));
+
+    // 4. SVP managing Stage 6 Supervisi -> Allowed unconditionally
     const svpSupervisiRes = await fetch(`${baseUrl}/api/orders/${testOrderNo}/advance`, {
       method: "POST",
       headers: {
@@ -527,9 +554,9 @@ test("Security 7: Audit Log Actor Identity Cannot Be Spoofed", async (t) => {
     );
 
     assert.ok(latestPaymentLog, "Payment audit log entry must exist");
-    assert.strictEqual(latestPaymentLog.userId, "usr-3", "Actor userId must be derived from authenticated JWT");
-    assert.strictEqual(latestPaymentLog.userName, "Siti Rahma Finance", "Actor userName must be derived from authenticated JWT");
-    assert.strictEqual(latestPaymentLog.userRole, "finance", "Actor userRole must be derived from authenticated JWT");
+    assert.strictEqual(latestPaymentLog.userId, "usr-3", "Actor userId must be derived from authenticated identity");
+    assert.strictEqual(latestPaymentLog.userName, "Finance User", "Actor userName must be derived from latest SQLite identity, ignoring spoofed body and stale JWT nama");
+    assert.strictEqual(latestPaymentLog.userRole, "finance", "Actor userRole must be derived from authenticated identity");
   } finally {
     server.close();
   }

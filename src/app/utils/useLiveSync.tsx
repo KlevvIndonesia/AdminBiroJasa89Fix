@@ -18,6 +18,7 @@ import { cn } from "../components/ui/utils";
 import { toast } from "sonner";
 import { orderStore } from "../data/orderStore";
 import { financeRepository } from "../../data/repositories/financeRepository";
+import { permissionStore } from "../data/permissionStore";
 import { resolveApiBaseUrl } from "../config/appConfig";
 
 export type LiveSyncStatus = "connected" | "syncing" | "offline" | "error";
@@ -48,6 +49,12 @@ class LiveSyncManager {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private inFlightSync: Promise<boolean> | null = null;
   private lastPulseTimestamp = 0;
+  private isDestroyed = false;
+  private boundStorageHandler: ((e: StorageEvent) => void) | null = null;
+  private boundReturnHandler: (() => void) | null = null;
+  private boundOnlineHandler: (() => void) | null = null;
+  private boundOfflineHandler: (() => void) | null = null;
+  private boundMutatedHandler: (() => void) | null = null;
   
   // Guard flag: prevents re-broadcasting when receiving an external sync
   public isReceivingRemotePulse = false;
@@ -58,6 +65,41 @@ class LiveSyncManager {
       this.initWindowEvents();
       this.startHeartbeat();
     }
+  }
+
+  /**
+   * Deterministic cleanup for background polling intervals, BroadcastChannel handles,
+   * and DOM event listeners so browser teardown and Node.js test runs exit cleanly.
+   */
+  public destroy(): void {
+    this.isDestroyed = true;
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    if (this.channel) {
+      try {
+        this.channel.onmessage = null;
+        this.channel.close();
+      } catch {}
+      this.channel = null;
+    }
+    if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+      if (this.boundStorageHandler) window.removeEventListener("storage", this.boundStorageHandler as any);
+      if (this.boundReturnHandler) window.removeEventListener("focus", this.boundReturnHandler);
+      if (this.boundOnlineHandler) window.removeEventListener("online", this.boundOnlineHandler);
+      if (this.boundOfflineHandler) window.removeEventListener("offline", this.boundOfflineHandler);
+      if (this.boundMutatedHandler) window.removeEventListener("sun89_order_mutated", this.boundMutatedHandler);
+    }
+    if (typeof document !== "undefined" && typeof document.removeEventListener === "function" && this.boundReturnHandler) {
+      document.removeEventListener("visibilitychange", this.boundReturnHandler);
+    }
+    this.boundStorageHandler = null;
+    this.boundReturnHandler = null;
+    this.boundOnlineHandler = null;
+    this.boundOfflineHandler = null;
+    this.boundMutatedHandler = null;
+    this.listeners.clear();
   }
 
   private notify() {
@@ -100,14 +142,17 @@ class LiveSyncManager {
     }
 
     // Storage fallback for cross-tab communication
-    window.addEventListener("storage", (e) => {
-      if (e.key === STORAGE_SYNC_KEY && e.newValue) {
-        try {
-          const payload: SyncEventPayload = JSON.parse(e.newValue);
-          this.handleIncomingPulse(payload);
-        } catch {}
-      }
-    });
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+      this.boundStorageHandler = (e: StorageEvent) => {
+        if (e.key === STORAGE_SYNC_KEY && e.newValue) {
+          try {
+            const payload: SyncEventPayload = JSON.parse(e.newValue);
+            this.handleIncomingPulse(payload);
+          } catch {}
+        }
+      };
+      window.addEventListener("storage", this.boundStorageHandler as any);
+    }
   }
 
   private handleIncomingPulse(payload?: SyncEventPayload) {
@@ -170,8 +215,9 @@ class LiveSyncManager {
 
   private initWindowEvents() {
     // Tab Focus & Visibility Change: instant sync on return
-    const handleReturnToApp = () => {
-      if (document.visibilityState === "visible") {
+    this.boundReturnHandler = () => {
+      if (this.isDestroyed) return;
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
         const elapsed = Date.now() - this.lastSyncedAt.getTime();
         if (elapsed > MIN_FOCUS_SYNC_DELAY_MS) {
           this.sync({ silent: true });
@@ -179,34 +225,44 @@ class LiveSyncManager {
       }
     };
 
-    window.addEventListener("focus", handleReturnToApp);
-    document.addEventListener("visibilitychange", handleReturnToApp);
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+      window.addEventListener("focus", this.boundReturnHandler);
 
-    // Online / Offline detection
-    window.addEventListener("online", () => {
-      this.checkLiveness().then((alive) => {
-        if (alive) {
-          this.status = "connected";
-          this.error = null;
+      // Online / Offline detection
+      this.boundOnlineHandler = () => {
+        if (this.isDestroyed) return;
+        this.checkLiveness().then((alive) => {
+          if (alive && !this.isDestroyed) {
+            this.status = "connected";
+            this.error = null;
+            this.notify();
+            this.sync({ silent: true });
+          }
+        });
+      };
+      window.addEventListener("online", this.boundOnlineHandler);
+
+      this.boundOfflineHandler = async () => {
+        if (this.isDestroyed) return;
+        const isAlive = await this.checkLiveness();
+        if (!isAlive && !this.isDestroyed) {
+          this.status = "offline";
+          this.error = "Koneksi backend terputus";
           this.notify();
-          this.sync({ silent: true });
         }
-      });
-    });
+      };
+      window.addEventListener("offline", this.boundOfflineHandler);
 
-    window.addEventListener("offline", async () => {
-      const isAlive = await this.checkLiveness();
-      if (!isAlive) {
-        this.status = "offline";
-        this.error = "Koneksi backend terputus";
-        this.notify();
-      }
-    });
-
-    // Cross-tab broadcast trigger on local store mutation
-    window.addEventListener("sun89_order_mutated", () => {
-      this.broadcastMutationPulse();
-    });
+      // Cross-tab broadcast trigger on local store mutation
+      this.boundMutatedHandler = () => {
+        if (this.isDestroyed) return;
+        this.broadcastMutationPulse();
+      };
+      window.addEventListener("sun89_order_mutated", this.boundMutatedHandler);
+    }
+    if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+      document.addEventListener("visibilitychange", this.boundReturnHandler);
+    }
   }
 
   private startHeartbeat() {
@@ -216,6 +272,7 @@ class LiveSyncManager {
     this.sync({ silent: true });
 
     this.heartbeatTimer = setInterval(() => {
+      if (this.isDestroyed) return;
       if (typeof document !== "undefined" && document.visibilityState === "visible") {
         this.sync({ silent: true });
       }
@@ -231,9 +288,21 @@ class LiveSyncManager {
     showToast?: boolean;
     message?: string;
   }): Promise<boolean> {
+    if (this.isDestroyed) return false;
     const isSilent = options?.silent ?? false;
     const showToast = options?.showToast ?? false;
     const toastMsg = options?.message || "Data operasional & tugas berhasil diperbarui";
+
+    // Avoid polling when unauthenticated, still hydrating permissions on reload, or already in flight
+    if (typeof window !== "undefined") {
+      if (!window.localStorage?.getItem("auth_token")) {
+        return false;
+      }
+      const authStatus = permissionStore.getSessionAuthStatus();
+      if (authStatus === "unauthenticated" || authStatus === "hydrating" || authStatus === "forbidden") {
+        return false;
+      }
+    }
 
     // If already in flight, return ongoing promise
     if (this.inFlightSync) {
@@ -259,25 +328,27 @@ class LiveSyncManager {
           return false;
         }
 
-        let isMessengerUser = false;
-        try {
-          if (typeof window !== "undefined" && window.localStorage) {
-            const raw = window.localStorage.getItem("auth_user");
-            if (raw) {
-              const u = JSON.parse(raw);
-              if (u.role === "messenger") isMessengerUser = true;
-            }
-          }
-        } catch {}
+        const canSyncOrder =
+          permissionStore.canAccessApiEndpoint("orders") ||
+          permissionStore.canAccessApiEndpoint("orders-archived") ||
+          permissionStore.canAccessApiEndpoint("messenger-tasks");
 
-        // Parallel sync of Order and Finance domains (couriers only sync order domain, never finance)
+        const canSyncFinance =
+          permissionStore.canAccessApiEndpoint("finance-invoices") ||
+          permissionStore.canAccessApiEndpoint("finance-kas-kantor") ||
+          permissionStore.canAccessApiEndpoint("finance-pengeluaran") ||
+          permissionStore.canAccessApiEndpoint("finance-kas-messenger");
+
+        // Permission-aware parallel sync of Order and Finance domains
         await Promise.allSettled([
-          typeof (orderStore as any)?.refresh === "function"
-            ? (orderStore as any).refresh(isSilent)
-            : typeof (orderStore as any)?.initFromApi === "function"
-              ? (orderStore as any).initFromApi()
-              : Promise.resolve(),
-          (!isMessengerUser && typeof (financeRepository as any)?.initFromApi === "function")
+          canSyncOrder
+            ? typeof (orderStore as any)?.refresh === "function"
+              ? (orderStore as any).refresh(isSilent)
+              : typeof (orderStore as any)?.initFromApi === "function"
+                ? (orderStore as any).initFromApi()
+                : Promise.resolve()
+            : Promise.resolve(),
+          canSyncFinance && typeof (financeRepository as any)?.initFromApi === "function"
             ? (financeRepository as any).initFromApi()
             : Promise.resolve(),
         ]);

@@ -89,9 +89,9 @@ test.describe("E2E Tests 2–7: Core Modules in Real Browser", () => {
     await loginResponsePromise;
     await page.waitForTimeout(1200);
 
-    // Verify Messenger Workspace is displayed
+    // Verify Messenger Workspace is displayed (header shows first name "Budi" + Tugas view)
     await expect(page.locator("text=Tugas").first()).toBeVisible();
-    await expect(page.locator("text=Budi Santoso").first()).toBeVisible();
+    await expect(page.getByRole("banner").getByText("Budi")).toBeVisible();
   });
 
   test("E2E Test 7: Dashboard renders operational and financial KPIs from live data", async ({ page }) => {
@@ -99,8 +99,8 @@ test.describe("E2E Tests 2–7: Core Modules in Real Browser", () => {
     await page.locator("nav button", { hasText: "Dashboard" }).click();
     await page.waitForTimeout(1000);
 
-    // Verify Dashboard heading and KPI cards
-    await expect(page.locator("h1", { hasText: "Dashboard" })).toBeVisible();
+    // Verify Dashboard banner title and KPI cards
+    await expect(page.getByRole("banner").getByText("Dashboard")).toBeVisible();
     await expect(page.locator("text=Total Client").first()).toBeVisible();
     await expect(page.locator("text=Rp").first()).toBeVisible();
   });

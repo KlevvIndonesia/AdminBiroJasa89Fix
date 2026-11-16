@@ -1,6 +1,7 @@
 // Audit Log Utility for tracking real user & system actions with Persistent API Sync
 import { useState, useEffect } from "react";
 import { APP_CONFIG } from "../config/appConfig";
+import { permissionStore } from "../data/permissionStore";
 
 export interface AuditLogEntry {
   id: string;
@@ -27,7 +28,11 @@ class AuditLogService {
 
   constructor() {
     this.logs = [];
-    if (typeof window !== "undefined" && window.localStorage?.getItem("auth_token")) {
+    if (
+      typeof window !== "undefined" &&
+      window.localStorage?.getItem("auth_token") &&
+      permissionStore.canAccessApiEndpoint("audit-logs")
+    ) {
       this.initFromApi().catch(() => {});
     }
   }
@@ -61,22 +66,9 @@ class AuditLogService {
       return;
     }
 
-    // Role Guard: Only administrator and svp have authority to read all system audit logs
-    let isAllowedRole = false;
-    try {
-      if (typeof window !== "undefined" && window.localStorage) {
-        const raw = window.localStorage.getItem("auth_user");
-        if (raw) {
-          const u = JSON.parse(raw);
-          if (u.role === "administrator" || u.role === "svp" || u.role === "admin") {
-            isAllowedRole = true;
-          }
-        }
-      }
-    } catch {}
-
-    if (!isAllowedRole) {
+    if (!permissionStore.canAccessApiEndpoint("audit-logs")) {
       this.isLoadingState = false;
+      this.lastError = null;
       return;
     }
 

@@ -33,7 +33,7 @@ test("PHASE 3: REPOSITORY & ORDER COST VERIFICATION CONSISTENCY TEST SUITE", asy
   const supervisorUser = {
     userId: "usr-spv-p3",
     nama: "Supervisor Phase3",
-    role: "supervisor",
+    role: "administrator",
     email: "spv.p3@birojasa.com",
   };
 

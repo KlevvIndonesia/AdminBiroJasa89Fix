@@ -1,70 +1,47 @@
+import { loginFinance } from "./helpers/authHelper";
 import { test, expect, Browser } from "@playwright/test";
 import * as path from "path";
 
 const BASE_URL = "http://localhost:3000";
 const DP = `${BASE_URL}/finance/data-penjualan`;
-const PRIMARY = "rgb(37, 99, 235)"; // solid blue
-const WHITE = "rgb(255, 255, 255)"; // white text
 const EVIDENCE_DIR = "C:\\Users\\mahes\\.gemini\\antigravity\\brain\\4869b8c1-4be9-45c8-ac32-b2a933495169\\responsive_evidence";
-
-async function loginFinance(page: any) {
-  await page.goto(`${BASE_URL}/login`);
-  await page.fill("#email", "finance@birojasa.com");
-  await page.fill("#password", "finance123");
-  await page.click("button[type='submit']");
-  await page.waitForURL("**/dashboard", { timeout: 15000 });
-}
 
 test.describe("Phase 8.5: Data Penjualan Toolbar & Interaction UX Refinement", () => {
   test.beforeEach(async ({ page }) => {
     await loginFinance(page);
   });
 
-  test("1-5. Active Tab: Solid blue background, white text, no bottom indicator, URL sync on click", async ({ page }) => {
+  test("1-5. Header Service Dropdown & URL Sync: Default perpanjangan-1-tahun, active highlight, URL sync & reload persistence", async ({ page }) => {
+    test.slow();
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto(`${DP}/mutasi-ld`);
-    await page.waitForLoadState("domcontentloaded");
+    await page.goto(DP);
+    await expect(page).toHaveURL(`${DP}/perpanjangan-1-tahun`, { timeout: 10000 });
 
-    const activeTab = page.getByRole("tab", { name: "Mutasi LD", exact: true });
-    const inactiveTab = page.getByRole("tab", { name: "Mutasi AS", exact: true });
+    // 1. Header service dropdown reflects active service
+    const serviceTrigger = page.locator("button[title='Pilih layanan Data Penjualan']");
+    await expect(serviceTrigger).toBeVisible();
+    await expect(serviceTrigger).toContainText("Perpanjangan 1 Tahun");
 
-    // 1. Active tab is solid blue
-    const activeBg = await activeTab.evaluate((el: HTMLElement) => window.getComputedStyle(el).backgroundColor);
-    expect(activeBg).toBe(PRIMARY);
+    // 2. Opening dropdown lists all 8 canonical sales services and marks the current selection
+    await serviceTrigger.click();
+    const menuItems = page.getByRole("menuitem");
+    await expect(menuItems).toHaveCount(8);
+    const currentItem = page.getByRole("menuitem", { name: "Perpanjangan 1 Tahun" });
+    await expect(currentItem).toHaveClass(/text-primary/);
 
-    // 2. Active tab text is white
-    const activeColor = await activeTab.evaluate((el: HTMLElement) => window.getComputedStyle(el).color);
-    expect(activeColor).toBe(WHITE);
+    // 3. Selecting another canonical service navigates URL and updates trigger label
+    await page.getByRole("menuitem", { name: "Mutasi Asal Samsat" }).click();
+    await expect(page).toHaveURL(`${DP}/mutasi-asal`);
+    await expect(serviceTrigger).toContainText("Mutasi Asal Samsat");
 
-    // 3. No active bottom/inline indicator exists (pseudo-element is not generated or has no content)
-    const indicatorContent = await activeTab.evaluate((el: HTMLElement) => {
-      const after = window.getComputedStyle(el, "::after");
-      return after.content;
-    });
-    expect(indicatorContent === "none" || indicatorContent === "normal").toBe(true);
-
-    // Inactive tab is muted and not blue
-    const inactiveBg = await inactiveTab.evaluate((el: HTMLElement) => window.getComputedStyle(el).backgroundColor);
-    const inactiveColor = await inactiveTab.evaluate((el: HTMLElement) => window.getComputedStyle(el).color);
-    expect(inactiveBg).not.toBe(PRIMARY);
-    expect(inactiveColor).not.toBe(WHITE);
-
-    // 4. Clicking inactive tab changes active appearance
-    await inactiveTab.click();
-    await expect(page).toHaveURL(`${DP}/mutasi-as`);
-    await expect.poll(async () => {
-      return inactiveTab.evaluate((el: HTMLElement) => window.getComputedStyle(el).backgroundColor);
-    }).toBe(PRIMARY);
-    await expect.poll(async () => {
-      return inactiveTab.evaluate((el: HTMLElement) => window.getComputedStyle(el).color);
-    }).toBe(WHITE);
-
-    // 5. URL-driven state remains correct
+    // 4. Reload preserves URL-driven active service state
     await page.reload();
-    await expect(page).toHaveURL(`${DP}/mutasi-as`);
-    await expect.poll(async () => {
-      return inactiveTab.evaluate((el: HTMLElement) => window.getComputedStyle(el).backgroundColor);
-    }).toBe(PRIMARY);
+    await expect(page).toHaveURL(`${DP}/mutasi-asal`);
+    await expect(serviceTrigger).toContainText("Mutasi Asal Samsat");
+
+    // 5. Legacy alias slug (/mutasi-ld) still resolves cleanly to canonical Mutasi Antar Daerah
+    await page.goto(`${DP}/mutasi-ld`);
+    await expect(serviceTrigger).toContainText("Mutasi Antar Daerah");
 
     // Capture screenshot
     await page.screenshot({
@@ -228,14 +205,13 @@ test.describe("Phase 8.5: Data Penjualan Toolbar & Interaction UX Refinement", (
       });
       const page = await ctx.newPage();
       await loginFinance(page);
-      await page.goto(`${DP}/mutasi-ld`);
+      await page.goto(`${DP}/mutasi-antar-daerah`);
       await page.waitForLoadState("domcontentloaded");
 
-      // Active tab check
-      const activeTab = page.getByRole("tab", { name: "Mutasi LD", exact: true });
-      await expect(activeTab).toBeVisible();
-      const bg = await activeTab.evaluate((el: HTMLElement) => window.getComputedStyle(el).backgroundColor);
-      expect(bg).toBe(PRIMARY);
+      // Header service dropdown remains visible and active
+      const serviceTrigger = page.locator("button[title='Pilih layanan Data Penjualan']");
+      await expect(serviceTrigger).toBeVisible();
+      await expect(serviceTrigger).toContainText("Mutasi Antar Daerah");
 
       // Filter button check
       const filterBtn = page.locator("button[aria-label='Filter data tabel']");

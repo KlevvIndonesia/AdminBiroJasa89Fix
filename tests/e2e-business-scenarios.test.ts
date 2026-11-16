@@ -36,12 +36,19 @@ function advanceOrderToCompletion(orderNo: string, isWalkIn: boolean = false, fi
   if (!isWalkIn) {
     orderService.advanceOrder(orderNo, "Penjadwalan", {
       tanggalJemput: "2026-11-08",
-      messenger: "Ahmad Kurir"
+      messenger: "Ahmad Kurir",
+      assignedMessengerId: "EMP-0004"
     }, adminUser);
+
+    dbOrderRepository.updateOrder(orderNo, {
+      assignedMessengerId: "EMP-0004",
+      messenger: "Ahmad Kurir",
+      pickupCompleted: true,
+      messengerTaskStatus: "Dokumen Sudah Tersedia"
+    } as any);
 
     // Step 2 -> Step 3: Verifikasi Dokumen (requires pickup completed)
     orderService.advanceOrder(orderNo, "Verifikasi Dokumen", {
-      pickupCompleted: true,
       messengerTaskStatus: "Dokumen Sudah Tersedia"
     }, adminUser);
   }
@@ -51,11 +58,18 @@ function advanceOrderToCompletion(orderNo: string, isWalkIn: boolean = false, fi
     documentsVerified: true
   }, adminUser);
 
-  // Step 4 -> Step 5: Verifikasi Ulang (requires Samsat processes completed)
+  // Step 4 -> Step 5: Verifikasi Ulang (requires Samsat processes completed + Samsat pickup diterima di kantor)
   const current = orderService.getByOrderNo(orderNo);
-  const updatedSamsat = (current.samsatProcesses || []).map((p: any) => ({ ...p, status: "Selesai" }));
+  const existingSamsat = Array.isArray(current.samsatProcesses) && current.samsatProcesses.length > 0
+    ? current.samsatProcesses.map((p: any, idx: number) => ({ ...p, id: p.id || `comp-${idx + 1}`, name: p.name || p.nama || "Proses Samsat", status: "Selesai" }))
+    : [{ id: "comp-samsat", name: "Proses Samsat", status: "Selesai" }];
+  dbOrderRepository.updateOrder(orderNo, {
+    samsatProcesses: existingSamsat,
+    samsatStatus: "Selesai",
+    samsatPickupStatus: "Dokumen Samsat Diterima di Kantor"
+  } as any);
   orderService.advanceOrder(orderNo, "Verifikasi Ulang", {
-    samsatProcesses: updatedSamsat,
+    samsatProcesses: existingSamsat,
     samsatCompletedAt: new Date().toISOString()
   }, adminUser);
 
@@ -77,10 +91,23 @@ function advanceOrderToCompletion(orderNo: string, isWalkIn: boolean = false, fi
     documentApproval: { stage6Approved: true, stage6ApprovedAt: new Date().toISOString() } as any
   }, spvUser);
 
+  const recipient = current.customer + " (Penerima Asli)";
+  dbOrderRepository.updateOrder(orderNo, {
+    deliveryStatus: "Dokumen Diserahkan",
+    isReceived: true,
+    receiverName: recipient,
+    deliveryProof: "/uploads/bukti-serah-terima-e2e.jpg",
+    deliveryHandover: {
+      recipientName: recipient,
+      proofUrl: "/uploads/bukti-serah-terima-e2e.jpg",
+      deliveredAt: new Date().toISOString(),
+    }
+  } as any);
+
   // Step 7 -> Step 8: Dokumen Telah Diterima (Terminal Completion)
   const completedOrder = orderService.advanceOrder(orderNo, "Dokumen Telah Diterima", {
-    penerimaDokumen: current.customer + " (Penerima Asli)",
-    recipientName: current.customer + " (Penerima Asli)"
+    penerimaDokumen: recipient,
+    recipientName: recipient
   }, adminUser);
 
   return completedOrder;

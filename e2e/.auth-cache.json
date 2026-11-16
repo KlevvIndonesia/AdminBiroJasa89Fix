@@ -1,0 +1,54 @@
+{
+  "finance@birojasa.com:finance123": {
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJ1c3ItMyIsImVtYWlsIjoiZmluYW5jZUBiaXJvamFzYS5jb20iLCJuYW1hIjoiRmluYW5jZSBVc2VyIiwiamFiYXRhbiI6IkZJTkFOQ0UiLCJyb2xlIjoiZmluYW5jZSIsImVtcGxveWVlSWQiOiJFTVAtMDAwMyIsImlhdCI6MTc5NDU1MzAzOCwiZXhwIjoxNzk0NjM5NDM4fQ.F5DH_wponKd8omGQwh-0T57LDNEn69FUx1MIFYhaYRQ",
+    "user": {
+      "id": 3,
+      "userId": "usr-3",
+      "email": "finance@birojasa.com",
+      "nama": "Finance User",
+      "jabatan": "FINANCE",
+      "role": "finance",
+      "employeeId": "EMP-0003",
+      "status": "Aktif"
+    }
+  },
+  "admin@birojasa.com:admin123": {
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJ1c3ItMiIsImVtYWlsIjoiYWRtaW5AYmlyb2phc2EuY29tIiwibmFtYSI6IkFkcmlhbiBBZGhhcmkiLCJqYWJhdGFuIjoiQURNSU4iLCJyb2xlIjoiYWRtaW4iLCJlbXBsb3llZUlkIjoiRU1QLTAwMDIiLCJpYXQiOjE3OTQ1NTMwMzksImV4cCI6MTc5NDYzOTQzOX0.ZBqJ8WOImHU-iJdj3sdOG9ez_ZIzIHpDRBBzpGiqVFI",
+    "user": {
+      "id": 2,
+      "userId": "usr-2",
+      "email": "admin@birojasa.com",
+      "nama": "Adrian Adhari",
+      "jabatan": "ADMIN",
+      "role": "admin",
+      "employeeId": "EMP-0002",
+      "status": "Aktif"
+    }
+  },
+  "svp@birojasa.com:admin123": {
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJ1c3ItMSIsImVtYWlsIjoic3ZwQGJpcm9qYXNhLmNvbSIsIm5hbWEiOiJBZG1pbiBTdXBlciAoU1ZQKSIsImphYmF0YW4iOiJTVlAiLCJyb2xlIjoiYWRtaW5pc3RyYXRvciIsImVtcGxveWVlSWQiOiJFTVAtMDAwMSIsImlhdCI6MTc5NDU1MzAzOSwiZXhwIjoxNzk0NjM5NDM5fQ.0pqg0Mt5m2Rcjb6NE478VEtn1fwPOtORrqJ6donY4Ms",
+    "user": {
+      "id": 1,
+      "userId": "usr-1",
+      "email": "svp@birojasa.com",
+      "nama": "Admin Super (SVP)",
+      "jabatan": "SVP",
+      "role": "administrator",
+      "employeeId": "EMP-0001",
+      "status": "Aktif"
+    }
+  },
+  "budi.messenger@birojasa.com:messenger123": {
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJ1c3ItNCIsImVtYWlsIjoiYnVkaS5tZXNzZW5nZXJAYmlyb2phc2EuY29tIiwibmFtYSI6IkJ1ZGkgU2FudG9zbyIsImphYmF0YW4iOiJNRVNTRU5HRVIiLCJyb2xlIjoibWVzc2VuZ2VyIiwiZW1wbG95ZWVJZCI6IkVNUC0wMDA0IiwiaWF0IjoxNzk0NTUzMDQwLCJleHAiOjE3OTQ2Mzk0NDB9.qZBHLFwBuPsc4BJe172ydSz4S2HvadiDyCZj4lil9-Y",
+    "user": {
+      "id": 4,
+      "userId": "usr-4",
+      "email": "budi.messenger@birojasa.com",
+      "nama": "Budi Santoso",
+      "jabatan": "MESSENGER",
+      "role": "messenger",
+      "employeeId": "EMP-0004",
+      "status": "Aktif"
+    }
+  }
+}

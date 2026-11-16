@@ -5,7 +5,7 @@
 
 import { dbEstimationRepository } from "../repositories/dbEstimationRepository";
 import { dbAuditRepository } from "../repositories/dbAuditRepository";
-import { EstimationTemplateConfig, EstimationComponentRule } from "../../../src/domain/estimation/types";
+import { EstimationTemplateConfig } from "../../../src/domain/estimation/types";
 import {
   DEFAULT_R4_ANNUAL_TEMPLATE,
   DEFAULT_R2_ANNUAL_TEMPLATE,
@@ -18,9 +18,10 @@ import {
   DEFAULT_R4_MUTASI_LD_TEMPLATE,
   DEFAULT_R2_MUTASI_LD_TEMPLATE,
 } from "../../../src/domain/estimation/defaultTemplates";
+import { sanitizeEstimationTemplate } from "../../../src/domain/estimation/templateSanitizer";
+import { validateEstimationTemplateUpdate } from "../validators/estimationValidator";
 import { ApiError } from "../middleware/errorHandler";
 import { TokenPayload } from "../utils/crypto";
-import { sanitizeEstimationTemplate } from "../../../src/app/data/estimationStore";
 
 export const CANONICAL_DEFAULT_TEMPLATES: EstimationTemplateConfig[] = [
   DEFAULT_R4_ANNUAL_TEMPLATE,
@@ -35,48 +36,41 @@ export const CANONICAL_DEFAULT_TEMPLATES: EstimationTemplateConfig[] = [
   DEFAULT_R2_MUTASI_LD_TEMPLATE,
 ].map(sanitizeEstimationTemplate);
 
+function cloneTemplate(tpl: EstimationTemplateConfig): EstimationTemplateConfig {
+  return {
+    ...tpl,
+    components: Array.isArray(tpl.components) ? tpl.components.map((c) => ({ ...c })) : [],
+    accIdRates: tpl.accIdRates ? { ...tpl.accIdRates } : {},
+  };
+}
+
 export class EstimationService {
+  /**
+   * Read-only list of all estimation templates.
+   * Performs zero database writes during GET operations.
+   */
   public getAllTemplates(): EstimationTemplateConfig[] {
     const templates = dbEstimationRepository.getAllTemplates();
     if (templates.length === 0) {
-      // Seed on demand if database was freshly initialized
-      dbEstimationRepository.resetAll(CANONICAL_DEFAULT_TEMPLATES);
-      return dbEstimationRepository.getAllTemplates().map(sanitizeEstimationTemplate);
+      return CANONICAL_DEFAULT_TEMPLATES.map((tpl) => sanitizeEstimationTemplate(cloneTemplate(tpl)));
     }
-    // Check and auto-migrate any templates in the database that still contain legacy text
-    let hasLegacy = false;
-    const sanitized = templates.map((tpl) => {
-      const clean = sanitizeEstimationTemplate(tpl);
-      if (JSON.stringify(clean) !== JSON.stringify(tpl)) {
-        hasLegacy = true;
-        return clean;
-      }
-      return tpl;
-    });
-    if (hasLegacy) {
-      for (const tpl of sanitized) {
-        dbEstimationRepository.saveTemplate(tpl);
-      }
-    }
-    return sanitized;
+    return templates.map(sanitizeEstimationTemplate);
   }
 
+  /**
+   * Read-only lookup for a single estimation template by ID.
+   * Performs zero database writes during GET operations.
+   */
   public getTemplateById(id: string): EstimationTemplateConfig {
     const template = dbEstimationRepository.getTemplateById(id);
     if (!template) {
       const def = CANONICAL_DEFAULT_TEMPLATES.find((t) => t.id === id);
-      if (def) {
-        const cleanDef = sanitizeEstimationTemplate(def);
-        dbEstimationRepository.saveTemplate(cleanDef);
-        return cleanDef;
+      if (def && dbEstimationRepository.getAllTemplates().length === 0) {
+        return sanitizeEstimationTemplate(cloneTemplate(def));
       }
       throw new ApiError(404, "TEMPLATE_NOT_FOUND", `Template estimasi '${id}' tidak ditemukan.`);
     }
-    const clean = sanitizeEstimationTemplate(template);
-    if (JSON.stringify(clean) !== JSON.stringify(template)) {
-      dbEstimationRepository.saveTemplate(clean);
-    }
-    return clean;
+    return sanitizeEstimationTemplate(template);
   }
 
   public updateTemplate(
@@ -85,41 +79,26 @@ export class EstimationService {
     user?: TokenPayload | null
   ): EstimationTemplateConfig {
     const existing = this.getTemplateById(id);
+    const validatedUpdates = validateEstimationTemplateUpdate(id, updates, existing);
 
-    // Validate structured numeric parameters
-    if (updates.koefisienDenda !== undefined) {
-      const kd = Number(updates.koefisienDenda);
-      if (isNaN(kd) || kd < 0 || kd > 5) {
-        throw new ApiError(400, "INVALID_PARAMETER", "Koefisien denda harus berupa angka antara 0 dan 5.");
-      }
-    }
-
-    if (updates.pembagiBulan !== undefined) {
-      const pb = Number(updates.pembagiBulan);
-      if (isNaN(pb) || pb <= 0 || pb > 60) {
-        throw new ApiError(400, "INVALID_PARAMETER", "Pembagi bulan harus berupa angka positif antara 1 dan 60.");
-      }
-    }
-
-    if (updates.kelipatanPembulatan !== undefined) {
-      const kp = Number(updates.kelipatanPembulatan);
-      if (isNaN(kp) || kp < 1) {
-        throw new ApiError(400, "INVALID_PARAMETER", "Kelipatan pembulatan harus berupa bilangan bulat minimal 1.");
-      }
-    }
-
-    // Merge template safely
-    const updated: EstimationTemplateConfig = {
+    // Merge validated template safely without overriding existing customized fees unless supplied
+    const merged: EstimationTemplateConfig = {
       ...existing,
-      ...updates,
+      ...validatedUpdates,
       id: existing.id, // Immutable ID
       serviceType: existing.serviceType, // Immutable service type
       vehicleType: existing.vehicleType, // Immutable vehicle type
-      components: updates.components ? updates.components : existing.components,
-      accIdRates: updates.accIdRates ? { ...existing.accIdRates, ...updates.accIdRates } : existing.accIdRates,
+      components: validatedUpdates.components
+        ? validatedUpdates.components.map((c) => ({ ...c }))
+        : existing.components.map((c) => ({ ...c })),
+      accIdRates: validatedUpdates.accIdRates
+        ? { ...existing.accIdRates, ...validatedUpdates.accIdRates }
+        : { ...existing.accIdRates },
       updatedAt: new Date().toISOString(),
       updatedBy: user?.nama || "Admin API",
     };
+
+    const updated = sanitizeEstimationTemplate(merged);
 
     const success = dbEstimationRepository.saveTemplate(updated);
     if (!success) {
@@ -134,7 +113,7 @@ export class EstimationService {
       action: "UPDATE_ESTIMATION_TEMPLATE",
       module: "Master Data Biaya Layanan",
       details: `Memperbarui konfigurasi template ${updated.name}`,
-      metadata: { templateId: id, updates },
+      metadata: { templateId: id, updates: validatedUpdates },
       createdAt: new Date().toISOString(),
     });
 

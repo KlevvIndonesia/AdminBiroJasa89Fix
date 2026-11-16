@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { Card } from "../ui/card";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -18,8 +18,18 @@ import {
   ProfitExportGroup,
   ProfitExportParams,
 } from "../../utils/financeExport";
-import { useFinanceStore, PenjualanContractCategory } from "../../data/financeStore";
+import { useFinanceStore, PenjualanContractCategory, ProfitItem } from "../../data/financeStore";
 import { usePaymentMethods } from "../../data/paymentMethodStore";
+import {
+  CanonicalPaymentMethodRecord,
+  ProfitPaymentBreakdownEntry,
+  buildPaymentMethodLabelMap,
+  resolveCanonicalPaymentMethod,
+  isPaymentSchemeString,
+  isCashPaymentString,
+  matchesWibDateRange,
+  normalizeProfitCategoryKey,
+} from "../../../domain/finance/paymentMethodCanonical";
 import { toast } from "sonner";
 import {
   CANONICAL_SALES_CATEGORIES,
@@ -40,28 +50,21 @@ import {
   Download,
   Printer,
   Loader2,
+  AlertCircle,
+  RefreshCw,
 } from "lucide-react";
 
 /**
  * Normalizes payment method name to a clean, canonical string without decorative icons.
  * Strictly filters out payment schemes/timing such as "Bayar di Awal", "Bayar di Akhir", "Tempo".
+ * Never defaults NULL/empty strings to "Tunai".
  */
 export function normalizeBankMethodName(raw?: string | null): string {
-  if (!raw) return "Tunai";
+  if (!raw || isPaymentSchemeString(raw)) return "";
   const s = raw.toLowerCase().trim();
+  if (!s || s === "belum terhubung" || s === "belum dibayar") return "";
 
-  // If input contains payment timing/scheme, reject it
-  if (s.includes("bayar di awal") || s.includes("bayar di akhir") || s.includes("tempo")) {
-    return "";
-  }
-
-  if (
-    s.includes("cash") ||
-    s.includes("tunai") ||
-    s.includes("kas fisik") ||
-    s.includes("kas messenger") ||
-    s.includes("kas kantor")
-  ) {
+  if (isCashPaymentString(raw)) {
     return "Tunai";
   }
   if (s.includes("cimb")) return "Transfer CIMB Niaga";
@@ -70,11 +73,10 @@ export function normalizeBankMethodName(raw?: string | null): string {
   if (s.includes("mandiri")) return "Transfer Mandiri";
   if (s.includes("bri")) return "Transfer BRI";
   if (s.includes("bni")) return "Transfer BNI";
-  if (s.includes("transfer")) return "Transfer Bank";
+  if (s === "transfer" || s === "transfer bank") return "Transfer Bank";
 
-  // Clean raw string from unwanted prefixes
-  const clean = raw.replace(/^(transfer\s+|bank\s+)/i, "").trim();
-  return clean ? `Transfer ${clean}` : "Transfer Bank";
+  const clean = raw.replace(/^(transfer\s+bank\s+|transfer\s+|bank\s+)/i, "").trim();
+  return clean ? (raw.trim().toLowerCase().startsWith("transfer") ? raw.trim() : `Transfer ${clean}`) : "";
 }
 
 /**
@@ -103,9 +105,39 @@ export function normalizeOutflowBankName(raw?: string | null): string {
 
 /**
  * Extracts true payment method from order/invoice/contract row.
- * Strictly ignores "Skema Pembayaran" (Bayar di Awal / Bayar di Akhir).
+ * Strictly ignores "Skema Pembayaran" and NEVER falls back NULL/empty values to "Tunai".
  */
-export function extractRealPaymentMethod(item: any): string {
+export function extractRealPaymentMethod(
+  item: any,
+  paymentMethods: CanonicalPaymentMethodRecord[] = []
+): string {
+  if (!item) return "";
+
+  if (paymentMethods.length > 0) {
+    const resolved = resolveCanonicalPaymentMethod(
+      {
+        id: item.paymentMethodId || item.metodePembayaranId || item.payment?.paymentMethodId,
+        snapshot: item.paymentMethodSnapshot || item.payment_method_snapshot || item.payment?.paymentMethodSnapshot,
+        metode: item.metodePembayaran || item["Metode Pembayaran"] || item.payment?.metodePembayaran,
+        namaBank: item.namaBank || item.bank || item["Nama Bank"] || item.payment?.namaBank || item.payment?.bank,
+        nomorRekening: item.nomorRekening || item.noRekening || item["Nomor Rekening"],
+      },
+      paymentMethods
+    );
+    if (resolved) {
+      return buildPaymentMethodLabelMap(paymentMethods).get(resolved.id)?.displayLabel || resolved.nama_metode;
+    }
+  }
+
+  if (
+    typeof item.paymentMethodLabel === "string" &&
+    item.paymentMethodLabel.trim() &&
+    item.paymentMethodLabel !== "-" &&
+    item.paymentMethodLabel !== "Belum Dibayar"
+  ) {
+    return item.paymentMethodLabel.trim();
+  }
+
   const candidates = [
     item["Metode Pembayaran"],
     item.metodePembayaran,
@@ -130,7 +162,6 @@ export function extractRealPaymentMethod(item: any): string {
     }
   }
 
-  // Check snapshot JSON if available
   const snap =
     item.paymentMethodSnapshot ||
     item.payment_method_snapshot ||
@@ -146,22 +177,11 @@ export function extractRealPaymentMethod(item: any): string {
     } catch {}
   }
 
-  return "Tunai";
+  return "";
 }
 
 function matchesDateRange(dateStr?: string | null, start?: string, end?: string): boolean {
-  if (!start && !end) return true;
-  if (!dateStr || dateStr === "-" || dateStr === "—") return false;
-
-  let normalized = dateStr;
-  if (/^\d{2}\/\d{2}\/\d{4}$/.test(dateStr)) {
-    const [d, m, y] = dateStr.split("/");
-    normalized = `${y}-${m}-${d}`;
-  }
-  const target = normalized.slice(0, 10);
-  if (start && target < start) return false;
-  if (end && target > end) return false;
-  return true;
+  return matchesWibDateRange(dateStr, start, end);
 }
 
 export interface ServiceProfitGroup {
@@ -178,21 +198,170 @@ export interface ServiceProfitGroup {
   items: any[];
 }
 
+export interface ProfitFilterQueryParams {
+  paymentMethodId?: string;
+  startDate?: string;
+  endDate?: string;
+  category?: string;
+}
+
+/**
+ * Coordinates one authoritative filtered-profit fetch cycle with AbortController
+ * cancellation, stale-response sequence protection, and deterministic loading cleanup.
+ */
+export async function executeProfitFilterFetch(params: {
+  filters: ProfitFilterQueryParams;
+  seq: number;
+  getCurrentSeq: () => number;
+  isCancelled: () => boolean;
+  signal?: AbortSignal;
+  fetcher: (
+    filters?: ProfitFilterQueryParams,
+    options?: { signal?: AbortSignal }
+  ) => Promise<ProfitItem[] | null>;
+  onLoading: (loading: boolean) => void;
+  onSuccess: (rows: ProfitItem[]) => void;
+  onError: (message: string) => void;
+}): Promise<void> {
+  const {
+    filters,
+    seq,
+    getCurrentSeq,
+    isCancelled,
+    signal,
+    fetcher,
+    onLoading,
+    onSuccess,
+    onError,
+  } = params;
+
+  onLoading(true);
+  try {
+    const data = await fetcher(filters, signal ? { signal } : undefined);
+    if (!isCancelled() && seq === getCurrentSeq()) {
+      if (Array.isArray(data)) {
+        onSuccess(data);
+      } else {
+        onError("Respons filter profit dari server tidak valid.");
+      }
+    }
+  } catch (err: any) {
+    if (err?.name === "AbortError" || isCancelled() || seq !== getCurrentSeq()) {
+      return;
+    }
+    onError(err?.message || "Gagal memuat data profit terfilter dari server.");
+  } finally {
+    if (!isCancelled() && seq === getCurrentSeq()) {
+      onLoading(false);
+    }
+  }
+}
+
 export function ProfitReconciliationView() {
   const {
-    profitList: profitData,
+    profitList: storeProfitData,
+    fetchFilteredProfitList,
     getContractData,
     profitPendingList,
     cashbackPendingList,
     belumBayarList,
+    isLoading: isFinanceLoading,
+    profitError,
+    error: financeError,
+    refresh: refreshFinanceStore,
   } = useFinanceStore();
-  const { activeMethods } = usePaymentMethods();
+  const {
+    methods: allPaymentMethods,
+    refresh: refreshPaymentMethods,
+    isLoading: isPaymentMethodsLoading,
+    error: pmError,
+  } = usePaymentMethods();
 
   // SECTION 1: FILTER STATES
   const [startDate, setStartDate] = useState<string>("");
   const [endDate, setEndDate] = useState<string>("");
   const [selectedMethod, setSelectedMethod] = useState<string>("ALL");
   const [selectedCategory, setSelectedCategory] = useState<string>("ALL");
+  const [serverFilteredProfit, setServerFilteredProfit] = useState<ProfitItem[] | null>(null);
+  const [isFilterLoading, setIsFilterLoading] = useState<boolean>(false);
+  const [filterError, setFilterError] = useState<string | null>(null);
+  const [retryCounter, setRetryCounter] = useState<number>(0);
+  const fetchSeqRef = useRef(0);
+
+  // Ensure DB payment methods (including historical nonaktif entries) are loaded cleanly
+  useEffect(() => {
+    void refreshPaymentMethods();
+  }, []);
+
+  const hasActiveFilter =
+    selectedMethod !== "ALL" ||
+    Boolean(startDate) ||
+    Boolean(endDate) ||
+    selectedCategory !== "ALL";
+
+  const effectiveProfitError =
+    (hasActiveFilter ? filterError : null) ||
+    profitError?.message ||
+    financeError?.message ||
+    pmError ||
+    null;
+
+  const isProfitLoading =
+    isFinanceLoading || isPaymentMethodsLoading || (hasActiveFilter && isFilterLoading);
+
+  // Fetch authoritative server-filtered profit list whenever filters change (in API mode)
+  useEffect(() => {
+    if (!hasActiveFilter) {
+      setServerFilteredProfit(null);
+      setIsFilterLoading(false);
+      setFilterError(null);
+      return;
+    }
+
+    const seq = ++fetchSeqRef.current;
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    let cancelled = false;
+    setFilterError(null);
+
+    void executeProfitFilterFetch({
+      filters: {
+        paymentMethodId: selectedMethod !== "ALL" ? selectedMethod : undefined,
+        startDate: startDate || undefined,
+        endDate: endDate || undefined,
+        category: selectedCategory !== "ALL" ? selectedCategory : undefined,
+      },
+      seq,
+      getCurrentSeq: () => fetchSeqRef.current,
+      isCancelled: () => cancelled,
+      signal: controller?.signal,
+      fetcher: fetchFilteredProfitList,
+      onLoading: setIsFilterLoading,
+      onSuccess: (rows) => {
+        setServerFilteredProfit(rows);
+        setFilterError(null);
+      },
+      onError: (message) => {
+        setServerFilteredProfit([]);
+        setFilterError(message);
+      },
+    });
+
+    return () => {
+      cancelled = true;
+      controller?.abort();
+    };
+  }, [hasActiveFilter, selectedMethod, startDate, endDate, selectedCategory, storeProfitData, retryCounter]);
+
+  const handleRetryProfit = async () => {
+    setFilterError(null);
+    await Promise.all([
+      refreshFinanceStore().catch(() => undefined),
+      refreshPaymentMethods().catch(() => undefined),
+    ]);
+    if (hasActiveFilter) {
+      setRetryCounter((c) => c + 1);
+    }
+  };
 
   // SECTION 2: INDEPENDENT EXPAND / COLLAPSE STATE PER SERVICE CATEGORY (DEFAULT: COLLAPSED)
   const [expandedBreakdown, setExpandedBreakdown] = useState<Record<string, boolean>>({});
@@ -209,73 +378,276 @@ export function ProfitReconciliationView() {
     setEndDate("");
     setSelectedMethod("ALL");
     setSelectedCategory("ALL");
+    setServerFilteredProfit(null);
   };
 
-  // 1. GATHER ALL SALES DATA FROM DATA PENJUALAN + PROFIT DATA
-  const allRawSalesRows = useMemo(() => {
-    const rows: any[] = [];
-    const seenOrderNos = new Set<string>();
+  const paymentLabelMap = useMemo(
+    () => buildPaymentMethodLabelMap(allPaymentMethods),
+    [allPaymentMethods]
+  );
 
-    // A. Read from each canonical category of Data Penjualan
-    CANONICAL_SALES_CATEGORIES.forEach((catKey) => {
-      try {
-        const catRows = getContractData(catKey as PenjualanContractCategory) || [];
-        catRows.forEach((r: any) => {
-          const ordNo = r["Nomor Order"] || r.orderNo || r.id;
-          if (ordNo && seenOrderNos.has(String(ordNo))) return;
-          if (ordNo) seenOrderNos.add(String(ordNo));
+  // Helper to resolve canonical payment method ID & verified breakdown for a row
+  const resolveRowPaymentInfo = (
+    src: any,
+    uangMasukVal: number
+  ): {
+    paymentMethodId: string | null;
+    paymentMethodIds: string[];
+    paymentMethodLabel: string;
+    paymentBreakdown: ProfitPaymentBreakdownEntry[];
+    hasVerifiedPayment: boolean;
+  } => {
+    if (uangMasukVal <= 0 || src?.verifiedPaymentCount === 0) {
+      return {
+        paymentMethodId: null,
+        paymentMethodIds: [],
+        paymentMethodLabel: "",
+        paymentBreakdown: [],
+        hasVerifiedPayment: false,
+      };
+    }
 
-          const svcTitle =
-            CANONICAL_SERVICES_METADATA[catKey]?.title ||
-            r["Jenis Pengurusan"] ||
-            "Layanan Samsat";
+    const rawBreakdown: ProfitPaymentBreakdownEntry[] = Array.isArray(src?.paymentBreakdown)
+      ? src.paymentBreakdown
+      : [];
 
-          const realMethod = extractRealPaymentMethod(r);
+    if (rawBreakdown.length > 0) {
+      const normalizedBreakdown = rawBreakdown.map((b) => {
+        const matchedPm =
+          (b.paymentMethodId && allPaymentMethods.find((m) => m.id === b.paymentMethodId)) ||
+          resolveCanonicalPaymentMethod(
+            {
+              id: b.paymentMethodId,
+              metode: b.paymentMethodLabel,
+              namaBank: b.namaBank,
+              nomorRekening: b.nomorRekening,
+            },
+            allPaymentMethods
+          );
+        const id = matchedPm ? matchedPm.id : b.paymentMethodId || null;
+        const label = matchedPm
+          ? paymentLabelMap.get(matchedPm.id)?.displayLabel || matchedPm.nama_metode
+          : b.paymentMethodLabel || "Belum Terhubung";
+        return {
+          ...b,
+          paymentMethodId: id,
+          paymentMethodLabel: label,
+        };
+      });
 
-          rows.push({
-            id: r.id || ordNo,
-            orderNo: ordNo,
-            categoryKey: catKey,
-            serviceTitle: svcTitle,
-            tanggal: r["Tanggal Uang Masuk"] || r["Tanggal Masuk Berkas"] || r.tanggal || "",
-            nopol: r["Plat No"] || r.nopol || "-",
-            customer: r["Nama Customer"] || r.customer || "-",
-            namaBerkas: r["Nama Pemilik (STNK/BPKB)"] || r.namaBerkas || "-",
-            uangMasuk: Number(r["Uang Masuk dari Konsumen"] ?? r.uangMasuk ?? r.dibayar ?? 0),
-            uangKeluar: Number(r["Biaya Pokok Samsat"] ?? r["Uang Keluar dari Biro Jasa"] ?? r.biayaSamsat ?? 0),
-            profit: Number(r.Profit ?? r.profit ?? (Number(r["Uang Masuk dari Konsumen"] || 0) - Number(r["Biaya Pokok Samsat"] || 0))),
-            metodePembayaran: realMethod,
-            bankUangKeluar: r["Bank Uang Keluar"] || r.bankUangKeluar || "Kas Kantor",
-            invoice: r["No Invoice"] || r.invoice || "-",
-          });
+      const primary = normalizedBreakdown[normalizedBreakdown.length - 1];
+      const ids = Array.from(
+        new Set(normalizedBreakdown.map((b) => b.paymentMethodId).filter((id): id is string => Boolean(id)))
+      );
+      return {
+        paymentMethodId: primary.paymentMethodId,
+        paymentMethodIds: ids,
+        paymentMethodLabel: primary.paymentMethodLabel,
+        paymentBreakdown: normalizedBreakdown,
+        hasVerifiedPayment: true,
+      };
+    }
+
+    const matchedPm = resolveCanonicalPaymentMethod(
+      {
+        id: src?.paymentMethodId || src?.metodePembayaranId,
+        snapshot: src?.paymentMethodSnapshot || src?.payment_method_snapshot,
+        metode: src?.metodePembayaran || src?.["Metode Pembayaran"],
+        namaBank: src?.namaBank || src?.bank || src?.["Nama Bank"],
+        nomorRekening: src?.nomorRekening || src?.noRekening || src?.["Nomor Rekening"],
+      },
+      allPaymentMethods
+    );
+    const label = matchedPm
+      ? paymentLabelMap.get(matchedPm.id)?.displayLabel || matchedPm.nama_metode
+      : extractRealPaymentMethod(src, allPaymentMethods) || "Belum Terhubung";
+
+    const id = matchedPm ? matchedPm.id : src?.paymentMethodId || null;
+    const singleEntry: ProfitPaymentBreakdownEntry = {
+      paymentMethodId: id,
+      paymentMethodLabel: label,
+      paymentMethodStatus: matchedPm ? matchedPm.status : null,
+      metodePencairan: src?.metodePencairan || "-",
+      namaBank: matchedPm ? matchedPm.bank || "" : src?.namaBank || "",
+      nomorRekening: matchedPm ? matchedPm.nomor_rekening || "" : src?.nomorRekening || "",
+      namaPemilikRekening: matchedPm ? matchedPm.nama_rekening || "" : src?.namaPemilikRekening || "",
+      nominal: uangMasukVal,
+      count: 1,
+    };
+
+    return {
+      paymentMethodId: id,
+      paymentMethodIds: id ? [id] : [],
+      paymentMethodLabel: label,
+      paymentBreakdown: [singleEntry],
+      hasVerifiedPayment: true,
+    };
+  };
+
+  // Track used method IDs across unfiltered data so historical inactive DB methods remain selectable when relevant
+  const unfilteredUsedMethodIds = useMemo(() => {
+    const ids = new Set<string>();
+    (storeProfitData || []).forEach((p: any) => {
+      if (p?.verifiedPaymentCount === 0 || Number(p?.uangMasuk ?? 0) <= 0) return;
+      if (p?.paymentMethodId) ids.add(String(p.paymentMethodId));
+      if (Array.isArray(p?.paymentMethodIds)) {
+        p.paymentMethodIds.forEach((id: string) => {
+          if (id) ids.add(String(id));
         });
-      } catch {}
+      }
+      if (Array.isArray(p?.paymentBreakdown)) {
+        p.paymentBreakdown.forEach((b: any) => {
+          if (b?.paymentMethodId) ids.add(String(b.paymentMethodId));
+        });
+      }
+    });
+    return ids;
+  }, [storeProfitData]);
+
+  // Authoritative dropdown options built 100% from DB payment_methods
+  const dropdownPaymentOptions = useMemo(() => {
+    const active = allPaymentMethods.filter(
+      (m) => String(m.status || "").trim().toLowerCase() === "aktif"
+    );
+    const inactiveUsed = allPaymentMethods.filter(
+      (m) =>
+        String(m.status || "").trim().toLowerCase() !== "aktif" &&
+        unfilteredUsedMethodIds.has(m.id)
+    );
+    return [...active, ...inactiveUsed].map((m) => ({
+      id: m.id,
+      label: paymentLabelMap.get(m.id)?.dropdownLabel || m.nama_metode,
+      status: m.status,
+    }));
+  }, [allPaymentMethods, unfilteredUsedMethodIds, paymentLabelMap]);
+
+  // 1. GATHER ALL VERIFIED SALES DATA FROM AUTHORITATIVE BACKEND / DATA PENJUALAN
+  const allRawSalesRows = useMemo(() => {
+    if (effectiveProfitError) {
+      return [];
+    }
+    const rows: any[] = [];
+    const seenKeys = new Set<string>();
+    const normalizeKey = (val: unknown) => String(val || "").trim().toUpperCase();
+
+    const isCancelledRow = (row: any): boolean => {
+      if (!row) return false;
+      if (Boolean(row.isOrderCancelled) || Boolean(row.isCancelled)) return true;
+      const st = String(row.status || row.billingStatus || "").trim().toUpperCase();
+      if (st === "CANCELLED") return true;
+      const stPengerjaan = String(row["Status Pengerjaan"] || "").trim().toLowerCase();
+      const stPembayaran = String(row["Status Pembayaran"] || "").trim().toLowerCase();
+      return stPengerjaan === "dibatalkan" || stPembayaran === "dibatalkan";
+    };
+
+    const activeProfitSource = serverFilteredProfit !== null ? serverFilteredProfit : storeProfitData;
+
+    const profitByOrderNo = new Map<string, any>();
+    const profitByInvoiceNo = new Map<string, any>();
+    (activeProfitSource || []).forEach((p: any) => {
+      if (isCancelledRow(p)) return;
+      const ordKey = normalizeKey(p.orderNo);
+      const invKey = normalizeKey(p.invoice || p.invoiceNo);
+      if (ordKey) profitByOrderNo.set(ordKey, p);
+      if (invKey) profitByInvoiceNo.set(invKey, p);
     });
 
-    // B. Merge any remaining items from profitData (Paid Invoices) not already captured
-    profitData.forEach((p: any) => {
-      const invNo = p.invoice || p.id;
-      if (seenOrderNos.has(String(invNo))) return;
-      seenOrderNos.add(String(invNo));
+    // When authoritative server-filtered profit list is active, do NOT re-inject unfiltered contract rows
+    if (serverFilteredProfit === null) {
+      // A. Read from each canonical category of Data Penjualan (exclude CANCELLED, unpaid/unverified & enrich from authoritative profitData)
+      CANONICAL_SALES_CATEGORIES.forEach((catKey) => {
+        try {
+          const catRows = getContractData(catKey as PenjualanContractCategory) || [];
+          catRows.forEach((r: any) => {
+            if (isCancelledRow(r)) return;
+            const ordNo = r["Nomor Order"] || r.orderNo || r.id;
+            const invNo = r["No Invoice"] || r.noInvoice || r.invoice || "-";
+            const ordKey = normalizeKey(ordNo);
+            const invKey = invNo !== "-" ? normalizeKey(invNo) : "";
+            if ((ordKey && seenKeys.has(ordKey)) || (invKey && seenKeys.has(invKey))) return;
 
-      // Resolve category key from pengurusan
-      const pengRaw = (p.pengurusan || "").toLowerCase();
-      let matchedCat: string = "perpanjangan-1-tahun";
-      if (pengRaw.includes("5 tahun")) matchedCat = "perpanjangan-5-tahun";
-      else if (pengRaw.includes("balik nama") || pengRaw.includes("bbn")) matchedCat = "balik-nama";
-      else if (pengRaw.includes("mutasi ld") || pengRaw.includes("mutasi antar")) matchedCat = "mutasi-antar-daerah";
-      else if (pengRaw.includes("mutasi as") || pengRaw.includes("mutasi asal")) matchedCat = "mutasi-asal";
-      else if (pengRaw.includes("tarik")) matchedCat = "tarik-berkas";
-      else if (pengRaw.includes("duplikat")) matchedCat = "duplikat-stnk";
-      else if (pengRaw.includes("1 tahun") || pengRaw.includes("tahunan")) matchedCat = "perpanjangan-1-tahun";
-      else matchedCat = "lainnya";
+            const matchedProfit =
+              (ordKey ? profitByOrderNo.get(ordKey) : undefined) ||
+              (invKey ? profitByInvoiceNo.get(invKey) : undefined);
 
+            const uangMasukVal = matchedProfit
+              ? Number(matchedProfit.uangMasuk ?? 0)
+              : Number(r["Uang Masuk dari Konsumen"] ?? r.uangMasuk ?? r.dibayar ?? 0);
+
+            // Only include rows with verified incoming money
+            if (uangMasukVal <= 0 || matchedProfit?.verifiedPaymentCount === 0) {
+              return;
+            }
+
+            if (ordKey) seenKeys.add(ordKey);
+            if (invKey) seenKeys.add(invKey);
+
+            const payInfo = resolveRowPaymentInfo(matchedProfit || r, uangMasukVal);
+            if (!payInfo.hasVerifiedPayment) return;
+
+            const svcTitle =
+              CANONICAL_SERVICES_METADATA[catKey]?.title ||
+              r["Jenis Pengurusan"] ||
+              "Layanan Samsat";
+
+            const biayaSamsatVal = matchedProfit
+              ? Number(matchedProfit.matchedCOGS ?? matchedProfit.biayaSamsat ?? 0)
+              : Number(r["Biaya Pokok Samsat"] ?? r["Uang Keluar dari Biro Jasa"] ?? r.biayaSamsat ?? 0);
+            const isHoldPending =
+              matchedProfit?.holdStatus === "HOLD_COST_PENDING" ||
+              matchedProfit?.isFinancialAnomaly === true ||
+              (biayaSamsatVal === 0 && !matchedProfit?.isExplicitZero && !r.isExplicitZero && uangMasukVal > 0);
+            const profitVal = matchedProfit
+              ? Number(matchedProfit.profit ?? matchedProfit.grossProfit ?? 0)
+              : (isHoldPending ? 0 : Number(r.Profit ?? r.profit ?? Math.max(0, Math.min(uangMasukVal, Number(r["Total Tagihan"] ?? r.totalTagihan ?? uangMasukVal)) - biayaSamsatVal)));
+
+            rows.push({
+              id: r.id || ordNo,
+              orderNo: ordNo,
+              categoryKey: catKey,
+              serviceTitle: svcTitle,
+              tanggal: (matchedProfit?.tanggalUangMasuk || matchedProfit?.tanggal) ?? (r["Tanggal Uang Masuk"] || r["Tanggal Masuk Berkas"] || r.tanggal || ""),
+              nopol: r["Plat No"] || r.nopol || "-",
+              customer: r["Nama Customer"] || r.customer || "-",
+              namaBerkas: r["Nama Pemilik (STNK/BPKB)"] || r.namaBerkas || "-",
+              uangMasuk: uangMasukVal,
+              uangKeluar: biayaSamsatVal,
+              profit: profitVal,
+              paymentMethodId: payInfo.paymentMethodId,
+              paymentMethodIds: payInfo.paymentMethodIds,
+              paymentMethodLabel: payInfo.paymentMethodLabel,
+              paymentBreakdown: payInfo.paymentBreakdown,
+              metodePembayaran: payInfo.paymentMethodLabel,
+              bankUangKeluar: r["Bank Uang Keluar"] || r.bankUangKeluar || "Kas Kantor",
+              invoice: (matchedProfit?.invoice && matchedProfit.invoice !== "-") ? matchedProfit.invoice : invNo,
+            });
+          });
+        } catch {}
+      });
+    }
+
+    // B. Merge remaining verified items from profitData (or all items when serverFilteredProfit is active)
+    (activeProfitSource || []).forEach((p: any) => {
+      if (isCancelledRow(p)) return;
+      const ordKey = normalizeKey(p.orderNo);
+      const invNo = p.invoice || p.invoiceNo || p.id;
+      const invKey = normalizeKey(invNo);
+      if ((ordKey && seenKeys.has(ordKey)) || (invKey && seenKeys.has(invKey))) return;
+
+      const uangMasukVal = Number(p.uangMasuk ?? 0);
+      if (uangMasukVal <= 0 || p.verifiedPaymentCount === 0) return;
+
+      if (ordKey) seenKeys.add(ordKey);
+      if (invKey) seenKeys.add(invKey);
+
+      const matchedCat = normalizeProfitCategoryKey(p.pengurusan);
       const svcTitle =
         CANONICAL_SERVICES_METADATA[matchedCat as keyof typeof CANONICAL_SERVICES_METADATA]?.title ||
         p.pengurusan ||
         "Layanan Samsat";
 
-      const realMethod = extractRealPaymentMethod(p);
+      const payInfo = resolveRowPaymentInfo(p, uangMasukVal);
+      if (!payInfo.hasVerifiedPayment) return;
 
       rows.push({
         id: p.id || invNo,
@@ -286,44 +658,81 @@ export function ProfitReconciliationView() {
         nopol: p.nopol || "-",
         customer: p.customer || "-",
         namaBerkas: p.namaBerkas || "-",
-        uangMasuk: Number(p.uangMasuk || 0),
-        uangKeluar: Number(p.biayaSamsat || 0),
-        profit: Number(p.profit || (Number(p.uangMasuk || 0) - Number(p.biayaSamsat || 0))),
-        metodePembayaran: realMethod,
+        uangMasuk: uangMasukVal,
+        uangKeluar: Number(p.matchedCOGS ?? p.biayaSamsat ?? 0),
+        profit: Number(p.profit ?? p.grossProfit ?? 0),
+        paymentMethodId: payInfo.paymentMethodId,
+        paymentMethodIds: payInfo.paymentMethodIds,
+        paymentMethodLabel: payInfo.paymentMethodLabel,
+        paymentBreakdown: payInfo.paymentBreakdown,
+        metodePembayaran: payInfo.paymentMethodLabel,
         bankUangKeluar: p.bankUangKeluar || "Kas Kantor",
         invoice: p.invoice || "-",
       });
     });
 
     return rows;
-  }, [profitData, getContractData]);
+  }, [storeProfitData, serverFilteredProfit, getContractData, allPaymentMethods, paymentLabelMap, effectiveProfitError]);
 
-  // 2. APPLY FILTERS (SECTION 1)
+  // 2. APPLY FILTERS (SECTION 1) — Strict canonical ID & proportional multi-payment attribution
   const filteredSalesRows = useMemo(() => {
-    return allRawSalesRows.filter((row) => {
-      // Date filter
-      if (!matchesDateRange(row.tanggal, startDate, endDate)) {
-        return false;
-      }
-
-      // Payment Method filter
-      if (selectedMethod !== "ALL") {
-        const normRowMethod = row.metodePembayaran.toLowerCase();
-        const normFilter = selectedMethod.toLowerCase();
-        if (!normRowMethod.includes(normFilter) && !normFilter.includes(normRowMethod)) {
-          return false;
+    return allRawSalesRows
+      .map((row) => {
+        if (!matchesDateRange(row.tanggal, startDate, endDate)) {
+          return null;
         }
-      }
 
-      // Service Category filter
-      if (selectedCategory !== "ALL") {
-        if (row.categoryKey !== selectedCategory && row.serviceTitle !== selectedCategory) {
-          return false;
+        if (selectedCategory !== "ALL") {
+          if (row.categoryKey !== selectedCategory && row.serviceTitle !== selectedCategory) {
+            return null;
+          }
         }
-      }
 
-      return true;
-    });
+        if (selectedMethod !== "ALL") {
+          const breakdown: ProfitPaymentBreakdownEntry[] = Array.isArray(row.paymentBreakdown)
+            ? row.paymentBreakdown
+            : [];
+          const matchedEntries = breakdown.filter((b) => b.paymentMethodId === selectedMethod);
+
+          if (matchedEntries.length === 0) {
+            // Only fall back to top-level paymentMethodId when breakdown wasn't populated
+            if (breakdown.length === 0 && row.paymentMethodId === selectedMethod) {
+              return row;
+            }
+            return null;
+          }
+
+          const totalBreakdownNominal = breakdown.reduce((s, b) => s + Number(b.nominal || 0), 0);
+          const matchedNominal = matchedEntries.reduce((s, b) => s + Number(b.nominal || 0), 0);
+
+          if (breakdown.length > 1 && totalBreakdownNominal > 0 && matchedNominal < totalBreakdownNominal) {
+            const ratio = matchedNominal / totalBreakdownNominal;
+            return {
+              ...row,
+              uangMasuk: Math.round(row.uangMasuk * ratio),
+              uangKeluar: Math.round(row.uangKeluar * ratio),
+              profit: Math.round(row.profit * ratio),
+              paymentBreakdown: matchedEntries,
+              paymentMethodId: selectedMethod,
+              paymentMethodIds: [selectedMethod],
+              paymentMethodLabel: matchedEntries[matchedEntries.length - 1].paymentMethodLabel,
+              metodePembayaran: matchedEntries[matchedEntries.length - 1].paymentMethodLabel,
+            };
+          }
+
+          return {
+            ...row,
+            paymentBreakdown: matchedEntries,
+            paymentMethodId: selectedMethod,
+            paymentMethodIds: [selectedMethod],
+            paymentMethodLabel: matchedEntries[matchedEntries.length - 1].paymentMethodLabel,
+            metodePembayaran: matchedEntries[matchedEntries.length - 1].paymentMethodLabel,
+          };
+        }
+
+        return row;
+      })
+      .filter((row): row is NonNullable<typeof row> => row !== null);
   }, [allRawSalesRows, startDate, endDate, selectedMethod, selectedCategory]);
 
   // 3. GROUP AND AGGREGATE BY JENIS PENGURUSAN (SECTION 2)
@@ -372,13 +781,39 @@ export function ProfitReconciliationView() {
       g.totalProfit += row.profit;
       g.items.push(row);
 
-      // Inflow breakdown by actual payment method (only attributing payments to real methods)
-      const methodIn = row.metodePembayaran || "Tunai";
-      if (!g.breakdownUangMasuk[methodIn]) {
-        g.breakdownUangMasuk[methodIn] = { nominal: 0, count: 0 };
+      // Inflow breakdown by real payment method (proportional when multi-method, never phantom Tunai)
+      const breakdown: ProfitPaymentBreakdownEntry[] = Array.isArray(row.paymentBreakdown)
+        ? row.paymentBreakdown
+        : [];
+      if (breakdown.length > 0) {
+        const totalB = breakdown.reduce((s, b) => s + Number(b.nominal || 0), 0);
+        let allocatedSoFar = 0;
+        breakdown.forEach((b, bIdx) => {
+          const isLast = bIdx === breakdown.length - 1;
+          const allocNominal =
+            breakdown.length === 1
+              ? row.uangMasuk
+              : isLast
+                ? Math.max(0, row.uangMasuk - allocatedSoFar)
+                : totalB > 0
+                  ? Math.round(row.uangMasuk * (Number(b.nominal || 0) / totalB))
+                  : 0;
+          allocatedSoFar += allocNominal;
+          const lbl = b.paymentMethodLabel || row.paymentMethodLabel || "Belum Terhubung";
+          if (!g.breakdownUangMasuk[lbl]) {
+            g.breakdownUangMasuk[lbl] = { nominal: 0, count: 0 };
+          }
+          g.breakdownUangMasuk[lbl].nominal += allocNominal;
+          g.breakdownUangMasuk[lbl].count += b.count || 1;
+        });
+      } else {
+        const methodIn = row.paymentMethodLabel || row.metodePembayaran || "Belum Terhubung";
+        if (!g.breakdownUangMasuk[methodIn]) {
+          g.breakdownUangMasuk[methodIn] = { nominal: 0, count: 0 };
+        }
+        g.breakdownUangMasuk[methodIn].nominal += row.uangMasuk;
+        g.breakdownUangMasuk[methodIn].count += 1;
       }
-      g.breakdownUangMasuk[methodIn].nominal += row.uangMasuk;
-      g.breakdownUangMasuk[methodIn].count += 1;
 
       // Outflow breakdown by actual bank/cash source
       const bankOut = normalizeOutflowBankName(row.bankUangKeluar);
@@ -389,13 +824,6 @@ export function ProfitReconciliationView() {
       g.breakdownUangKeluar[bankOut].count += 1;
     });
 
-    // Ensure Tunai is present in breakdown if category has transactions (with 0 if not paid in cash)
-    Object.values(map).forEach((g) => {
-      if (g.totalUangMasuk > 0 && !g.breakdownUangMasuk["Tunai"]) {
-        g.breakdownUangMasuk["Tunai"] = { nominal: 0, count: 0 };
-      }
-    });
-
     return Object.values(map)
       .map((g) => {
         g.marginPercent = g.totalUangMasuk > 0 ? (g.totalProfit / g.totalUangMasuk) * 100 : 0;
@@ -403,7 +831,7 @@ export function ProfitReconciliationView() {
       })
       .filter((g) => {
         if (selectedCategory !== "ALL") {
-          return g.categoryKey === selectedCategory;
+          return g.categoryKey === selectedCategory && g.jumlahBerkas > 0;
         }
         return g.jumlahBerkas > 0;
       });
@@ -535,7 +963,11 @@ export function ProfitReconciliationView() {
         : "Semua Data";
 
     const filterMethodLabel =
-      selectedMethod === "ALL" ? "Semua Metode Pembayaran" : selectedMethod;
+      selectedMethod === "ALL"
+        ? "Semua Metode Pembayaran"
+        : dropdownPaymentOptions.find((o) => o.id === selectedMethod)?.label ||
+          paymentLabelMap.get(selectedMethod)?.displayLabel ||
+          selectedMethod;
 
     const filterCategoryLabel =
       selectedCategory === "ALL"
@@ -554,6 +986,14 @@ export function ProfitReconciliationView() {
 
   const handleExportCSV = () => {
     if (isExporting) return;
+    if (isProfitLoading) {
+      toast.warning("Data profit masih dimuat, tunggu hingga selesai sebelum ekspor.");
+      return;
+    }
+    if (effectiveProfitError) {
+      toast.error("Gagal memuat data profit. Muat ulang data terlebih dahulu sebelum ekspor.");
+      return;
+    }
     if (serviceGroups.length === 0) {
       toast.warning("Tidak ada data transaksi profit untuk diekspor pada filter yang dipilih.");
       return;
@@ -572,6 +1012,14 @@ export function ProfitReconciliationView() {
 
   const handleExportPDF = (action: "download" | "print") => {
     if (isExporting) return;
+    if (isProfitLoading) {
+      toast.warning("Data profit masih dimuat, tunggu hingga selesai sebelum ekspor.");
+      return;
+    }
+    if (effectiveProfitError) {
+      toast.error("Gagal memuat data profit. Muat ulang data terlebih dahulu sebelum ekspor.");
+      return;
+    }
     if (serviceGroups.length === 0) {
       toast.warning("Tidak ada data transaksi profit untuk diekspor pada filter yang dipilih.");
       return;
@@ -676,18 +1124,11 @@ export function ProfitReconciliationView() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="ALL">Semua Metode Pembayaran</SelectItem>
-                <SelectItem value="Tunai">Tunai</SelectItem>
-                <SelectItem value="BCA">Transfer BCA</SelectItem>
-                <SelectItem value="CIMB">Transfer CIMB Niaga</SelectItem>
-                <SelectItem value="Muamalat">Transfer Muamalat</SelectItem>
-                <SelectItem value="Mandiri">Transfer Mandiri</SelectItem>
-                {activeMethods
-                  .filter((m) => !["bca", "cimb", "muamalat", "mandiri", "tunai"].some((b) => (m.bank || "").toLowerCase().includes(b)))
-                  .map((m) => (
-                    <SelectItem key={m.id} value={m.bank || m.nama_metode}>
-                      {m.nama_metode}
-                    </SelectItem>
-                  ))}
+                {dropdownPaymentOptions.map((m) => (
+                  <SelectItem key={m.id} value={m.id}>
+                    {m.label}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </div>
@@ -716,6 +1157,33 @@ export function ProfitReconciliationView() {
       </Card>
 
       {/* ========================================================= */}
+      {/* ERROR TRANSPARENCY BANNER                                 */}
+      {/* ========================================================= */}
+      {effectiveProfitError && !isProfitLoading && (
+        <div
+          role="alert"
+          className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-rose-700 dark:text-rose-300"
+        >
+          <div className="flex items-start gap-2.5">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
+            <div className="space-y-0.5">
+              <p className="text-xs font-semibold">Gagal Memuat Data Profit</p>
+              <p className="text-xs opacity-90">{effectiveProfitError}</p>
+            </div>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void handleRetryProfit()}
+            className="h-7 text-xs font-medium gap-1.5 border-rose-500/40 bg-background hover:bg-rose-500/10 text-rose-700 dark:text-rose-300 shrink-0 self-start sm:self-auto"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>Muat Ulang Data</span>
+          </Button>
+        </div>
+      )}
+
+      {/* ========================================================= */}
       {/* SECTION 2: TABEL REKAPITULASI PER JENIS PENGURUSAN       */}
       {/* ========================================================= */}
       <Card className="p-3.5 sm:p-4 border border-border bg-card shadow-xs flex flex-col shrink-0 overflow-hidden">
@@ -738,7 +1206,7 @@ export function ProfitReconciliationView() {
               variant="outline"
               size="sm"
               onClick={handleExportCSV}
-              disabled={isExporting !== null}
+              disabled={isExporting !== null || isProfitLoading || Boolean(effectiveProfitError)}
               className="h-8 text-xs font-medium gap-1.5 border-border hover:bg-muted shadow-2xs"
             >
               {isExporting === "csv" ? (
@@ -753,7 +1221,7 @@ export function ProfitReconciliationView() {
               variant="outline"
               size="sm"
               onClick={() => handleExportPDF("download")}
-              disabled={isExporting !== null}
+              disabled={isExporting !== null || isProfitLoading || Boolean(effectiveProfitError)}
               className="h-8 text-xs font-medium gap-1.5 border-border hover:bg-muted shadow-2xs"
             >
               {isExporting === "download" ? (
@@ -768,7 +1236,7 @@ export function ProfitReconciliationView() {
               variant="outline"
               size="sm"
               onClick={() => handleExportPDF("print")}
-              disabled={isExporting !== null}
+              disabled={isExporting !== null || isProfitLoading || Boolean(effectiveProfitError)}
               className="h-8 text-xs font-medium gap-1.5 border-border hover:bg-muted shadow-2xs"
             >
               {isExporting === "print" ? (
@@ -782,24 +1250,53 @@ export function ProfitReconciliationView() {
         </div>
 
         <div className="overflow-x-auto overflow-y-auto max-h-[500px] rounded-lg border border-border">
-          <table className="w-full text-xs text-left border-collapse">
-            <thead className="bg-muted text-muted-foreground uppercase text-[11px] tracking-wider sticky top-0 z-10 border-b border-border">
+          <table className="finance-table w-full text-xs text-left border-collapse">
+            <thead className="finance-table__header bg-muted text-muted-foreground uppercase text-[11px] tracking-wider sticky top-0 z-10 border-b border-border">
               <tr>
-                <th className="py-2.5 px-3 text-center w-12 font-semibold">No.</th>
-                <th className="py-2.5 px-3 min-w-[200px] font-semibold">Jenis Pengurusan</th>
-                <th className="py-2.5 px-3 text-center w-28 font-semibold">Jumlah Berkas</th>
-                <th className="py-2.5 px-3 min-w-[260px] text-right font-semibold">
+                <th className="py-2 px-2.5 text-center w-12 font-semibold">No.</th>
+                <th className="py-2 px-2.5 min-w-[200px] font-semibold">Jenis Pengurusan</th>
+                <th className="py-2 px-2.5 text-center w-28 font-semibold">Jumlah Berkas</th>
+                <th className="py-2 px-2.5 min-w-[240px] text-right font-semibold">
                   Jumlah Uang Masuk
                 </th>
-                <th className="py-2.5 px-3 min-w-[220px] text-right font-semibold">
+                <th className="py-2 px-2.5 min-w-[200px] text-right font-semibold">
                   Jumlah Uang Keluar (Samsat/Ops)
                 </th>
-                <th className="py-2.5 px-3 min-w-[150px] text-right font-semibold">Total Profit</th>
-                <th className="py-2.5 px-3 text-center w-24 font-semibold">Margin %</th>
+                <th className="py-2 px-2.5 min-w-[140px] text-right font-semibold">Total Profit</th>
+                <th className="py-2 px-2.5 text-center w-24 font-semibold">Margin %</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-border/60">
-              {serviceGroups.length > 0 ? (
+            <tbody className="finance-table__body divide-y divide-border/60">
+              {isProfitLoading ? (
+                <tr>
+                  <td colSpan={7} className="py-8 text-center text-muted-foreground text-xs font-normal">
+                    <div className="inline-flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin text-primary" />
+                      <span>Memuat data profit dari server...</span>
+                    </div>
+                  </td>
+                </tr>
+              ) : effectiveProfitError ? (
+                <tr>
+                  <td colSpan={7} className="py-8 text-center text-rose-600 dark:text-rose-400 text-xs font-normal">
+                    <div className="flex flex-col items-center justify-center gap-2">
+                      <div className="inline-flex items-center gap-1.5 font-medium">
+                        <AlertCircle className="w-4 h-4" />
+                        <span>{effectiveProfitError}</span>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void handleRetryProfit()}
+                        className="h-7 text-xs font-medium gap-1.5"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>Muat Ulang Data</span>
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              ) : serviceGroups.length > 0 ? (
                 serviceGroups.map((group, idx) => {
                   const isExpanded = !!expandedBreakdown[group.categoryKey];
                   const isDeficit = group.totalProfit < 0;
@@ -822,14 +1319,14 @@ export function ProfitReconciliationView() {
                       }`}
                     >
                       {/* 1. No */}
-                      <td className="py-3 px-3 align-top text-center font-mono text-[11px] font-normal text-muted-foreground">
+                      <td className="py-2 px-2.5 align-top text-center font-mono text-[11px] font-normal text-muted-foreground">
                         {idx + 1}
                       </td>
 
                       {/* 2. Jenis Pengurusan */}
-                      <td className="py-3 px-3 align-top">
+                      <td className="py-2 px-2.5 align-top">
                         <div className="flex flex-col">
-                          <span className="text-[13px] font-semibold text-foreground">
+                          <span className="text-xs font-semibold text-foreground">
                             {group.serviceTitle}
                           </span>
                           <span className="text-[11px] font-normal font-mono text-muted-foreground mt-0.5">
@@ -839,21 +1336,21 @@ export function ProfitReconciliationView() {
                       </td>
 
                       {/* 3. Jumlah Berkas */}
-                      <td className="py-3 px-3 align-top text-center">
+                      <td className="py-2 px-2.5 align-top text-center">
                         <Badge
                           variant="secondary"
-                          className="text-xs font-medium px-2 py-0.5"
+                          className="text-[11px] font-medium px-2 py-0.5"
                         >
                           {group.jumlahBerkas} Berkas
                         </Badge>
                       </td>
 
                       {/* 4. Jumlah Uang Masuk & Rincian Expand/Collapse (NO ICONS) */}
-                      <td className="py-3 px-3 align-top text-right">
+                      <td className="py-2 px-2.5 align-top text-right">
                         <div className="flex flex-col items-end">
                           {/* Row Header: Total Uang Masuk + Chevron Toggle */}
                           <div className="flex items-center justify-end gap-1.5">
-                            <span className="font-mono text-[13px] font-semibold text-emerald-600 dark:text-emerald-400 tabular-nums">
+                            <span className="font-mono text-xs font-semibold text-emerald-600 dark:text-emerald-400 tabular-nums">
                               {formatRupiah(group.totalUangMasuk)}
                             </span>
                             <button
@@ -894,9 +1391,9 @@ export function ProfitReconciliationView() {
                       </td>
 
                       {/* 5. Jumlah Uang Keluar (Samsat / Ops) & Rincian Rekening (NO ICONS) */}
-                      <td className="py-3 px-3 align-top text-right">
+                      <td className="py-2 px-2.5 align-top text-right">
                         <div className="flex flex-col items-end">
-                          <span className="font-mono text-[13px] font-semibold text-rose-600 dark:text-rose-400 tabular-nums">
+                          <span className="font-mono text-xs font-semibold text-rose-600 dark:text-rose-400 tabular-nums">
                             {formatRupiah(group.totalUangKeluar)}
                           </span>
 
@@ -922,9 +1419,9 @@ export function ProfitReconciliationView() {
                       </td>
 
                       {/* 6. Total Profit */}
-                      <td className="py-3 px-3 align-top text-right">
+                      <td className="py-2 px-2.5 align-top text-right">
                         <span
-                          className={`font-mono text-[13px] font-semibold tabular-nums ${
+                          className={`font-mono text-xs font-semibold tabular-nums ${
                             isDeficit
                               ? "text-rose-600 dark:text-rose-400"
                               : "text-emerald-600 dark:text-emerald-400"
@@ -937,7 +1434,7 @@ export function ProfitReconciliationView() {
                       </td>
 
                       {/* 7. Margin % */}
-                      <td className="py-3 px-3 align-top text-center">
+                      <td className="py-2 px-2.5 align-top text-center">
                         <Badge
                           variant="outline"
                           className={`text-[11px] font-semibold px-2 py-0.5 ${
@@ -963,26 +1460,26 @@ export function ProfitReconciliationView() {
 
             {/* BARIS TOTAL FOOTER (700 WEIGHT, RINGKAS, TANPA EXPAND) */}
             {serviceGroups.length > 0 && (
-              <tfoot className="bg-muted text-foreground border-t-2 border-border text-[13px] font-bold">
+              <tfoot className="finance-table__footer bg-muted text-foreground border-t-2 border-border text-xs font-bold">
                 <tr>
-                  <td colSpan={2} className="py-3 px-3 text-left uppercase tracking-wider font-bold">
+                  <td colSpan={2} className="py-2 px-2.5 text-left uppercase tracking-wider font-bold">
                     TOTAL KESELURUHAN (SESUAI FILTER)
                   </td>
-                  <td className="py-3 px-3 text-center font-mono">
-                    <Badge variant="default" className="text-xs font-semibold px-2 py-0.5">
+                  <td className="py-2 px-2.5 text-center font-mono">
+                    <Badge variant="default" className="text-[11px] font-semibold px-2 py-0.5">
                       {grandTotals.totalBerkas} Berkas
                     </Badge>
                   </td>
-                  <td className="py-3 px-3 text-right font-mono text-emerald-600 dark:text-emerald-400 font-bold tabular-nums">
+                  <td className="py-2 px-2.5 text-right font-mono text-emerald-600 dark:text-emerald-400 font-bold tabular-nums">
                     {formatRupiah(grandTotals.totalUangMasuk)}
                   </td>
-                  <td className="py-3 px-3 text-right font-mono text-rose-600 dark:text-rose-400 font-bold tabular-nums">
+                  <td className="py-2 px-2.5 text-right font-mono text-rose-600 dark:text-rose-400 font-bold tabular-nums">
                     {formatRupiah(grandTotals.totalUangKeluar)}
                   </td>
-                  <td className="py-3 px-3 text-right font-mono text-primary font-bold tabular-nums">
+                  <td className="py-2 px-2.5 text-right font-mono text-primary font-bold tabular-nums">
                     {formatRupiah(grandTotals.totalProfit)}
                   </td>
-                  <td className="py-3 px-3 text-center font-mono">
+                  <td className="py-2 px-2.5 text-center font-mono">
                     <Badge variant="outline" className="text-[11px] font-semibold bg-primary/10 text-primary border-primary/30">
                       {grandTotals.marginPercent.toFixed(1)}%
                     </Badge>

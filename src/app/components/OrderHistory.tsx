@@ -7,6 +7,7 @@ import { Badge, getStatusBadgeClass } from "./ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 import { TablePagination } from "./ui/TablePagination";
+import { DataTableShell, DataTableEmptyRow } from "./ui/data-table";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
 import {
   AlertDialog,
@@ -44,6 +45,7 @@ import {
 import { toast } from "sonner";
 import { InvoiceDialog } from "./InvoiceDialog";
 import { useOrderStore, OperationalOrder } from "../data/orderStore";
+import { permissionStore } from "../data/permissionStore";
 import { cn } from "./ui/utils";
 import { generateDocumentSvgUrl, downloadDataUrl } from "../utils/documentSvgGenerator";
 import { DocumentPreviewModal } from "./DocumentPreviewModal";
@@ -82,7 +84,7 @@ export function OrderHistory() {
     }
   }, []);
   const userRole = (currentUser?.role || currentUser?.jabatan || "admin").toLowerCase();
-  const canClearRekap = userRole === "administrator" || userRole === "svp";
+  const canClearRekap = permissionStore.canManageModule(userRole, "order-history");
 
   // Derived view for Rekap Order from single source of truth store
   // Shows all operational completed / archived orders with their true financial reconciliation status
@@ -267,21 +269,20 @@ export function OrderHistory() {
           </div>
 
           <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={handleExportCSV} className="border-border text-xs h-9">
+            <Button variant="outline" onClick={handleExportCSV} className="border-border text-xs">
               <FileDown className="w-3.5 h-3.5 mr-1.5" />
               CSV
             </Button>
-            <Button variant="outline" size="sm" onClick={handleExportPDF} className="border-border text-xs h-9">
+            <Button variant="outline" onClick={handleExportPDF} className="border-border text-xs">
               <FileDown className="w-3.5 h-3.5 mr-1.5" />
               PDF
             </Button>
             {canClearRekap && (
               <Button
                 variant="outline"
-                size="sm"
                 disabled={orders.length === 0}
                 onClick={() => setIsClearDialogOpen(true)}
-                className="border-rose-500/30 text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 text-xs h-9 gap-1.5 ml-auto"
+                className="border-rose-500/30 text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 text-xs gap-1.5 ml-auto"
                 title="Bersihkan data tampilan Rekap Order"
               >
                 <Trash2 className="w-3.5 h-3.5" />
@@ -363,140 +364,8 @@ export function OrderHistory() {
         </div>
 
         {/* Table */}
-        <div className="rounded-xl border border-border/80 overflow-hidden shadow-2xs bg-card flex-1 flex flex-col min-h-0">
-          <div className="w-full flex-1 flex flex-col min-h-0">
-            <Table 
-              containerClassName="overflow-y-auto overflow-x-auto max-h-[calc(100vh-270px)] sm:max-h-[calc(100vh-280px)] min-h-[160px]"
-              className={`w-full min-w-[850px] ${paginatedOrders.length === 0 ? "h-full" : ""}`}
-            >
-              <TableHeader className="sticky top-0 z-10 bg-card border-b border-border/80 shadow-2xs">
-                <TableRow className="hover:bg-transparent">
-                  <TableHead className="h-9 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider bg-card">Nomor Order</TableHead>
-                  <TableHead className="h-9 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider bg-card">Nama Customer</TableHead>
-                  <TableHead className="h-9 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider bg-card">Nomor Polisi</TableHead>
-                  <TableHead className="h-9 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider bg-card">Jenis Pengurusan</TableHead>
-                  <TableHead className="h-9 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider bg-card">Samsat</TableHead>
-                  <TableHead className="h-9 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider bg-card">Tanggal Selesai</TableHead>
-                  <TableHead className="h-9 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider text-right bg-card">Total Biaya Final</TableHead>
-                  <TableHead className="h-9 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider text-center bg-card">Status Pengerjaan</TableHead>
-                  <TableHead className="h-9 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider text-right w-[95px] bg-card">Aksi</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {paginatedOrders.length > 0 ? (
-                  paginatedOrders.map((order) => (
-                    <TableRow key={order.orderNo} className="hover:bg-muted/30 transition-colors border-b border-border/60 last:border-0 h-10">
-                      <TableCell className="px-3 py-2 text-xs font-mono font-semibold text-primary">{order.orderNo}</TableCell>
-                      <TableCell className="px-3 py-2 text-xs font-medium text-foreground">
-                        <div className="flex flex-col">
-                          <span>{order.customer}</span>
-                          {order.nomorHP && order.nomorHP !== "-" && (
-                            <span className="text-[10px] text-muted-foreground font-mono">{order.nomorHP}</span>
-                          )}
-                        </div>
-                      </TableCell>
-                      <TableCell className="px-3 py-2 text-xs font-mono">
-                        <span className="inline-block px-1.5 py-0.5 rounded bg-muted/60 border border-border text-[11px] font-mono text-foreground font-medium">
-                          {order.nopol}
-                        </span>
-                      </TableCell>
-                      <TableCell className="px-3 py-2 text-xs text-foreground/80">{order.layanan}</TableCell>
-                      <TableCell className="px-3 py-2 text-xs text-foreground/80">{order.samsat}</TableCell>
-                      <TableCell className="px-3 py-2 text-xs font-mono text-foreground/80">
-                        {order.completedAt?.toLocaleDateString('id-ID') || order.tanggal.toLocaleDateString('id-ID')}
-                      </TableCell>
-                      <TableCell className="px-3 py-2 text-xs font-mono tabular-nums text-right font-medium text-emerald-600 dark:text-emerald-400">
-                        Rp {order.totalBiayaFinal.toLocaleString('id-ID')}
-                      </TableCell>
-                      <TableCell className="px-3 py-2 text-xs text-center">
-                        {order.isCancelled || order.statusPembayaran === "Dibatalkan" ? (
-                          <Badge status="error" className="text-[10px] font-medium">
-                            Dibatalkan
-                          </Badge>
-                        ) : order.statusPembayaran === "Kurang Bayar" ? (
-                          <Badge status="warning" className="text-[10px] font-medium">
-                            Kurang Bayar
-                          </Badge>
-                        ) : order.statusPembayaran === "Belum Bayar" ? (
-                          <Badge status="neutral" className="text-[10px] font-medium">
-                            Belum Bayar
-                          </Badge>
-                        ) : order.statusPembayaran === "Lebih Bayar" ? (
-                          <Badge status="info" className="text-[10px] font-medium">
-                            Lebih Bayar
-                          </Badge>
-                        ) : (
-                          <Badge status="success" className="text-[10px] font-medium">
-                            Selesai & Lunas
-                          </Badge>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-right px-2 py-1.5">
-                        <div className="flex justify-end gap-1">
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-7 w-7 p-0 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded transition-colors"
-                            onClick={() => {
-                              setSelectedOrder(order);
-                              setIsViewDialogOpen(true);
-                            }}
-                            title="Lihat Rekap Detail"
-                          >
-                            <Eye className="w-3.5 h-3.5" />
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-7 w-7 p-0 text-muted-foreground hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-500/10 rounded transition-colors"
-                            onClick={() => {
-                              setSelectedOrder(order);
-                              setIsPDFDialogOpen(true);
-                            }}
-                            title="Lihat Dokumen PDF"
-                          >
-                            <FileText className="w-3.5 h-3.5" />
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-7 w-7 p-0 text-muted-foreground hover:text-emerald-600 dark:hover:text-emerald-400 hover:bg-emerald-500/10 rounded transition-colors"
-                            onClick={() => {
-                              setSelectedOrder(order);
-                              setIsInvoiceDialogOpen(true);
-                            }}
-                            title="Cetak Invoice"
-                          >
-                            <Printer className="w-3.5 h-3.5" />
-                          </Button>
-                          {canClearRekap && (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="h-7 w-7 p-0 text-muted-foreground hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-500/10 rounded transition-colors"
-                              onClick={() => setOrderToDelete(order)}
-                              title="Hapus Rekap Order Sementara"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </Button>
-                          )}
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  ))
-                ) : (
-                  <TableRow className="h-full hover:bg-transparent">
-                    <TableCell colSpan={9} className="text-center text-muted-foreground min-h-[200px] py-12 align-middle text-sm">
-                      Tidak ada data order
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
-          </div>
-
-          {/* Standardized Table Pagination */}
-          <div className="border-t border-border/80 p-3 bg-card shrink-0 mt-auto">
+        <DataTableShell
+          footer={
             <TablePagination
               currentPage={currentPage}
               totalItems={filteredOrders.length}
@@ -508,8 +377,141 @@ export function OrderHistory() {
               }}
               pageSizeOptions={[10, 25, 50, 100]}
             />
-          </div>
-        </div>
+          }
+        >
+          <Table 
+            containerClassName="overflow-y-auto overflow-x-auto max-h-[calc(100vh-270px)] sm:max-h-[calc(100vh-280px)] min-h-[160px]"
+            className={`w-full min-w-[850px] ${paginatedOrders.length === 0 ? "h-full" : ""}`}
+          >
+            <TableHeader className="sticky top-0 z-10 bg-card border-b border-border/80 shadow-2xs">
+              <TableRow className="hover:bg-transparent">
+                <TableHead className="h-9 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider bg-card">Nomor Order</TableHead>
+                <TableHead className="h-9 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider bg-card">Nama Customer</TableHead>
+                <TableHead className="h-9 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider bg-card">Nomor Polisi</TableHead>
+                <TableHead className="h-9 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider bg-card">Jenis Pengurusan</TableHead>
+                <TableHead className="h-9 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider bg-card">Samsat</TableHead>
+                <TableHead className="h-9 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider bg-card">Tanggal Selesai</TableHead>
+                <TableHead className="h-9 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider text-right bg-card">Total Biaya Final</TableHead>
+                <TableHead className="h-9 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider text-center bg-card">Status Pengerjaan</TableHead>
+                <TableHead className="h-9 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider text-right w-[95px] bg-card">Aksi</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {paginatedOrders.length > 0 ? (
+                paginatedOrders.map((order) => (
+                  <TableRow key={order.orderNo} className="hover:bg-muted/30 transition-colors border-b border-border/60 last:border-0 h-10">
+                    <TableCell className="px-3 py-2 text-xs font-mono font-semibold text-primary">{order.orderNo}</TableCell>
+                    <TableCell className="px-3 py-2 text-xs font-medium text-foreground">
+                      <div className="flex flex-col">
+                        <span>{order.customer}</span>
+                        {order.nomorHP && order.nomorHP !== "-" && (
+                          <span className="text-[11px] text-muted-foreground font-mono">{order.nomorHP}</span>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell className="px-3 py-2 text-xs font-mono">
+                      <span className="inline-block px-1.5 py-0.5 rounded bg-muted/60 border border-border text-[11px] font-mono text-foreground font-medium">
+                        {order.nopol}
+                      </span>
+                    </TableCell>
+                    <TableCell className="px-3 py-2 text-xs text-foreground/80">{order.layanan}</TableCell>
+                    <TableCell className="px-3 py-2 text-xs text-foreground/80">{order.samsat}</TableCell>
+                    <TableCell className="px-3 py-2 text-xs font-mono text-foreground/80">
+                      {order.completedAt?.toLocaleDateString('id-ID') || order.tanggal.toLocaleDateString('id-ID')}
+                    </TableCell>
+                    <TableCell className="px-3 py-2 text-xs font-mono tabular-nums text-right font-medium text-emerald-600 dark:text-emerald-400">
+                      Rp {order.totalBiayaFinal.toLocaleString('id-ID')}
+                    </TableCell>
+                    <TableCell className="px-3 py-2 text-xs text-center">
+                      {order.isCancelled || order.statusPembayaran === "Dibatalkan" ? (
+                        <Badge status="error" className="text-[11px] font-medium">
+                          Dibatalkan
+                        </Badge>
+                      ) : order.statusPembayaran === "Kurang Bayar" ? (
+                        <Badge status="warning" className="text-[11px] font-medium">
+                          Kurang Bayar
+                        </Badge>
+                      ) : order.statusPembayaran === "Belum Bayar" ? (
+                        <Badge status="neutral" className="text-[11px] font-medium">
+                          Belum Bayar
+                        </Badge>
+                      ) : order.statusPembayaran === "Lebih Bayar" ? (
+                        <Badge status="info" className="text-[11px] font-medium">
+                          Lebih Bayar
+                        </Badge>
+                      ) : (
+                        <Badge status="success" className="text-[11px] font-medium">
+                          Selesai & Lunas
+                        </Badge>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-right px-2 py-1.5">
+                      <div className="flex justify-end gap-1">
+                        <Button
+                          size="icon-sm"
+                          variant="ghost"
+                          className="h-7 w-7 text-muted-foreground hover:text-primary hover:bg-primary/10"
+                          onClick={() => {
+                            setSelectedOrder(order);
+                            setIsViewDialogOpen(true);
+                          }}
+                          aria-label={`Lihat rekap detail ${order.orderNo}`}
+                          title="Lihat Rekap Detail"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                        </Button>
+                        <Button
+                          size="icon-sm"
+                          variant="ghost"
+                          className="h-7 w-7 text-muted-foreground hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-500/10"
+                          onClick={() => {
+                            setSelectedOrder(order);
+                            setIsPDFDialogOpen(true);
+                          }}
+                          aria-label={`Lihat dokumen PDF ${order.orderNo}`}
+                          title="Lihat Dokumen PDF"
+                        >
+                          <FileText className="w-3.5 h-3.5" />
+                        </Button>
+                        <Button
+                          size="icon-sm"
+                          variant="ghost"
+                          className="h-7 w-7 text-muted-foreground hover:text-emerald-600 dark:hover:text-emerald-400 hover:bg-emerald-500/10"
+                          onClick={() => {
+                            setSelectedOrder(order);
+                            setIsInvoiceDialogOpen(true);
+                          }}
+                          aria-label={`Cetak invoice ${order.orderNo}`}
+                          title="Cetak Invoice"
+                        >
+                          <Printer className="w-3.5 h-3.5" />
+                        </Button>
+                        {canClearRekap && (
+                          <Button
+                            size="icon-sm"
+                            variant="ghost"
+                            className="h-7 w-7 text-muted-foreground hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-500/10"
+                            onClick={() => setOrderToDelete(order)}
+                            aria-label={`Hapus rekap order ${order.orderNo}`}
+                            title="Hapus Rekap Order Sementara"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </Button>
+                        )}
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))
+              ) : (
+                <DataTableEmptyRow
+                  colSpan={9}
+                  title="Tidak ada data order"
+                  description="Belum ada rekap order yang sesuai dengan pencarian atau filter saat ini."
+                />
+              )}
+            </TableBody>
+          </Table>
+        </DataTableShell>
       </Card>
 
       {/* View Dialog - Rekap Order Detail */}
@@ -849,17 +851,17 @@ export function OrderHistory() {
                                 <div className="flex items-center gap-1.5">
                                   <span className="font-medium text-foreground text-xs truncate">{item.label}</span>
                                   {hasFile && (
-                                    <span className="px-1 py-0.2 rounded bg-muted text-[9px] font-mono text-muted-foreground uppercase">{fileType}</span>
+                                    <span className="px-1 py-0.5 rounded bg-muted text-[11px] font-mono text-muted-foreground uppercase">{fileType}</span>
                                   )}
                                 </div>
-                                <span className={cn("text-[10px] truncate font-mono block max-w-[130px]", !hasFile ? "text-amber-500 italic" : "text-muted-foreground")}>
+                                <span className={cn("text-[11px] truncate font-mono block max-w-[130px]", !hasFile ? "text-amber-500 italic" : "text-muted-foreground")}>
                                   {fileName}
                                 </span>
                               </div>
                             </div>
                             <div className="flex items-center gap-1.5 shrink-0">
                               <span className={cn(
-                                "inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border",
+                                "inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium border",
                                 hasFile
                                   ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
                                   : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
@@ -940,13 +942,13 @@ export function OrderHistory() {
                                 <div className="min-w-0">
                                   <div className="flex items-center gap-1.5">
                                     <span className="font-medium text-foreground text-xs truncate">{docName}</span>
-                                    <span className="px-1 py-0.2 rounded bg-emerald-500/20 text-[9px] font-mono text-emerald-700 dark:text-emerald-300 uppercase">{fileType}</span>
+                                    <span className="px-1 py-0.5 rounded bg-emerald-500/20 text-[11px] font-mono text-emerald-700 dark:text-emerald-300 uppercase">{fileType}</span>
                                   </div>
-                                  <span className="text-[10px] text-muted-foreground truncate font-mono block max-w-[130px]">{doc.fileName || docName}</span>
+                                  <span className="text-[11px] text-muted-foreground truncate font-mono block max-w-[130px]">{doc.fileName || docName}</span>
                                 </div>
                               </div>
                               <div className="flex items-center gap-1.5 shrink-0">
-                                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
                                   {doc.status || "Tersedia"}
                                 </span>
                                 {docUrl && (

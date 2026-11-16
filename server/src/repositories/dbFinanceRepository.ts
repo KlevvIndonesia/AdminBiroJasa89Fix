@@ -11,6 +11,47 @@ import { InvoiceBillingRecord, KasKantorItem, PengeluaranItem, KasMessengerItem,
 import { computeCanonicalLabaRugi, CanonicalLabaRugiSummary } from "../../../src/domain/finance/labaRugiCanonical";
 import { calculateCanonicalInvoiceTotals } from "../services/canonicalInvoiceCalculator";
 import { recalculateKasKantorRunningBalances, recalculateKasMessengerRunningBalances } from "../services/cashLedgerCalculationService";
+import { resolveCanonicalSamsatCogs } from "../../../src/domain/finance/samsatCogs";
+import {
+  CanonicalPaymentMethodRecord,
+  ProfitPaymentBreakdownEntry,
+  buildPaymentMethodLabelMap,
+  resolveCanonicalPaymentMethod,
+  isCashPaymentMethodRow,
+  isCashPaymentString,
+  isPaymentSchemeString,
+  formatUnlinkedPaymentMethodLabel,
+  matchesWibDateRange,
+  normalizeProfitCategoryKey,
+} from "../../../src/domain/finance/paymentMethodCanonical";
+
+export interface ProfitListFilters {
+  paymentMethodId?: string;
+  startDate?: string;
+  endDate?: string;
+  category?: string;
+}
+
+const _cashbackColsEnsured = new WeakSet<DatabaseSync>();
+
+function ensureCashbackCompletionColumns(): void {
+  const activeDb = getDb();
+  if (_cashbackColsEnsured.has(activeDb)) {
+    return;
+  }
+  const cols = activeDb.prepare("PRAGMA table_info(finance_invoices)").all() as { name: string }[];
+  const names = new Set(cols.map((c) => c.name));
+  if (!names.has("cashback_completion_status")) {
+    activeDb.exec("ALTER TABLE finance_invoices ADD COLUMN cashback_completion_status TEXT DEFAULT 'PENDING';");
+  }
+  if (!names.has("cashback_completed_at")) {
+    activeDb.exec("ALTER TABLE finance_invoices ADD COLUMN cashback_completed_at TEXT;");
+  }
+  if (!names.has("cashback_completed_by")) {
+    activeDb.exec("ALTER TABLE finance_invoices ADD COLUMN cashback_completed_by TEXT;");
+  }
+  _cashbackColsEnsured.add(activeDb);
+}
 
 export class DbFinanceRepository {
   private mapRowToInvoice(r: any): InvoiceBillingRecord {
@@ -85,6 +126,14 @@ export class DbFinanceRepository {
       refundedAmount: parsed.refundedAmount !== undefined ? Number(parsed.refundedAmount) : (r.refund_status === "PROCESSED" ? overpayment : 0),
       remainingRefund: parsed.remainingRefund !== undefined ? Number(parsed.remainingRefund) : (r.refund_status === "PROCESSED" ? 0 : overpayment),
       cashbackPaidAmount: parsed.cashbackPaidAmount !== undefined ? Number(parsed.cashbackPaidAmount) : 0,
+      cashbackPaidAt: parsed.cashbackPaidAt ?? undefined,
+      cashbackPaidBy: parsed.cashbackPaidBy ?? undefined,
+      cashbackCompletionStatus: r.cashback_completion_status ?? parsed.cashbackCompletionStatus ?? "PENDING",
+      cashbackCompletedAt: r.cashback_completed_at ?? parsed.cashbackCompletedAt ?? undefined,
+      cashbackCompletedBy: r.cashback_completed_by ?? parsed.cashbackCompletedBy ?? undefined,
+      cashbackCompletionNotes: parsed.cashbackCompletionNotes ?? undefined,
+      completedAt: parsed.completedAt ?? undefined,
+      completedBy: parsed.completedBy ?? undefined,
     };
   }
 
@@ -93,38 +142,63 @@ export class DbFinanceRepository {
    * Ensures getInvoiceById, getInvoiceByOrderNo, and getInvoiceByNo produce
    * 100% consistent totals, balances, and statuses with getAllInvoices.
    */
+  private applyCanonicalCalculation(
+    inv: InvoiceBillingRecord,
+    payments: any[],
+    isExplicitZeroOverride?: boolean
+  ): InvoiceBillingRecord {
+    const normalizedStatus = String(inv.status || "").trim().toUpperCase();
+    const normalizedBillingStatus = String((inv as any).billingStatus || "").trim().toUpperCase();
+
+    if (normalizedStatus === "CANCELLED" || normalizedBillingStatus === "CANCELLED") {
+      inv.status = "CANCELLED" as any;
+      (inv as any).billingStatus = "CANCELLED";
+      if (!Array.isArray(inv.riwayatPembayaran)) {
+        inv.riwayatPembayaran = payments.filter((p) => !p.is_void);
+      }
+      return inv;
+    }
+
+    const orderNo = (inv.orderNo || "").trim();
+    const invoiceNo = (inv.invoiceNo || inv.invoice || "").trim();
+    const calc = calculateCanonicalInvoiceTotals({
+      invoiceNo,
+      orderNo,
+      totalTagihan: inv.totalTagihan,
+      biayaSamsat: inv.biayaSamsat,
+      isExplicitZero: isExplicitZeroOverride !== undefined ? isExplicitZeroOverride : Boolean(inv.isExplicitZero),
+      basePaid: Number(inv.dibayar ?? inv.terbayar ?? 0),
+      payments,
+    });
+
+    inv.dibayar = calc.verifiedPaid;
+    inv.terbayar = calc.verifiedPaid;
+    inv.sisa = calc.sisaTagihan;
+    (inv as any).overpayment = calc.overpayment;
+    inv.status = calc.status as any;
+    (inv as any).settlementCondition = calc.settlementCondition;
+    inv.profit = calc.grossProfit;
+    inv.profitStatus = calc.profitStatus as any;
+    inv.riwayatPembayaran = calc.allActivePayments;
+
+    const lastVerified =
+      calc.eligibleVerifiedPayments[calc.eligibleVerifiedPayments.length - 1] ||
+      calc.allActivePayments[calc.allActivePayments.length - 1];
+    if (lastVerified) {
+      inv.bank = lastVerified.nama_bank || inv.bank;
+      inv.metodePembayaran = lastVerified.metode_pembayaran || inv.metodePembayaran;
+      (inv as any).tanggalBayar = lastVerified.tanggal_bayar;
+      (inv as any).nomorRekening = lastVerified.nomor_rekening;
+    }
+
+    return inv;
+  }
+
   private enrichInvoiceWithCanonicalCalculation(inv: InvoiceBillingRecord): InvoiceBillingRecord {
     try {
       const orderNo = (inv.orderNo || "").trim();
-      const invoiceNo = (inv.invoiceNo || inv.invoice || "").trim();
       const payments = this.getPaymentsByOrderNo(orderNo);
-      const calc = calculateCanonicalInvoiceTotals({
-        invoiceNo,
-        orderNo,
-        totalTagihan: inv.totalTagihan,
-        biayaSamsat: inv.biayaSamsat,
-        isExplicitZero: Boolean(inv.isExplicitZero),
-        basePaid: Number(inv.dibayar ?? inv.terbayar ?? 0),
-        payments,
-      });
-
-      inv.dibayar = calc.verifiedPaid;
-      inv.terbayar = calc.verifiedPaid;
-      inv.sisa = calc.sisaTagihan;
-      (inv as any).overpayment = calc.overpayment;
-      inv.status = calc.status as any;
-      (inv as any).settlementCondition = calc.settlementCondition;
-      inv.profit = calc.grossProfit;
-      inv.profitStatus = calc.profitStatus as any;
-      inv.riwayatPembayaran = calc.allActivePayments;
-
-      const lastVerified = calc.eligibleVerifiedPayments[calc.eligibleVerifiedPayments.length - 1] || calc.allActivePayments[calc.allActivePayments.length - 1];
-      if (lastVerified) {
-        inv.bank = lastVerified.nama_bank || inv.bank;
-        inv.metodePembayaran = lastVerified.metode_pembayaran || inv.metodePembayaran;
-        (inv as any).tanggalBayar = lastVerified.tanggal_bayar;
-        (inv as any).nomorRekening = lastVerified.nomor_rekening;
-      }
+      return this.applyCanonicalCalculation(inv, payments);
     } catch {
       // Non-fatal if table not initialized
     }
@@ -155,37 +229,11 @@ export class DbFinanceRepository {
       const inv = this.mapRowToInvoice(r);
       const ordKey = (r.order_no || "").trim().toUpperCase();
       const rawPayments = paymentsByOrder.get(ordKey) || [];
-
-      // Use shared canonical calculator (GAP-FIN-05)
-      const calc = calculateCanonicalInvoiceTotals({
-        invoiceNo: (r.invoice_no || "").trim(),
-        orderNo: (r.order_no || "").trim(),
-        totalTagihan: inv.totalTagihan,
-        biayaSamsat: inv.biayaSamsat,
-        isExplicitZero: Boolean(r.is_explicit_zero || (inv as any).isExplicitZero),
-        basePaid: Number(inv.dibayar ?? inv.terbayar ?? 0),
-        payments: rawPayments,
-      });
-
-      inv.dibayar = calc.verifiedPaid;
-      inv.terbayar = calc.verifiedPaid;
-      inv.sisa = calc.sisaTagihan;
-      (inv as any).overpayment = calc.overpayment;
-      inv.status = calc.status as any;
-      (inv as any).settlementCondition = calc.settlementCondition;
-      inv.profit = calc.grossProfit;
-      inv.profitStatus = calc.profitStatus as any;
-      inv.riwayatPembayaran = calc.allActivePayments;
-
-      const lastVerified = calc.eligibleVerifiedPayments[calc.eligibleVerifiedPayments.length - 1] || calc.allActivePayments[calc.allActivePayments.length - 1];
-      if (lastVerified) {
-        inv.bank = lastVerified.nama_bank || inv.bank;
-        inv.metodePembayaran = lastVerified.metode_pembayaran || inv.metodePembayaran;
-        (inv as any).tanggalBayar = lastVerified.tanggal_bayar;
-        (inv as any).nomorRekening = lastVerified.nomor_rekening;
-      }
-
-      return inv;
+      return this.applyCanonicalCalculation(
+        inv,
+        rawPayments,
+        Boolean(r.is_explicit_zero || (inv as any).isExplicitZero)
+      );
     });
   }
 
@@ -196,10 +244,116 @@ export class DbFinanceRepository {
     return invoiceNo === "INV-1026-080" || orderNo === "ORD-1026-080" || totalTagihan >= 5000000000;
   }
 
-  public getProfitList(): any[] {
+  public getProfitList(filters?: ProfitListFilters): any[] {
     const invoices = this.getAllInvoices();
+
+    const cancelledOrderNos = new Set<string>();
+    try {
+      const orderRows = db
+        .prepare("SELECT order_no, current_stage_name, payment_status, data_json FROM orders")
+        .all() as any[];
+      for (const r of orderRows) {
+        const key = String(r.order_no || "").trim().toUpperCase();
+        if (!key) continue;
+        let parsedOrder: any = {};
+        try {
+          parsedOrder = r.data_json ? JSON.parse(r.data_json) : {};
+        } catch {}
+        const isOrdCancelled =
+          r.current_stage_name === "Dibatalkan" ||
+          r.payment_status === "Dibatalkan" ||
+          Boolean(parsedOrder.isCancelled) ||
+          String(parsedOrder.status || "").trim().toUpperCase() === "CANCELLED";
+        if (isOrdCancelled) cancelledOrderNos.add(key);
+      }
+    } catch (err: any) {
+      throw new ApiError(
+        500,
+        "PROFIT_QUERY_FAILED",
+        `Gagal membaca status order untuk kalkulasi profit: ${err?.message || String(err)}`
+      );
+    }
+
+    let paymentMethods: CanonicalPaymentMethodRecord[] = [];
+    try {
+      paymentMethods = db
+        .prepare(
+          "SELECT id, nama_metode, bank, nama_rekening, nomor_rekening, status FROM payment_methods ORDER BY created_at ASC, id ASC"
+        )
+        .all() as CanonicalPaymentMethodRecord[];
+    } catch (err: any) {
+      throw new ApiError(
+        500,
+        "PROFIT_QUERY_FAILED",
+        `Gagal membaca master metode pembayaran untuk profit: ${err?.message || String(err)}`
+      );
+    }
+    const labelMap = buildPaymentMethodLabelMap(paymentMethods);
+
+    const verifiedPaysByOrder = new Map<string, any[]>();
+    const verifiedPaysByInvoice = new Map<string, any[]>();
+    const activePaymentOrders = new Set<string>();
+    const activePaymentInvoices = new Set<string>();
+    try {
+      const pays = db
+        .prepare(
+          `SELECT id, payment_id, invoice_no, order_no, nominal, metode_pembayaran, nama_bank, nomor_rekening,
+                  tanggal_bayar, metode_pembayaran_id, payment_method_snapshot, status_verifikasi, is_void, created_at
+           FROM invoice_payments
+           WHERE is_void = 0
+           ORDER BY id ASC`
+        )
+        .all() as any[];
+      for (const p of pays) {
+        const oKey = String(p.order_no || "").trim().toUpperCase();
+        const iKey = String(p.invoice_no || "").trim().toUpperCase();
+        if (oKey) activePaymentOrders.add(oKey);
+        if (iKey) activePaymentInvoices.add(iKey);
+
+        if (String(p.status_verifikasi || "").trim().toUpperCase() === "TERVERIFIKASI") {
+          if (oKey) {
+            const arr = verifiedPaysByOrder.get(oKey) || [];
+            arr.push(p);
+            verifiedPaysByOrder.set(oKey, arr);
+          }
+          if (iKey) {
+            const arr = verifiedPaysByInvoice.get(iKey) || [];
+            arr.push(p);
+            verifiedPaysByInvoice.set(iKey, arr);
+          }
+        }
+      }
+    } catch (err: any) {
+      throw new ApiError(
+        500,
+        "PROFIT_QUERY_FAILED",
+        `Gagal membaca data pembayaran untuk kalkulasi profit: ${err?.message || String(err)}`
+      );
+    }
+
+    const filterMethodId =
+      filters?.paymentMethodId && filters.paymentMethodId !== "ALL"
+        ? filters.paymentMethodId.trim()
+        : undefined;
+    const filterStartDate = filters?.startDate?.trim() || undefined;
+    const filterEndDate = filters?.endDate?.trim() || undefined;
+    const filterCategory =
+      filters?.category && filters.category !== "ALL" ? filters.category.trim() : undefined;
+
     return invoices
-      .filter((inv) => !this.isQuarantinedInvoice(inv))
+      .filter((inv) => {
+        if (this.isQuarantinedInvoice(inv)) return false;
+        const invStatus = String(inv.status || "").trim().toUpperCase();
+        const invBilling = String((inv as any).billingStatus || "").trim().toUpperCase();
+        if (invStatus === "CANCELLED" || invBilling === "CANCELLED" || Boolean((inv as any).isCancelled)) {
+          return false;
+        }
+        const ordKey = String(inv.orderNo || "").trim().toUpperCase();
+        if (ordKey && cancelledOrderNos.has(ordKey)) {
+          return false;
+        }
+        return true;
+      })
       .map((inv, idx) => {
         const total = Number(inv.totalTagihan ?? (inv as any).total_tagihan ?? 0);
         const paid = Number(inv.dibayar ?? (inv as any).terbayar ?? 0);
@@ -215,7 +369,9 @@ export class DbFinanceRepository {
         );
 
         const costVerificationStatus = String(
-          inv.costVerificationStatus || (inv as any).cost_verification_status || ((inv as any).isCostVerified ? "VERIFIED" : "VERIFIED")
+          inv.costVerificationStatus ||
+          (inv as any).cost_verification_status ||
+          (inv.isDraftEstimate || (inv as any).isCostVerified === false ? "PENDING_VERIFICATION" : "VERIFIED")
         );
 
         let costClassification = inv.costClassification;
@@ -262,45 +418,219 @@ export class DbFinanceRepository {
           profit = Math.max(0, eligiblePayment - matchedCOGS);
         }
 
-        const bankName = inv.bank || (inv as any).namaBank || ((inv as any).rekening && (inv as any).rekening !== "Cash" ? (inv as any).rekening : "BCA");
-        const isCash = String(inv.metodePembayaran || "").toLowerCase().includes("cash") || String(inv.bank || "").toLowerCase().includes("cash");
-        const metodePencairan = isCash ? "Cash" : "Transfer Bank";
+        const ordKey = String(inv.orderNo || "").trim().toUpperCase();
+        const invKey = String(inv.invoice || (inv as any).invoiceNo || "").trim().toUpperCase();
+
+        // Combine verified payments matched by orderNo or invoiceNo cleanly (dedup by DB payment row id)
+        const combinedVerifiedPays: any[] = [];
+        const seenPayRowIds = new Set<string>();
+        for (const candidate of [
+          ...(ordKey ? verifiedPaysByOrder.get(ordKey) || [] : []),
+          ...(invKey ? verifiedPaysByInvoice.get(invKey) || [] : []),
+        ]) {
+          const rowKey = String(candidate.id ?? candidate.payment_id ?? `${candidate.nominal}:${candidate.tanggal_bayar}`);
+          if (!seenPayRowIds.has(rowKey)) {
+            seenPayRowIds.add(rowKey);
+            combinedVerifiedPays.push(candidate);
+          }
+        }
+
+        const hasAnyPaymentRow =
+          (ordKey && activePaymentOrders.has(ordKey)) || (invKey && activePaymentInvoices.has(invKey));
+
+        const breakdownMap = new Map<string, ProfitPaymentBreakdownEntry>();
+        const addBreakdownSample = (opts: {
+          id?: string | null;
+          snapshot?: unknown;
+          metode?: string | null;
+          namaBank?: string | null;
+          nomorRekening?: string | null;
+          namaPemilikRekening?: string | null;
+          nominal: number;
+          tanggalBayar?: string;
+        }) => {
+          const pm = resolveCanonicalPaymentMethod(opts, paymentMethods);
+          const bankCandidate = String(
+            pm?.bank || (!isPaymentSchemeString(opts.namaBank) ? opts.namaBank : "") || ""
+          ).trim();
+          const metodeCandidate = !isPaymentSchemeString(opts.metode) ? String(opts.metode || "").trim() : "";
+          const isCash = pm ? isCashPaymentMethodRow(pm) : isCashPaymentString(bankCandidate || metodeCandidate);
+
+          const label = pm
+            ? labelMap.get(pm.id)?.displayLabel || pm.nama_metode
+            : formatUnlinkedPaymentMethodLabel({ metode: metodeCandidate, namaBank: bankCandidate });
+          const bucketKey = pm ? pm.id : `UNLINKED:${label.toLowerCase()}`;
+          const existing = breakdownMap.get(bucketKey);
+
+          const namaBankResolved = isCash ? "" : bankCandidate;
+          const acctResolved = isCash ? "" : String(pm?.nomor_rekening || opts.nomorRekening || "").trim();
+          const ownerResolved = isCash ? "" : String(pm?.nama_rekening || opts.namaPemilikRekening || "").trim();
+          const pencairanResolved = isCash
+            ? "Cash"
+            : namaBankResolved || metodeCandidate
+              ? "Transfer Bank"
+              : "-";
+
+          if (existing) {
+            existing.nominal += Number(opts.nominal || 0);
+            existing.count += 1;
+            if (opts.tanggalBayar) existing.tanggalBayar = opts.tanggalBayar;
+          } else {
+            breakdownMap.set(bucketKey, {
+              paymentMethodId: pm ? pm.id : null,
+              paymentMethodLabel: label,
+              paymentMethodStatus: pm ? pm.status : null,
+              metodePencairan: pencairanResolved,
+              namaBank: namaBankResolved,
+              nomorRekening: acctResolved,
+              namaPemilikRekening: ownerResolved,
+              nominal: Number(opts.nominal || 0),
+              count: 1,
+              tanggalBayar: opts.tanggalBayar,
+            });
+          }
+        };
+
+        if (combinedVerifiedPays.length > 0) {
+          for (const p of combinedVerifiedPays) {
+            addBreakdownSample({
+              id: p.metode_pembayaran_id,
+              snapshot: p.payment_method_snapshot,
+              metode: p.metode_pembayaran,
+              namaBank: p.nama_bank,
+              nomorRekening: p.nomor_rekening,
+              nominal: Number(p.nominal || 0),
+              tanggalBayar: p.tanggal_bayar || undefined,
+            });
+          }
+        } else if (paid > 0 && !hasAnyPaymentRow) {
+          // Legacy fallback ONLY when paid > 0 in fixtures without invoice_payments rows
+          addBreakdownSample({
+            id: (inv as any).paymentMethodId || (inv as any).metodePembayaranId || null,
+            snapshot: (inv as any).paymentMethodSnapshot || (inv as any).payment_method_snapshot || null,
+            metode: inv.metodePembayaran,
+            namaBank: inv.bank || (inv as any).namaBank,
+            nomorRekening: (inv as any).nomorRekening || (inv as any).noRekening,
+            namaPemilikRekening: (inv as any).namaPemilikRekening || (inv as any).namaRekening,
+            nominal: paid,
+            tanggalBayar: (inv as any).tanggalBayar || inv.tanggal,
+          });
+        }
+
+        const paymentBreakdown = Array.from(breakdownMap.values());
+        const verifiedPaymentCount =
+          combinedVerifiedPays.length > 0 ? combinedVerifiedPays.length : paid > 0 && !hasAnyPaymentRow ? 1 : 0;
+
+        const primaryEntry =
+          paymentBreakdown.length > 0 ? paymentBreakdown[paymentBreakdown.length - 1] : null;
+        const paymentMethodIds = Array.from(
+          new Set(paymentBreakdown.map((b) => b.paymentMethodId).filter((id): id is string => Boolean(id)))
+        );
+
+        const baseTanggal =
+          inv.tanggal ||
+          ((inv as any).created_at
+            ? String((inv as any).created_at).split("T")[0].split(" ")[0]
+            : new Date().toISOString().split("T")[0]);
+        const latestVerifiedTanggal =
+          (combinedVerifiedPays.length > 0
+            ? combinedVerifiedPays[combinedVerifiedPays.length - 1]?.tanggal_bayar
+            : undefined) ||
+          (inv as any).tanggalBayar ||
+          (inv as any).tanggalUangMasuk ||
+          baseTanggal;
+        const tanggalUangMasuk = paid > 0 ? latestVerifiedTanggal : "";
+        const categoryKey = normalizeProfitCategoryKey(inv.jenisLayanan || (inv as any).layanan);
+
+        let scopedPaid = paid;
+        let scopedEligible = eligiblePayment;
+        let scopedOverpayment = overpayment;
+        let scopedCogs = matchedCOGS;
+        let scopedProfit = profit;
+        let scopedBreakdown = paymentBreakdown;
+        let scopedPrimary = primaryEntry;
+        let scopedMethodIds = paymentMethodIds;
+
+        if (filterStartDate || filterEndDate) {
+          if (!matchesWibDateRange(tanggalUangMasuk || baseTanggal, filterStartDate, filterEndDate)) {
+            return null;
+          }
+        }
+
+        if (filterCategory) {
+          const serviceName = String(inv.jenisLayanan || (inv as any).layanan || "");
+          if (categoryKey !== filterCategory && serviceName !== filterCategory) {
+            return null;
+          }
+        }
+
+        if (filterMethodId) {
+          if (verifiedPaymentCount === 0 || paid <= 0) {
+            return null;
+          }
+          const matchedEntries = paymentBreakdown.filter((b) => b.paymentMethodId === filterMethodId);
+          if (matchedEntries.length === 0) {
+            return null;
+          }
+          const totalBreakdownNominal = paymentBreakdown.reduce((s, b) => s + Number(b.nominal || 0), 0);
+          const matchedNominal = matchedEntries.reduce((s, b) => s + Number(b.nominal || 0), 0);
+          if (paymentBreakdown.length > 1 && totalBreakdownNominal > 0 && matchedNominal < totalBreakdownNominal) {
+            const ratio = matchedNominal / totalBreakdownNominal;
+            scopedPaid = Math.round(paid * ratio);
+            scopedEligible = Math.round(eligiblePayment * ratio);
+            scopedCogs = Math.round(matchedCOGS * ratio);
+            scopedProfit = Math.round(profit * ratio);
+            scopedOverpayment = Math.max(0, scopedPaid - scopedEligible);
+          }
+          scopedBreakdown = matchedEntries;
+          scopedPrimary = matchedEntries[matchedEntries.length - 1];
+          scopedMethodIds = [filterMethodId];
+        }
 
         return {
           id: idx + 1,
-          tanggal: inv.tanggal || ((inv as any).created_at ? String((inv as any).created_at).split("T")[0].split(" ")[0] : new Date().toISOString().split("T")[0]),
-          tanggalUangMasuk: paid > 0 ? ((inv as any).tanggalBayar || (inv as any).tanggalUangMasuk || inv.tanggal) : "",
+          orderNo: inv.orderNo,
+          tanggal: baseTanggal,
+          tanggalUangMasuk,
           customer: inv.customer,
           nopol: inv.nopol,
-          pengurusan: inv.jenisLayanan || inv.layanan,
-          uangMasuk: paid,
+          pengurusan: inv.jenisLayanan || (inv as any).layanan,
+          categoryKey,
+          uangMasuk: scopedPaid,
           totalTagihan: total,
-          eligiblePayment,
-          overpayment,
+          eligiblePayment: scopedEligible,
+          overpayment: scopedOverpayment,
           biayaSamsat: rawBiayaSamsat,
-          matchedCOGS,
-          profit,
-          grossProfit: profit,
-          pendapatanJasa: profit,
-          labaKotor: profit,
+          matchedCOGS: scopedCogs,
+          profit: scopedProfit,
+          grossProfit: scopedProfit,
+          pendapatanJasa: scopedProfit,
+          labaKotor: scopedProfit,
           namaBerkas: (inv as any).namaBerkas || inv.customer,
-          rekening: isCash ? "Cash" : bankName,
-          metodePencairan,
-          metodePembayaran: inv.metodePembayaran || (isCash ? "Cash" : "Transfer Bank"),
-          namaBank: isCash ? "" : bankName,
-          nomorRekening: (inv as any).nomorRekening || (inv as any).noRekening || (isCash ? "" : "772-019-2831"),
-          namaPemilikRekening: (inv as any).namaPemilikRekening || (inv as any).namaRekening || "PT Biro Jasa SUN89 Abadi",
+          paymentMethodId: scopedPrimary ? scopedPrimary.paymentMethodId : null,
+          paymentMethodIds: scopedMethodIds,
+          paymentMethodLabel: scopedPrimary ? scopedPrimary.paymentMethodLabel : null,
+          paymentMethodStatus: scopedPrimary ? scopedPrimary.paymentMethodStatus : null,
+          verifiedPaymentCount,
+          paymentBreakdown: scopedBreakdown,
+          rekening: scopedPrimary ? scopedPrimary.paymentMethodLabel : "Belum Dibayar",
+          metodePencairan: scopedPrimary ? scopedPrimary.metodePencairan : "-",
+          metodePembayaran: scopedPrimary ? scopedPrimary.paymentMethodLabel : "-",
+          namaBank: scopedPrimary ? scopedPrimary.namaBank : "",
+          nomorRekening: scopedPrimary ? scopedPrimary.nomorRekening : "",
+          namaPemilikRekening: scopedPrimary ? scopedPrimary.namaPemilikRekening : "",
           tanggalTTB: inv.tanggal,
           ttb: (inv as any).ttb || "-",
           status: inv.status,
-          invoice: inv.invoice || inv.invoiceNo || "-",
+          invoice: inv.invoice || (inv as any).invoiceNo || "-",
           isExplicitZero,
           costClassification,
           isFinancialAnomaly: isAnomaly,
           anomalyReason,
           holdStatus,
         };
-      });
+      })
+      .filter((row): row is NonNullable<typeof row> => row !== null);
   }
 
   public getCanonicalLabaRugiSummary(
@@ -376,27 +706,45 @@ export class DbFinanceRepository {
     }
 
     const existing = existingByOrder || existingByNo;
-    const biayaSamsat = Number(invoice.biayaSamsat ?? (existing as any)?.biayaSamsat ?? 0);
-    const totalTagihan = Number(invoice.totalTagihan ?? (existing as any)?.totalTagihan ?? 0);
-    const dibayar = Number(invoice.dibayar ?? invoice.terbayar ?? (existing as any)?.dibayar ?? 0);
-    const sisa = Number(invoice.sisa ?? Math.max(0, totalTagihan - dibayar));
+    const isExistingCancelled =
+      String((existing as any)?.status || "").trim().toUpperCase() === "CANCELLED" ||
+      String((existing as any)?.billingStatus || "").trim().toUpperCase() === "CANCELLED";
+
+    const biayaSamsat = isExistingCancelled
+      ? Number((existing as any)?.biayaSamsat ?? invoice.biayaSamsat ?? 0)
+      : Number(invoice.biayaSamsat ?? (existing as any)?.biayaSamsat ?? 0);
+    const totalTagihan = isExistingCancelled
+      ? Number((existing as any)?.totalTagihan ?? invoice.totalTagihan ?? 0)
+      : Number(invoice.totalTagihan ?? (existing as any)?.totalTagihan ?? 0);
+    const dibayar = isExistingCancelled
+      ? Number((existing as any)?.dibayar ?? (existing as any)?.terbayar ?? 0)
+      : Number(invoice.dibayar ?? invoice.terbayar ?? (existing as any)?.dibayar ?? 0);
+    const sisa = isExistingCancelled
+      ? Number((existing as any)?.sisa ?? 0)
+      : Number(invoice.sisa ?? Math.max(0, totalTagihan - dibayar));
     const pendapatanJasa = Math.max(0, totalTagihan - biayaSamsat);
-    const overpayment = Number(
-      invoice.overpayment !== undefined
-        ? invoice.overpayment
-        : ((existing as any)?.overpayment !== undefined && dibayar === Number((existing as any)?.dibayar)
-            ? (existing as any).overpayment
-            : Math.max(0, dibayar - totalTagihan))
-    );
-    const settlementCondition = (
-      invoice.settlementCondition ||
-      (overpayment > 0 ? "OVERPAID" : (dibayar >= totalTagihan && totalTagihan > 0 ? "BALANCED" : "UNDERPAID"))
-    ) as string;
-    const refundStatus = (
-      invoice.refundStatus ||
-      (existing as any)?.refundStatus ||
-      (overpayment > 0 ? "PENDING" : "NONE")
-    ) as string;
+    const overpayment = isExistingCancelled
+      ? Number((existing as any)?.overpayment ?? 0)
+      : Number(
+          invoice.overpayment !== undefined
+            ? invoice.overpayment
+            : ((existing as any)?.overpayment !== undefined && dibayar === Number((existing as any)?.dibayar)
+                ? (existing as any).overpayment
+                : Math.max(0, dibayar - totalTagihan))
+        );
+    const settlementCondition = isExistingCancelled
+      ? ((existing as any)?.settlementCondition ?? invoice.settlementCondition ?? (overpayment > 0 ? "OVERPAID" : "UNDERPAID"))
+      : (
+          invoice.settlementCondition ||
+          (overpayment > 0 ? "OVERPAID" : (dibayar >= totalTagihan && totalTagihan > 0 ? "BALANCED" : "UNDERPAID"))
+        ) as string;
+    const refundStatus = isExistingCancelled
+      ? ((existing as any)?.refundStatus || invoice.refundStatus || (overpayment > 0 ? "PENDING" : "NONE"))
+      : (
+          invoice.refundStatus ||
+          (existing as any)?.refundStatus ||
+          (overpayment > 0 ? "PENDING" : "NONE")
+        ) as string;
     const cashbackNominal = Number(invoice.cashback ?? (existing as any)?.cashback ?? 0);
     const cashbackStatus = (invoice.cashbackStatus || (existing as any)?.cashbackStatus || (cashbackNominal > 0 ? "PENDING" : "APPROVED")) as string;
     
@@ -417,29 +765,120 @@ export class DbFinanceRepository {
     const namaPenerimaKeluar = (invoice as any).namaPenerimaKeluar || (existing as any)?.namaPenerimaKeluar || null;
     const alasanPending = (invoice as any).alasan_pending || (invoice as any).alasan || (existing as any)?.alasan_pending || (existing as any)?.alasan || null;
     const serviceId = (invoice as any).serviceId || (invoice as any).service_id || (existing as any)?.serviceId || (existing as any)?.service_id || null;
-    const costVerificationStatus = (invoice as any).costVerificationStatus || (invoice as any).cost_verification_status || (existing as any)?.costVerificationStatus || (existing as any)?.cost_verification_status || "VERIFIED";
+    const explicitCostVerificationStatus =
+      (invoice as any).costVerificationStatus || (invoice as any).cost_verification_status;
+    const explicitIsDraft =
+      (invoice as any).isDraftEstimate !== undefined
+        ? Boolean((invoice as any).isDraftEstimate)
+        : ((invoice as any).is_draft_estimate !== undefined
+            ? Boolean((invoice as any).is_draft_estimate)
+            : undefined);
+    const explicitCompleteness =
+      (invoice as any).costCompletenessStatus || (invoice as any).cost_completeness_status;
+    const explicitCostVerified =
+      (invoice as any).isCostVerified !== undefined
+        ? Boolean((invoice as any).isCostVerified)
+        : ((invoice as any).is_cost_verified !== undefined
+            ? Boolean((invoice as any).is_cost_verified)
+            : undefined);
+
+    let linkedOrderIsPartial = false;
+    if (!existing && explicitCostVerificationStatus === undefined && explicitIsDraft === undefined) {
+      try {
+        const orderRow = db
+          .prepare("SELECT is_cost_verified, cost_completeness_status, data_json FROM orders WHERE UPPER(order_no) = UPPER(?)")
+          .get(invoice.orderNo) as any;
+        if (orderRow) {
+          let parsedOrder: any = {};
+          try {
+            parsedOrder = JSON.parse(orderRow.data_json || "{}");
+          } catch {}
+          const orderCompleteness = String(
+            orderRow.cost_completeness_status || parsedOrder.costCompletenessStatus || ""
+          ).toUpperCase();
+          const orderVerified =
+            orderRow.is_cost_verified !== null && orderRow.is_cost_verified !== undefined
+              ? Boolean(orderRow.is_cost_verified)
+              : parsedOrder.isCostVerified;
+          if (orderCompleteness === "PARTIAL_ESTIMATE" || orderVerified === false) {
+            linkedOrderIsPartial = true;
+          }
+        }
+      } catch {
+        // Non-fatal if orders table is not present in standalone unit tests
+      }
+    }
+
+    const inferredPartial =
+      explicitIsDraft === true ||
+      explicitCompleteness === "PARTIAL_ESTIMATE" ||
+      explicitCostVerified === false ||
+      linkedOrderIsPartial;
+
+    const costVerificationStatus =
+      explicitCostVerificationStatus ||
+      (inferredPartial
+        ? "PENDING_VERIFICATION"
+        : ((existing as any)?.costVerificationStatus || (existing as any)?.cost_verification_status || "VERIFIED"));
     const isExplicitZero = (invoice as any).isExplicitZero !== undefined
       ? ((invoice as any).isExplicitZero ? 1 : 0)
       : ((invoice as any).is_explicit_zero !== undefined
           ? ((invoice as any).is_explicit_zero ? 1 : 0)
           : ((invoice as any).isZeroCostPromotion ? 1 : ((existing as any)?.isExplicitZero ? 1 : 0)));
-    const isDraftEstimate = (invoice as any).isDraftEstimate !== undefined
-      ? ((invoice as any).isDraftEstimate ? 1 : 0)
-      : ((invoice as any).is_draft_estimate !== undefined
-          ? ((invoice as any).is_draft_estimate ? 1 : 0)
-          : ((existing as any)?.isDraftEstimate ? 1 : 0));
+    const isDraftEstimate =
+      explicitIsDraft !== undefined
+        ? (explicitIsDraft ? 1 : 0)
+        : (inferredPartial
+            ? 1
+            : (existing
+                ? ((existing as any)?.isDraftEstimate ? 1 : 0)
+                : (costVerificationStatus === "PENDING_VERIFICATION" ? 1 : 0)));
 
     if (existing) {
-      const merged: InvoiceBillingRecord = {
-        ...existing,
-        ...invoice,
-        costVerificationStatus,
-        cost_verification_status: costVerificationStatus,
-        isDraftEstimate: Boolean(isDraftEstimate),
-        is_draft_estimate: isDraftEstimate,
-        serviceId: serviceId || undefined,
-        service_id: serviceId || undefined
-      } as any;
+      const merged: InvoiceBillingRecord = (isExistingCancelled
+        ? {
+            ...existing,
+            ...invoice,
+            status: "CANCELLED",
+            billingStatus: "CANCELLED",
+            totalTagihan,
+            biayaSamsat,
+            pendapatanJasa,
+            dibayar,
+            sisa,
+            overpayment,
+            refundLiability: (existing as any)?.refundLiability,
+            refundStatus,
+            settlementCondition,
+            payoutHistory: (existing as any)?.payoutHistory,
+            payoutVersion: (existing as any)?.payoutVersion ?? 0,
+            refundedAmount: (existing as any)?.refundedAmount,
+            remainingRefund: (existing as any)?.remainingRefund,
+            refundProcessedAt: (existing as any)?.refundProcessedAt,
+            refundProcessedBy: (existing as any)?.refundProcessedBy,
+            refundProof: (existing as any)?.refundProof,
+            refundAccount: (existing as any)?.refundAccount,
+            profit: (existing as any)?.profit ?? profitFinal,
+            profitStatus: (existing as any)?.profitStatus ?? profitStatus,
+            costVerificationStatus,
+            cost_verification_status: costVerificationStatus,
+            isDraftEstimate: Boolean(isDraftEstimate),
+            is_draft_estimate: isDraftEstimate,
+            serviceId: serviceId || undefined,
+            service_id: serviceId || undefined
+          }
+        : {
+            ...existing,
+            ...invoice,
+            costVerificationStatus,
+            cost_verification_status: costVerificationStatus,
+            isDraftEstimate: Boolean(isDraftEstimate),
+            is_draft_estimate: isDraftEstimate,
+            serviceId: serviceId || undefined,
+            service_id: serviceId || undefined
+          }) as any;
+      const effectiveProfitFinal = isExistingCancelled ? Number((existing as any)?.profit ?? profitFinal) : profitFinal;
+      const effectiveProfitStatus = isExistingCancelled ? ((existing as any)?.profitStatus ?? profitStatus) : profitStatus;
       const stmt = db.prepare(`
         UPDATE finance_invoices SET
           invoice_no = ?,
@@ -476,7 +915,7 @@ export class DbFinanceRepository {
         merged.orderNo || invoice.orderNo,
         merged.customer || "",
         merged.layanan || "",
-        merged.status || "UNPAID",
+        isExistingCancelled ? "CANCELLED" : (merged.status || "UNPAID"),
         totalTagihan,
         dibayar,
         sisa,
@@ -487,8 +926,8 @@ export class DbFinanceRepository {
         refundStatus,
         cashbackNominal,
         cashbackStatus,
-        profitFinal,
-        profitStatus,
+        effectiveProfitFinal,
+        effectiveProfitStatus,
         biayaJasa,
         biayaAntarJemput,
         namaPenerimaKeluar ?? null,
@@ -563,7 +1002,7 @@ export class DbFinanceRepository {
     }
 
     const insertedId = Number(res.lastInsertRowid);
-    const completeRecord = { ...invoice, id: insertedId };
+    const completeRecord = { ...invoiceWithFlags, id: insertedId };
     db.prepare("UPDATE finance_invoices SET data_json = ? WHERE id = ?").run(
       JSON.stringify(completeRecord),
       insertedId
@@ -575,27 +1014,58 @@ export class DbFinanceRepository {
     const existing = this.getInvoiceById(id);
     if (!existing) return false;
 
-    const resolvedStatus = updates.status || (updates as any).billingStatus || existing.status;
+    const isExistingCancelled =
+      String(existing.status || "").trim().toUpperCase() === "CANCELLED" ||
+      String((existing as any).billingStatus || "").trim().toUpperCase() === "CANCELLED";
+    const isCorrectionVoidReset =
+      isExistingCancelled &&
+      updates.status === "CANCELLED" &&
+      (updates as any).billingStatus === "CANCELLED" &&
+      updates.dibayar === 0 &&
+      updates.overpayment === 0;
+
+    const resolvedStatus = isExistingCancelled
+      ? "CANCELLED"
+      : (updates.status || (updates as any).billingStatus || existing.status);
     const merged: InvoiceBillingRecord = {
       ...existing,
       ...updates,
       status: resolvedStatus,
-      billingStatus: resolvedStatus === "CANCELLED" ? ("CANCELLED" as any) : ((updates as any).billingStatus || existing.billingStatus || resolvedStatus),
+      billingStatus: isExistingCancelled
+        ? ("CANCELLED" as any)
+        : (resolvedStatus === "CANCELLED" ? ("CANCELLED" as any) : ((updates as any).billingStatus || existing.billingStatus || resolvedStatus)),
+      ...(isExistingCancelled && !isCorrectionVoidReset
+        ? {
+            totalTagihan: Number(existing.totalTagihan || 0),
+            biayaSamsat: Number(existing.biayaSamsat || 0),
+            dibayar: Number(existing.dibayar ?? existing.terbayar ?? 0),
+            sisa: Number(existing.sisa ?? 0),
+            overpayment: Number(existing.overpayment ?? 0),
+            refundLiability: (existing as any).refundLiability ?? (updates as any).refundLiability,
+            payoutVersion: updates.payoutVersion !== undefined ? updates.payoutVersion : (existing as any).payoutVersion,
+            profit: existing.profit,
+            profitStatus: existing.profitStatus,
+          }
+        : {}),
     };
-    const totalTagihan = Number(merged.totalTagihan || 0);
+    const totalTagihan = isExistingCancelled ? Number(merged.totalTagihan || 0) : Number(merged.totalTagihan || 0);
     const dibayar = Number(merged.dibayar ?? merged.terbayar ?? 0);
     const sisa = Number(merged.sisa ?? Math.max(0, totalTagihan - dibayar));
     const biayaSamsat = Number(merged.biayaSamsat || 0);
     const pendapatanJasa = Math.max(0, totalTagihan - biayaSamsat);
-    const overpayment = Number(
-      updates.overpayment !== undefined
-        ? updates.overpayment
-        : (merged.overpayment !== undefined ? merged.overpayment : Math.max(0, dibayar - totalTagihan))
-    );
-    const settlementCondition = (
-      updates.settlementCondition ||
-      (overpayment > 0 ? "OVERPAID" : (dibayar >= totalTagihan && totalTagihan > 0 ? "BALANCED" : "UNDERPAID"))
-    ) as string;
+    const overpayment = isExistingCancelled && !isCorrectionVoidReset
+      ? Number(existing.overpayment ?? 0)
+      : Number(
+          updates.overpayment !== undefined
+            ? updates.overpayment
+            : (merged.overpayment !== undefined ? merged.overpayment : Math.max(0, dibayar - totalTagihan))
+        );
+    const settlementCondition = isExistingCancelled && !isCorrectionVoidReset
+      ? (updates.settlementCondition || existing.settlementCondition || (overpayment > 0 ? "OVERPAID" : "UNDERPAID")) as string
+      : (
+          updates.settlementCondition ||
+          (overpayment > 0 ? "OVERPAID" : (dibayar >= totalTagihan && totalTagihan > 0 ? "BALANCED" : "UNDERPAID"))
+        ) as string;
     const refundStatus = (
       updates.refundStatus ||
       existing.refundStatus ||
@@ -603,17 +1073,46 @@ export class DbFinanceRepository {
     ) as string;
     const cashbackNominal = Number(merged.cashback || 0);
     const cashbackStatus = (merged.cashbackStatus || (cashbackNominal > 0 ? "PENDING" : "APPROVED")) as string;
+    const cashbackCompletionStatus = (
+      updates.cashbackCompletionStatus ??
+      (merged as any).cashbackCompletionStatus ??
+      "PENDING"
+    ) as string;
+    const cashbackCompletedAt =
+      updates.cashbackCompletedAt !== undefined
+        ? updates.cashbackCompletedAt
+        : (merged as any).cashbackCompletedAt ?? null;
+    const cashbackCompletedBy =
+      updates.cashbackCompletedBy !== undefined
+        ? updates.cashbackCompletedBy
+        : (merged as any).cashbackCompletedBy ?? null;
 
     // Profit must strictly exclude overpayment / trust funds (capped at recognized revenue)
     const recognizedRevenue = Math.min(dibayar, totalTagihan);
     const maxProfit = Math.max(0, recognizedRevenue - biayaSamsat);
-    const profitFinal = updates.profit !== undefined
-      ? Math.min(Number(updates.profit), maxProfit)
-      : (merged.profit !== undefined ? Math.min(Number(merged.profit), maxProfit) : maxProfit);
-    const profitStatus = (updates.profitStatus || (updates as any).profit_status || (updates.billingStatus === "COMPLETED" ? "REALIZED" : (existing.profitStatus || "PENDING"))) as string;
+    const profitFinal = isExistingCancelled && !isCorrectionVoidReset
+      ? Number(existing.profit ?? maxProfit)
+      : (updates.profit !== undefined
+          ? Math.min(Number(updates.profit), maxProfit)
+          : (merged.profit !== undefined ? Math.min(Number(merged.profit), maxProfit) : maxProfit));
+    const profitStatus = isExistingCancelled && !isCorrectionVoidReset
+      ? ((existing.profitStatus || (existing as any).profit_status || "PENDING") as string)
+      : ((updates.profitStatus || (updates as any).profit_status || (updates.billingStatus === "COMPLETED" ? "REALIZED" : (existing.profitStatus || "PENDING"))) as string);
     const alasanPending = (updates as any).alasan_pending || (updates as any).alasan || (existing as any).alasan_pending || (existing as any).alasan || null;
     const serviceId = (updates as any).serviceId || (updates as any).service_id || (existing as any).serviceId || (existing as any).service_id || null;
     const resolvedLayanan = updates.layanan || existing.layanan;
+
+    merged.totalTagihan = totalTagihan;
+    merged.dibayar = dibayar;
+    merged.sisa = sisa;
+    merged.biayaSamsat = biayaSamsat;
+    merged.overpayment = overpayment;
+    merged.settlementCondition = settlementCondition as any;
+    merged.refundStatus = refundStatus as any;
+    merged.profit = profitFinal;
+    merged.profitStatus = profitStatus as any;
+
+    ensureCashbackCompletionColumns();
 
     const stmt = db.prepare(`
       UPDATE finance_invoices SET
@@ -629,6 +1128,9 @@ export class DbFinanceRepository {
         refund_status = ?,
         cashback_nominal = ?,
         cashback_status = ?,
+        cashback_completion_status = ?,
+        cashback_completed_at = ?,
+        cashback_completed_by = ?,
         profit_final = ?,
         profit_status = ?,
         alasan_pending = ?,
@@ -650,10 +1152,20 @@ export class DbFinanceRepository {
       refundStatus,
       cashbackNominal,
       cashbackStatus,
+      cashbackCompletionStatus,
+      cashbackCompletedAt ?? null,
+      cashbackCompletedBy ?? null,
       profitFinal,
       profitStatus,
       alasanPending ?? null,
-      JSON.stringify({ ...merged, serviceId: serviceId || undefined, service_id: serviceId || undefined }),
+      JSON.stringify({
+        ...merged,
+        cashbackCompletionStatus,
+        cashbackCompletedAt: cashbackCompletedAt || undefined,
+        cashbackCompletedBy: cashbackCompletedBy || undefined,
+        serviceId: serviceId || undefined,
+        service_id: serviceId || undefined,
+      }),
       id
     );
 
@@ -1068,6 +1580,58 @@ export class DbFinanceRepository {
     } as unknown as KasKantorItem;
   }
 
+  public updateKasKantor(
+    id: number,
+    updates: {
+      tanggal: string;
+      keterangan: string;
+      status: string;
+      debit: number;
+      kredit: number;
+      penanggungJawab?: string | null;
+      kategori?: string | null;
+      orderNo?: string | null;
+      invoiceNo?: string | null;
+      payment_method_id?: string | null;
+      payment_method_snapshot?: string | null;
+    },
+    targetDb?: DatabaseSync
+  ): KasKantorItem | undefined {
+    const activeDb = targetDb ?? getDb();
+    const res = activeDb.prepare(`
+      UPDATE kas_kantor SET
+        tanggal = ?,
+        keterangan = ?,
+        status = ?,
+        debit = ?,
+        kredit = ?,
+        penanggung_jawab = ?,
+        kategori = ?,
+        order_no = ?,
+        invoice_no = ?,
+        payment_method_id = ?,
+        payment_method_snapshot = ?
+      WHERE id = ?
+    `).run(
+      updates.tanggal,
+      updates.keterangan,
+      updates.status,
+      updates.debit,
+      updates.kredit,
+      updates.penanggungJawab ?? null,
+      updates.kategori ?? null,
+      updates.orderNo ?? null,
+      updates.invoiceNo ?? null,
+      updates.payment_method_id ?? null,
+      updates.payment_method_snapshot ?? null,
+      id
+    );
+
+    if (res.changes === 0) return undefined;
+    recalculateKasKantorRunningBalances(activeDb);
+    return this.getKasKantorById(id, activeDb);
+  }
+
   public getAllPengeluaran(): PengeluaranItem[] {
     const stmt = db.prepare("SELECT * FROM pengeluaran ORDER BY substr(tanggal, 1, 10) DESC, created_at DESC, id DESC");
     const rows = stmt.all() as any[];
@@ -1340,6 +1904,68 @@ export class DbFinanceRepository {
     } as KasMessengerItem;
   }
 
+  public updateKasMessenger(
+    id: number,
+    updates: {
+      tanggal: string;
+      jenis: string;
+      messenger: string;
+      messengerId: string | null;
+      keterangan: string;
+      debit: number;
+      kredit: number;
+      penanggungJawab?: string | null;
+      orderNo?: string | null;
+      kategori?: string | null;
+      payment_method_id?: string | null;
+      payment_method_snapshot?: string | null;
+    },
+    previousMessengerId?: string | null,
+    targetDb?: DatabaseSync
+  ): KasMessengerItem | undefined {
+    const activeDb = targetDb ?? getDb();
+    const res = activeDb.prepare(`
+      UPDATE kas_messenger SET
+        tanggal = ?,
+        jenis = ?,
+        messenger = ?,
+        messenger_id = ?,
+        keterangan = ?,
+        debit = ?,
+        kredit = ?,
+        penanggung_jawab = ?,
+        order_no = ?,
+        kategori = ?,
+        payment_method_id = ?,
+        payment_method_snapshot = ?
+      WHERE id = ?
+    `).run(
+      updates.tanggal,
+      updates.jenis,
+      updates.messenger,
+      updates.messengerId ?? null,
+      updates.keterangan,
+      updates.debit,
+      updates.kredit,
+      updates.penanggungJawab ?? null,
+      updates.orderNo ?? null,
+      updates.kategori ?? null,
+      updates.payment_method_id ?? null,
+      updates.payment_method_snapshot ?? null,
+      id
+    );
+
+    if (res.changes === 0) return undefined;
+
+    if (previousMessengerId && previousMessengerId !== updates.messengerId) {
+      recalculateKasMessengerRunningBalances(previousMessengerId, activeDb);
+    }
+    if (updates.messengerId) {
+      recalculateKasMessengerRunningBalances(updates.messengerId, activeDb);
+    }
+    return this.getKasMessengerById(id, activeDb);
+  }
+
   public deleteKasMessenger(id: number): boolean {
     // Non-destructive compensating reversal (Workstream 3 & C1.0.1 Invariant)
     const existing = db.prepare("SELECT * FROM kas_messenger WHERE id = ?").get(id) as any;
@@ -1434,6 +2060,325 @@ export class DbFinanceRepository {
       VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
     `);
     stmt.run(data.key, data.scope, data.user_id || null, data.request_hash, data.resource_id || null, data.response_json);
+  }
+
+  /**
+   * Read-only integrity & reconciliation audit across orders, finance_invoices, and invoice_payments.
+   * Zero database writes. Used for diagnostics, audit reports, and regression assertions.
+   */
+  public getOrderInvoiceReconciliationReport(): {
+    missingInvoicesForOrders: Array<{ orderNo: string; orderInvoiceNo: string | null }>;
+    orderInvoiceMismatches: Array<{ orderNo: string; orderInvoiceNo: string; invoiceOrderNo: string }>;
+    totalAmountMismatches: Array<{ orderNo: string; invoiceNo: string; orderTotal: number; invoiceTotal: number }>;
+    cancelledStatusMismatches: Array<{ orderNo: string; invoiceNo: string; invoiceStatus: string }>;
+    understatedCogsInvoices: Array<{ orderNo: string; invoiceNo: string; biayaSamsat: number; pkbSwdklljSum: number }>;
+    verifiedPaymentsMissingKasKantor: Array<{ paymentId: number; orderNo: string; invoiceNo: string; nominal: number }>;
+    duplicatePendingPayments: Array<{ orderNo: string; invoiceNo: string; nominal: number; count: number }>;
+  } {
+    const orders = db.prepare("SELECT order_no, total_biaya, current_stage_name, payment_status, data_json FROM orders").all() as any[];
+    const invoices = db.prepare("SELECT id, invoice_no, order_no, status, total_tagihan, biaya_samsat, data_json FROM finance_invoices").all() as any[];
+    const payments = db.prepare("SELECT id, order_no, invoice_no, nominal, status_verifikasi, kas_kantor_id, is_void FROM invoice_payments").all() as any[];
+
+    const invByOrder = new Map<string, any>();
+    const invByNo = new Map<string, any>();
+    for (const inv of invoices) {
+      if (inv.order_no) invByOrder.set(String(inv.order_no).trim().toUpperCase(), inv);
+      if (inv.invoice_no) invByNo.set(String(inv.invoice_no).trim().toUpperCase(), inv);
+    }
+
+    const missingInvoicesForOrders: Array<{ orderNo: string; orderInvoiceNo: string | null }> = [];
+    const orderInvoiceMismatches: Array<{ orderNo: string; orderInvoiceNo: string; invoiceOrderNo: string }> = [];
+    const totalAmountMismatches: Array<{ orderNo: string; invoiceNo: string; orderTotal: number; invoiceTotal: number }> = [];
+    const cancelledStatusMismatches: Array<{ orderNo: string; invoiceNo: string; invoiceStatus: string }> = [];
+    const understatedCogsInvoices: Array<{ orderNo: string; invoiceNo: string; biayaSamsat: number; pkbSwdklljSum: number }> = [];
+
+    for (const o of orders) {
+      const oKey = String(o.order_no || "").trim().toUpperCase();
+      let parsedOrder: any = {};
+      try { parsedOrder = o.data_json ? JSON.parse(o.data_json) : {}; } catch {}
+      const orderInvNo = parsedOrder.noInvoice || parsedOrder.payment?.invoiceNo || null;
+      const linkedInv = invByOrder.get(oKey);
+
+      if (!linkedInv) {
+        missingInvoicesForOrders.push({ orderNo: o.order_no, orderInvoiceNo: orderInvNo });
+      }
+      if (orderInvNo) {
+        const invWithNo = invByNo.get(String(orderInvNo).trim().toUpperCase());
+        if (invWithNo && String(invWithNo.order_no || "").trim().toUpperCase() !== oKey) {
+          orderInvoiceMismatches.push({
+            orderNo: o.order_no,
+            orderInvoiceNo: String(orderInvNo),
+            invoiceOrderNo: String(invWithNo.order_no),
+          });
+        }
+      }
+      if (linkedInv) {
+        const orderTotal = Number(o.total_biaya || parsedOrder.payment?.totalBiaya || 0);
+        const invoiceTotal = Number(linkedInv.total_tagihan || 0);
+        if (Math.abs(orderTotal - invoiceTotal) > 0) {
+          totalAmountMismatches.push({
+            orderNo: o.order_no,
+            invoiceNo: linkedInv.invoice_no,
+            orderTotal,
+            invoiceTotal,
+          });
+        }
+
+        const isOrdCancelled =
+          o.current_stage_name === "Dibatalkan" ||
+          o.payment_status === "Dibatalkan" ||
+          Boolean(parsedOrder.isCancelled);
+        if (isOrdCancelled && String(linkedInv.status || "").toUpperCase() !== "CANCELLED") {
+          cancelledStatusMismatches.push({
+            orderNo: o.order_no,
+            invoiceNo: linkedInv.invoice_no,
+            invoiceStatus: String(linkedInv.status || ""),
+          });
+        }
+
+        const canonicalCogs = resolveCanonicalSamsatCogs(parsedOrder);
+        const taxSum = Math.max(
+          canonicalCogs.biayaSamsat,
+          Number(parsedOrder.pkb || 0) +
+            Number(parsedOrder.swdkllj || 0) +
+            Number(parsedOrder.dendaSwdkllj || 0)
+        );
+        const biayaSamsat = Number(linkedInv.biaya_samsat || 0);
+        if (taxSum > biayaSamsat) {
+          understatedCogsInvoices.push({
+            orderNo: o.order_no,
+            invoiceNo: linkedInv.invoice_no,
+            biayaSamsat,
+            pkbSwdklljSum: taxSum,
+          });
+        }
+      }
+    }
+
+    const verifiedPaymentsMissingKasKantor: Array<{ paymentId: number; orderNo: string; invoiceNo: string; nominal: number }> = [];
+    const pendingBuckets = new Map<string, number>();
+
+    for (const p of payments) {
+      if (Number(p.is_void) === 1) continue;
+      const st = String(p.status_verifikasi || "").toUpperCase();
+      if (st === "TERVERIFIKASI" && !p.kas_kantor_id) {
+        verifiedPaymentsMissingKasKantor.push({
+          paymentId: Number(p.id),
+          orderNo: String(p.order_no || ""),
+          invoiceNo: String(p.invoice_no || ""),
+          nominal: Number(p.nominal || 0),
+        });
+      }
+      if (st === "MENUNGGU_BUKTI" || st === "MENUNGGU_VERIFIKASI") {
+        const bKey = `${String(p.order_no || "").toUpperCase()}|${String(p.invoice_no || "").toUpperCase()}|${Number(p.nominal || 0)}`;
+        pendingBuckets.set(bKey, (pendingBuckets.get(bKey) || 0) + 1);
+      }
+    }
+
+    const duplicatePendingPayments: Array<{ orderNo: string; invoiceNo: string; nominal: number; count: number }> = [];
+    for (const [bKey, count] of pendingBuckets.entries()) {
+      if (count > 1) {
+        const [orderNo, invoiceNo, nominalStr] = bKey.split("|");
+        duplicatePendingPayments.push({ orderNo, invoiceNo, nominal: Number(nominalStr), count });
+      }
+    }
+
+    return {
+      missingInvoicesForOrders,
+      orderInvoiceMismatches,
+      totalAmountMismatches,
+      cancelledStatusMismatches,
+      understatedCogsInvoices,
+      verifiedPaymentsMissingKasKantor,
+      duplicatePendingPayments,
+    };
+  }
+
+  public getCashLedgerReconciliation(targetDb?: DatabaseSync) {
+    const activeDb = targetDb ?? getDb();
+
+    // 1. Kas Kantor chronological ledger & running balance verification
+    const kkRows = activeDb.prepare(`
+      SELECT id, tanggal, status, debit, kredit, saldo, kategori, keterangan
+      FROM kas_kantor
+      ORDER BY substr(tanggal, 1, 10) ASC, created_at ASC, id ASC
+    `).all() as any[];
+
+    let kkOpeningCapital = 0;
+    let kkExternalInflows = 0;
+    let kkInternalTransfersIn = 0;
+    let kkReversalsIn = 0;
+    let kkOutflows = 0;
+    let kkInternalTransfersOut = 0;
+    let kkRunningExpected = 0;
+    let kkDriftCount = 0;
+
+    for (const r of kkRows) {
+      const d = Number(r.debit || 0);
+      const k = Number(r.kredit || 0);
+      const kat = String(r.kategori || "").toUpperCase();
+      const ket = String(r.keterangan || "").toUpperCase();
+
+      if (kat === "MODAL_AWAL") {
+        kkOpeningCapital += d - k;
+      } else if (kat.includes("INTERNAL_TRANSFER") || ket.includes("TRANSFER ANTAR KAS")) {
+        kkInternalTransfersIn += d;
+        kkInternalTransfersOut += k;
+      } else if (ket.includes("[VOID") || ket.includes("[BATAL") || kat.includes("REVERSAL")) {
+        kkReversalsIn += d;
+        kkOutflows += k;
+      } else {
+        kkExternalInflows += d;
+        kkOutflows += k;
+      }
+
+      kkRunningExpected += d - k;
+      if (Math.abs(kkRunningExpected - Number(r.saldo || 0)) > 0.01) {
+        kkDriftCount++;
+      }
+    }
+
+    const kkStoredClosing = kkRows.length > 0 ? Number(kkRows[kkRows.length - 1].saldo || 0) : 0;
+
+    // 2. Kas Messenger chronological ledger & per-courier reconciliation
+    const kmRows = activeDb.prepare(`
+      SELECT id, tanggal, jenis, messenger, messenger_id, debit, kredit, total, kategori, keterangan, reimbursement_id
+      FROM kas_messenger
+      ORDER BY substr(tanggal, 1, 10) ASC, created_at ASC, id ASC
+    `).all() as any[];
+
+    const perCourierMap = new Map<string, {
+      messengerKey: string;
+      messengerId: string | null;
+      messengerName: string;
+      openingCapital: number;
+      inflows: number;
+      reversalsIn: number;
+      internalTransfersIn: number;
+      outflows: number;
+      internalTransfersOut: number;
+      expectedClosing: number;
+      storedClosing: number;
+      driftCount: number;
+    }>();
+
+    for (const r of kmRows) {
+      const key = r.messenger_id || r.messenger || "UNASSIGNED";
+      if (!perCourierMap.has(key)) {
+        perCourierMap.set(key, {
+          messengerKey: key,
+          messengerId: r.messenger_id || null,
+          messengerName: r.messenger || key,
+          openingCapital: 0,
+          inflows: 0,
+          reversalsIn: 0,
+          internalTransfersIn: 0,
+          outflows: 0,
+          internalTransfersOut: 0,
+          expectedClosing: 0,
+          storedClosing: 0,
+          driftCount: 0,
+        });
+      }
+      const bucket = perCourierMap.get(key)!;
+      const d = Number(r.debit || 0);
+      const k = Number(r.kredit || 0);
+      const kat = String(r.kategori || "").toUpperCase();
+      const ket = String(r.keterangan || "").toUpperCase();
+
+      if (kat === "MODAL_AWAL") {
+        bucket.openingCapital += d - k;
+      } else if (kat.includes("INTERNAL_TRANSFER") || ket.includes("TRANSFER ANTAR KAS")) {
+        bucket.internalTransfersIn += d;
+        bucket.internalTransfersOut += k;
+      } else if (ket.includes("[VOID") || ket.includes("[BATAL") || kat.includes("REVERSAL")) {
+        bucket.reversalsIn += d;
+        bucket.outflows += k;
+      } else {
+        bucket.inflows += d;
+        bucket.outflows += k;
+      }
+
+      bucket.expectedClosing += d - k;
+      bucket.storedClosing = Number(r.total || 0);
+      if (Math.abs(bucket.expectedClosing - bucket.storedClosing) > 0.01) {
+        bucket.driftCount++;
+      }
+    }
+
+    const byMessenger = Array.from(perCourierMap.values());
+    const kmExpectedTotal = byMessenger.reduce((s, m) => s + m.expectedClosing, 0);
+    const kmStoredTotal = byMessenger.reduce((s, m) => s + m.storedClosing, 0);
+    const kmDriftCount = byMessenger.reduce((s, m) => s + m.driftCount, 0);
+
+    // 3. Reimbursement cross-ledger parity check
+    const paidReimbs = activeDb.prepare(`
+      SELECT id, amount, approved_amount, kas_messenger_id
+      FROM messenger_reimbursements
+      WHERE status = 'Dibayar'
+    `).all() as any[];
+
+    let totalPaidReimbursements = 0;
+    const orphanReimbLinks: Array<{ reimbursementId: string; kasMessengerId: number | null }> = [];
+    for (const pr of paidReimbs) {
+      const amt = Number(pr.approved_amount || pr.amount || 0);
+      totalPaidReimbursements += amt;
+      if (pr.kas_messenger_id) {
+        const kmHit = activeDb.prepare("SELECT id FROM kas_messenger WHERE id = ?").get(pr.kas_messenger_id);
+        if (!kmHit) {
+          orphanReimbLinks.push({ reimbursementId: pr.id, kasMessengerId: pr.kas_messenger_id });
+        }
+      }
+    }
+
+    const netKmReimbRow = activeDb.prepare(`
+      SELECT COALESCE(SUM(kredit), 0) - COALESCE(SUM(debit), 0) as netDisbursed
+      FROM kas_messenger
+      WHERE reimbursement_id IS NOT NULL
+    `).get() as { netDisbursed: number } | undefined;
+
+    const kkReimbReversalsRow = activeDb.prepare(`
+      SELECT COUNT(*) as count
+      FROM kas_kantor
+      WHERE kategori = 'Reimbursement Reversal' OR keterangan LIKE '%Reversal Pencairan Reimbursement%'
+    `).get() as { count: number } | undefined;
+
+    const netKmDisbursed = Number(netKmReimbRow?.netDisbursed || 0);
+
+    return {
+      kasKantor: {
+        rowCount: kkRows.length,
+        openingCapital: kkOpeningCapital,
+        externalInflows: kkExternalInflows,
+        reversalsIn: kkReversalsIn,
+        internalTransfersIn: kkInternalTransfersIn,
+        outflows: kkOutflows,
+        internalTransfersOut: kkInternalTransfersOut,
+        expectedClosingBalance: kkRunningExpected,
+        storedClosingBalance: kkStoredClosing,
+        runningBalanceDriftCount: kkDriftCount,
+        reconciled: Math.abs(kkRunningExpected - kkStoredClosing) <= 0.01 && kkDriftCount === 0,
+      },
+      kasMessenger: {
+        rowCount: kmRows.length,
+        expectedClosingBalance: kmExpectedTotal,
+        storedClosingBalance: kmStoredTotal,
+        runningBalanceDriftCount: kmDriftCount,
+        byMessenger,
+        reconciled: Math.abs(kmExpectedTotal - kmStoredTotal) <= 0.01 && kmDriftCount === 0,
+      },
+      reimbursements: {
+        paidCount: paidReimbs.length,
+        totalPaidReimbursements,
+        netKasMessengerDisbursed: netKmDisbursed,
+        discrepancy: totalPaidReimbursements - netKmDisbursed,
+        orphanLinks: orphanReimbLinks,
+        crossLedgerKasKantorReversalsCount: Number(kkReimbReversalsRow?.count || 0),
+        reconciled:
+          Math.abs(totalPaidReimbursements - netKmDisbursed) <= 0.01 &&
+          orphanReimbLinks.length === 0,
+      },
+    };
   }
 }
 

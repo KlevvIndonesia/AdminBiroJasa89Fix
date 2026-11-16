@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { orderStore } from "../src/app/data/orderStore";
 import { orderRepository } from "../src/data/repositories/orderRepository";
 import { dbOrderRepository } from "../server/src/repositories/dbOrderRepository";
+import { orderService } from "../server/src/services/orderService";
 import {
   UserContext,
   startMessengerTask,
@@ -43,8 +44,8 @@ function createBaseOrder(orderNo: string, overrides: Partial<OperationalOrder> =
     customer: "PT Solusi Maju Bersama",
     phone: "081299887766",
     tipeLayanan: "Perorangan",
-    service_id: "svc-perpanjangan",
-    layanan: "Perpanjangan STNK Tahunan",
+    service_id: "svc-perp-1th",
+    layanan: "Perpanjangan 1 Tahun",
     currentStep: 2,
     currentStageName: "Penjemputan Berkas",
     status: "Dalam Proses",
@@ -328,12 +329,38 @@ test("PHASE 5 — MESSENGER WORKSPACE UI CONSOLIDATION SUITE", async (t) => {
     assert.equal(blockedRes.success, false);
     assert.ok(blockedRes.error?.includes("Terkendala"));
 
-    // 3. Admin recovers Kendala
-    const recoverRes = await recoverSamsatPickupKendalaAction(orderNo, mockAdmin);
-    assert.equal(recoverRes.success, true);
-    const recoveredOrder = orderStore.getOrderByNo(orderNo)!;
-    assert.equal(recoveredOrder.samsatPickupStatus, "Sedang Jemput Dokumen Samsat");
-    assert.equal(recoveredOrder.taskAcceptance?.["Jemput Hasil Samsat"].hasKendala, false);
+    // Sync kendala state into SQLite for backend recovery endpoint simulation
+    dbOrderRepository.saveOrder(orderInKendala);
+
+    // 3. Admin recovers Kendala via API
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const match = url.match(/\/orders\/([^/]+)\/samsat-pickup\/recover$/);
+      if (match && (init?.method || "GET").toUpperCase() === "POST") {
+        const targetOrderNo = decodeURIComponent(match[1]);
+        const recovered = orderService.recoverSamsatPickupKendala(targetOrderNo, {
+          userId: mockAdmin.userId,
+          nama: mockAdmin.userName,
+          role: "admin",
+        });
+        return new Response(JSON.stringify({ success: true, data: recovered }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return prevFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      const recoverRes = await recoverSamsatPickupKendalaAction(orderNo, mockAdmin);
+      assert.equal(recoverRes.success, true);
+      const recoveredOrder = orderStore.getOrderByNo(orderNo)!;
+      assert.equal(recoveredOrder.samsatPickupStatus, "Sedang Jemput Dokumen Samsat");
+      assert.equal(recoveredOrder.taskAcceptance?.["Jemput Hasil Samsat"].hasKendala, false);
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
 
     // 4. Messenger can now complete
     const completeRes = completeSamsatResultPickup(orderNo, undefined, mockMessenger);

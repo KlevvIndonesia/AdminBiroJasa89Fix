@@ -4,7 +4,7 @@
  */
 
 import { Router } from "express";
-import { requireAuth, requireRoles } from "../middleware/auth";
+import { requireAuth, requireRoles, requirePermission } from "../middleware/auth";
 import {
   getMyTasks,
   getMessengersWithStats,
@@ -25,6 +25,7 @@ messengerRouter.get(
   "/my-tasks",
   requireAuth,
   requireRoles("messenger", "administrator", "admin"),
+  requirePermission("messenger-task", "view"),
   getMyTasks
 );
 
@@ -33,6 +34,15 @@ messengerRouter.get(
   "/messengers",
   requireAuth,
   requireRoles("administrator", "admin", "finance", "messenger"),
+  requirePermission(
+    (req) =>
+      req.user?.role === "finance"
+        ? "finance-kas-messenger"
+        : req.user?.role === "messenger"
+          ? "messenger-task"
+          : ["messenger-task", "finance-kas-messenger", "manajemen-karyawan", "master-karyawan"],
+    "view"
+  ),
   getMessengersWithStats
 );
 
@@ -41,6 +51,7 @@ messengerRouter.get(
   "/history",
   requireAuth,
   requireRoles("administrator", "admin", "finance", "messenger"),
+  requirePermission("messenger-history", "view"),
   getMessengerHistory
 );
 
@@ -49,6 +60,13 @@ messengerRouter.get(
   "/tasks/:orderNo",
   requireAuth,
   requireRoles("administrator", "admin", "finance", "messenger"),
+  requirePermission(
+    (req) =>
+      req.user?.role === "finance"
+        ? ["messenger-history", "finance-kas-messenger"]
+        : ["messenger-task", "messenger-history"],
+    "view"
+  ),
   getTaskDetail
 );
 
@@ -57,6 +75,13 @@ messengerRouter.get(
   "/reimbursements",
   requireAuth,
   requireRoles("administrator", "admin", "finance", "messenger"),
+  requirePermission(
+    (req) =>
+      req.user?.role === "finance"
+        ? "finance-kas-messenger"
+        : ["messenger-task", "finance-kas-messenger"],
+    "view"
+  ),
   getReimbursements
 );
 
@@ -65,6 +90,7 @@ messengerRouter.post(
   "/reimbursements",
   requireAuth,
   requireRoles("administrator", "admin", "messenger"),
+  requirePermission(["messenger-task", "finance-kas-messenger"], "manage"),
   createReimbursement
 );
 
@@ -73,6 +99,7 @@ messengerRouter.patch(
   "/reimbursements/:id/review",
   requireAuth,
   requireRoles("administrator", "admin", "finance"),
+  requirePermission("finance-kas-messenger", "manage"),
   reviewReimbursement
 );
 
@@ -80,7 +107,8 @@ messengerRouter.patch(
 messengerRouter.post(
   "/reimbursements/:id/pay",
   requireAuth,
-  requireRoles("administrator", "finance", "admin", "svp"),
+  requireRoles("administrator", "finance", "admin"),
+  requirePermission("finance-kas-messenger", "manage"),
   payReimbursement
 );
 
@@ -88,7 +116,8 @@ messengerRouter.post(
 messengerRouter.post(
   "/reimbursements/:id/void",
   requireAuth,
-  requireRoles("administrator", "svp"),
+  requireRoles("administrator"),
+  requirePermission("finance-kas-messenger", "manage"),
   voidReimbursement
 );
 
@@ -96,6 +125,7 @@ messengerRouter.post(
 messengerRouter.delete(
   "/reimbursements/:id",
   requireAuth,
-  requireRoles("svp"),
+  requireRoles("administrator"),
+  requirePermission("finance-kas-messenger", "manage"),
   deleteReimbursementPermanently
 );

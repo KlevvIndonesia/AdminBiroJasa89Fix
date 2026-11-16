@@ -5,6 +5,7 @@
 
 import { useState, useEffect } from "react";
 import { auditLog } from "../utils/auditLog";
+import { permissionStore } from "./permissionStore";
 import { financeRepository } from "../../data/repositories/financeRepository";
 import { APP_CONFIG } from "../config/appConfig";
 import { parseDateSafe } from "./dashboardAdapter";
@@ -28,22 +29,6 @@ import {
   projectOrderToContractRow,
   deriveStatusPengerjaan,
   deriveStatusPembayaran,
-  initialPerpanjangan1TahunContract,
-  initialPerpanjangan5TahunContract,
-  initialMutasiAsalContract,
-  initialMutasiAntarDaerahContract,
-  initialBalikNamaContract,
-  initialTarikBerkasContract,
-  initialDuplikatSTNKContract,
-  initialLainnyaContract,
-  initialMutasiLDContract,
-  initialMutasiASContract,
-  initialBBNContract,
-  initialPerpanjanganPajakContract,
-  initialLainLainContract,
-  initialBelumKurangBayarContract,
-  initialProfitTerpendingContract,
-  initialCashbackTerpendingContract,
 } from "./penjualanContractData";
 
 import {
@@ -131,27 +116,6 @@ export {
 };
 
 
-// Phone number dictionary for sample customers to support WhatsApp contact
-const SAMPLE_CUSTOMER_PHONES: Record<string, { phone: string; email?: string; alamat?: string }> = {
-  "PT. MAJU JAYA": { phone: "081289123456", email: "finance@majujaya.co.id", alamat: "Jl. Sudirman Kav 21, Jakarta" },
-  "TOKO SEJAHTERA": { phone: "081987654321", email: "sejahtera.toko@gmail.com", alamat: "Jl. Pasar Anyar No. 14, Bogor" },
-  "CV. MANDIRI": { phone: "082155667788", email: "admin@mandiri-cv.com", alamat: "Jl. Ir. H. Juanda No. 88, Depok" },
-  "WARUNG MAKAN": { phone: "085699887766", email: "warung.berkah@gmail.com", alamat: "Jl. Raya Bogor KM 35, Cibinong" },
-  "SALON CANTIK": { phone: "087711223344", email: "cantiksalon@yahoo.com", alamat: "Ruko Sukahati No. 5, Bogor" },
-  "BENGKEL MOTOR": { phone: "081344556677", email: "bengkel.motor@gmail.com", alamat: "Jl. Tegar Beriman No. 12, Cibinong" },
-  "TOKO BANGUNAN": { phone: "081288990011", email: "tb.sentosa@gmail.com", alamat: "Jl. Raya Sukabumi No. 45, Bogor" },
-  "FOTOCOPY 24 JAM": { phone: "085733445566", email: "fc24jam@gmail.com", alamat: "Jl. Dramaga No. 18, Bogor" },
-  "LAUNDRY KILOAN": { phone: "081822334455", email: "cleanlaundry@gmail.com", alamat: "Perum Gaperi 2 Blok B, Bojonggede" },
-  "RUMAH MAKAN PADANG": { phone: "082211998877", email: "rmpadang@gmail.com", alamat: "Jl. Raya Pajajaran No. 7, Bogor" },
-  "APOTEK SEHAT": { phone: "081199887766", email: "apotek.sehat@gmail.com", alamat: "Jl. Padjadjaran No. 102, Bogor" },
-  "COUNTER HP": { phone: "089677889900", email: "countercell@gmail.com", alamat: "ITC Cibinong Lt. 1 Blok C" },
-};
-
-// Initial state builder migrating all existing dummy data seamlessly
-function buildInitialInvoices(): InvoiceBillingRecord[] {
-  return [];
-}
-
 class FinanceStore {
   private invoices: InvoiceBillingRecord[];
   private kasKantor: KasKantorItem[];
@@ -159,12 +123,13 @@ class FinanceStore {
   private pengeluaran: PengeluaranItem[];
   private profitData: ProfitItem[];
   private labaRugiData: LabaRugiMonthlyItem[];
-  private isApiMode: boolean;
   private unsubscribeRepo?: () => void;
   private unsubscribeOrderRepo?: () => void;
+  private unsubscribePermission?: () => void;
+  private lastReimbursementAuthKey: string | null = null;
+  private reimbursementFetchPromise: Promise<void> | null = null;
   private orderCreator: OrderCreatorFn | null = null;
   private orderAsyncCreator: OrderAsyncCreatorFn | null = null;
-  private deletedOrderNos: Set<string> = new Set();
 
   public setOrderCreator(creator: OrderCreatorFn): void {
     this.orderCreator = creator;
@@ -175,121 +140,84 @@ class FinanceStore {
   }
 
   constructor() {
-    try {
-      if (typeof window !== "undefined" && window.localStorage) {
-        const stored = JSON.parse(localStorage.getItem("sun89_deleted_order_nos") || "[]");
-        if (Array.isArray(stored)) {
-          stored.forEach((no) => this.deletedOrderNos.add(String(no).trim().toUpperCase()));
-        }
-      }
-    } catch {}
-    this.isApiMode = APP_CONFIG.dataProvider === "api";
-    if (this.isApiMode) {
-      this.invoices = [];
-      this.kasKantor = [];
-      this.kasMessenger = [];
-      this.pengeluaran = [];
-      this.profitData = [];
-      this.labaRugiData = [];
-      this.contractDatasets = {
-        "perpanjangan-1-tahun": [],
-        "perpanjangan-5-tahun": [],
-        "mutasi-asal": [],
-        "mutasi-antar-daerah": [],
-        "balik-nama": [],
-        "tarik-berkas": [],
-        "duplikat-stnk": [],
-        "lainnya": [],
-        "mutasi-ld": [],
-        "mutasi-as": [],
-        bbn: [],
-        "perpanjangan-pajak": [],
-        "lain-lain": [],
-        "belum-kurang-bayar": [],
-        "profit-terpending": [],
-        "cashback-terpending": [],
-      };
+    this.invoices = [];
+    this.kasKantor = [];
+    this.kasMessenger = [];
+    this.pengeluaran = [];
+    this.profitData = [];
+    this.labaRugiData = [];
+    this.contractDatasets = {
+      "perpanjangan-1-tahun": [],
+      "perpanjangan-5-tahun": [],
+      "mutasi-asal": [],
+      "mutasi-antar-daerah": [],
+      "balik-nama": [],
+      "tarik-berkas": [],
+      "duplikat-stnk": [],
+      "lainnya": [],
+      "mutasi-ld": [],
+      "mutasi-as": [],
+      bbn: [],
+      "perpanjangan-pajak": [],
+      "lain-lain": [],
+      "belum-kurang-bayar": [],
+      "profit-terpending": [],
+      "cashback-terpending": [],
+    };
+    this.syncFromRepository();
+    this.unsubscribeRepo = financeRepository.subscribe(() => {
       this.syncFromRepository();
-      this.unsubscribeRepo = financeRepository.subscribe(() => {
-        this.syncFromRepository();
-      });
-    } else {
-      this.invoices = buildInitialInvoices();
-      this.kasKantor = [];
-      this.kasMessenger = [];
-      this.pengeluaran = [];
-      this.profitData = [];
-      this.labaRugiData = [];
-    }
+    });
 
     // Subscribe to order repository updates to project orders into Data Penjualan reactively
     this.unsubscribeOrderRepo = orderRepository.subscribe(() => {
       this.notify();
     });
+
+    // Clear reimbursement session state on logout/failure; sync only after permission hydration succeeds
+    this.unsubscribePermission = permissionStore.subscribe(() => {
+      const authStatus = permissionStore.getSessionAuthStatus();
+      if (authStatus === "unauthenticated" || authStatus === "forbidden") {
+        this.reimbursementRequests = [];
+        this.lastReimbursementAuthKey = null;
+        this.notify();
+        return;
+      }
+      if (authStatus === "authenticated" && typeof window !== "undefined" && this.canFetchReimbursements()) {
+        const key = this.buildReimbursementAuthKey();
+        if (this.lastReimbursementAuthKey !== key) {
+          void this.refreshReimbursements();
+        }
+      }
+    });
   }
 
-  public setApiMode(isApi: boolean): void {
-    this.isApiMode = isApi;
-    if (this.unsubscribeRepo) {
-      this.unsubscribeRepo();
-      this.unsubscribeRepo = undefined;
+  private getReimbursementToken(): string | null {
+    try {
+      if (typeof window !== "undefined" && window.localStorage) {
+        return window.localStorage.getItem("auth_token");
+      }
+      if (typeof process !== "undefined" && process.env?.AUTH_TOKEN) {
+        return process.env.AUTH_TOKEN;
+      }
+    } catch {
+      // ignore
     }
-    if (isApi) {
-      this.invoices = [];
-      this.kasKantor = [];
-      this.kasMessenger = [];
-      this.pengeluaran = [];
-      this.profitData = [];
-      this.labaRugiData = [];
-      this.contractDatasets = {
-        "perpanjangan-1-tahun": [],
-        "perpanjangan-5-tahun": [],
-        "mutasi-asal": [],
-        "mutasi-antar-daerah": [],
-        "balik-nama": [],
-        "tarik-berkas": [],
-        "duplikat-stnk": [],
-        "lainnya": [],
-        "mutasi-ld": [],
-        "mutasi-as": [],
-        bbn: [],
-        "perpanjangan-pajak": [],
-        "lain-lain": [],
-        "belum-kurang-bayar": [],
-        "profit-terpending": [],
-        "cashback-terpending": [],
-      };
-      this.syncFromRepository();
-      this.unsubscribeRepo = financeRepository.subscribe(() => {
-        this.syncFromRepository();
-      });
-    } else {
-      this.invoices = buildInitialInvoices();
-      this.kasKantor = [];
-      this.kasMessenger = [];
-      this.pengeluaran = [];
-      this.profitData = [];
-      this.labaRugiData = [];
-      this.contractDatasets = {
-        "perpanjangan-1-tahun": [...initialPerpanjangan1TahunContract],
-        "perpanjangan-5-tahun": [...initialPerpanjangan5TahunContract],
-        "mutasi-asal": [...initialMutasiAsalContract],
-        "mutasi-antar-daerah": [...initialMutasiAntarDaerahContract],
-        "balik-nama": [...initialBalikNamaContract],
-        "tarik-berkas": [...initialTarikBerkasContract],
-        "duplikat-stnk": [...initialDuplikatSTNKContract],
-        "lainnya": [...initialLainnyaContract],
-        "mutasi-ld": [...initialMutasiLDContract],
-        "mutasi-as": [...initialMutasiASContract],
-        bbn: [...initialBBNContract],
-        "perpanjangan-pajak": [...initialPerpanjanganPajakContract],
-        "lain-lain": [...initialLainLainContract],
-        "belum-kurang-bayar": [...initialBelumKurangBayarContract],
-        "profit-terpending": [...initialProfitTerpendingContract],
-        "cashback-terpending": [...initialCashbackTerpendingContract],
-      };
-      this.notify();
-    }
+    return null;
+  }
+
+  private buildReimbursementAuthKey(): string {
+    const token = this.getReimbursementToken() || "";
+    const role = permissionStore.getSessionRole() || "";
+    return `${token}::${role}`;
+  }
+
+  private canFetchReimbursements(): boolean {
+    if (!this.getReimbursementToken()) return false;
+    if (permissionStore.getSessionAuthStatus() !== "authenticated") return false;
+    const rawRole = (permissionStore.getSessionRole() || "").toLowerCase().trim();
+    if (!rawRole) return typeof window === "undefined";
+    return ["administrator", "admin", "finance", "messenger"].includes(rawRole);
   }
 
   public async initFromApi(): Promise<void> {
@@ -297,6 +225,9 @@ class FinanceStore {
       await (financeRepository as any).initFromApi();
     }
     this.syncFromRepository();
+    if (this.canFetchReimbursements()) {
+      await this.refreshReimbursements();
+    }
   }
 
   public syncFromRepository(): void {
@@ -320,24 +251,6 @@ class FinanceStore {
     if (Array.isArray(repoMessenger)) {
       this.kasMessenger = repoMessenger;
     }
-    if (this.isApiMode) {
-      try {
-        const token = typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
-        if (token) {
-          fetch(`${APP_CONFIG.apiBaseUrl}/messenger/reimbursements`, {
-            headers: { Authorization: `Bearer ${token}` },
-          })
-            .then((res) => res.json())
-            .then((payload) => {
-              if (payload.success && Array.isArray(payload.data)) {
-                this.reimbursementRequests = payload.data;
-                this.notify();
-              }
-            })
-            .catch(() => {});
-        }
-      } catch {}
-    }
     this.recomputeLabaRugi();
     this.notify();
   }
@@ -356,28 +269,31 @@ class FinanceStore {
 
   // Contract Datasets for DataPenjualan
   private contractDatasets: Record<PenjualanContractCategory, any[]> = {
-    "perpanjangan-1-tahun": [...initialPerpanjangan1TahunContract],
-    "perpanjangan-5-tahun": [...initialPerpanjangan5TahunContract],
-    "mutasi-asal": [...initialMutasiAsalContract],
-    "mutasi-antar-daerah": [...initialMutasiAntarDaerahContract],
-    "balik-nama": [...initialBalikNamaContract],
-    "tarik-berkas": [...initialTarikBerkasContract],
-    "duplikat-stnk": [...initialDuplikatSTNKContract],
-    "lainnya": [...initialLainnyaContract],
-    "mutasi-ld": [...initialMutasiLDContract],
-    "mutasi-as": [...initialMutasiASContract],
-    bbn: [...initialBBNContract],
-    "perpanjangan-pajak": [...initialPerpanjanganPajakContract],
-    "lain-lain": [...initialLainLainContract],
-    "belum-kurang-bayar": [...initialBelumKurangBayarContract],
-    "profit-terpending": [...initialProfitTerpendingContract],
-    "cashback-terpending": [...initialCashbackTerpendingContract],
+    "perpanjangan-1-tahun": [],
+    "perpanjangan-5-tahun": [],
+    "mutasi-asal": [],
+    "mutasi-antar-daerah": [],
+    "balik-nama": [],
+    "tarik-berkas": [],
+    "duplikat-stnk": [],
+    "lainnya": [],
+    "mutasi-ld": [],
+    "mutasi-as": [],
+    bbn: [],
+    "perpanjangan-pajak": [],
+    "lain-lain": [],
+    "belum-kurang-bayar": [],
+    "profit-terpending": [],
+    "cashback-terpending": [],
   };
 
   private listeners: Set<() => void> = new Set();
   private paymentSyncListeners: Set<PaymentSyncCallback> = new Set();
   private kasCounter = 100;
   private invoiceCounter = 200;
+  private profitCacheDirty = true;
+  private cachedProfitList: ProfitItem[] = [];
+  private cachedProfitSignature = "";
 
   public subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
@@ -390,6 +306,7 @@ class FinanceStore {
   }
 
   private notify(): void {
+    this.profitCacheDirty = true;
     this.listeners.forEach((listener) => {
       try {
         listener();
@@ -440,20 +357,77 @@ class FinanceStore {
   }
 
   public getProfitList(): ProfitItem[] {
-    const defaultAccountNumbers: Record<string, string> = {
-      BCA: "772-019-2831",
-      BRI: "0123-01-001234-56-7",
-      Mandiri: "133-00-1928374-1",
-      CIMB: "800-12-98765-400",
-      BNI: "089-234-5678",
-    };
-    return this.profitData.map((item) => {
-      const rek = item.rekening || "BCA";
-      const isCash = rek.toLowerCase().includes("cash") || (item.metodePembayaran && item.metodePembayaran.toLowerCase().includes("cash"));
-      const metodePencairan = isCash ? "Cash" : "Transfer Bank";
-      const namaBank = isCash ? "" : ((item as any).namaBank || (item as any).bank || rek);
-      const noRekening = isCash ? "" : ((item as any).nomorRekening || (item as any).noRekening || defaultAccountNumbers[rek] || "772-019-2831");
-      const namaRekening = isCash ? "" : ((item as any).namaPemilikRekening || (item as any).namaRekening || "PT Biro Jasa SUN89 Abadi");
+    if (!this.profitCacheDirty) {
+      return this.cachedProfitList;
+    }
+
+    const cancelledOrders = new Set<string>();
+    const cancelledInvoices = new Set<string>();
+    this.invoices.forEach((inv) => {
+      const st = String(inv.status || "").trim().toUpperCase();
+      const bst = String((inv as any).billingStatus || "").trim().toUpperCase();
+      if (st === "CANCELLED" || bst === "CANCELLED" || Boolean((inv as any).isCancelled)) {
+        if (inv.orderNo) cancelledOrders.add(String(inv.orderNo).trim().toUpperCase());
+        const invNo = inv.invoice || inv.invoiceNo;
+        if (invNo) cancelledInvoices.add(String(invNo).trim().toUpperCase());
+      }
+    });
+
+    const computedList = this.profitData
+      .filter((item) => {
+        const st = String((item as any).status || "").trim().toUpperCase();
+        if (st === "CANCELLED" || Boolean((item as any).isCancelled)) return false;
+        const ordKey = String((item as any).orderNo || "").trim().toUpperCase();
+        const invKey = String(item.invoice || "").trim().toUpperCase();
+        if (ordKey && cancelledOrders.has(ordKey)) return false;
+        if (invKey && cancelledInvoices.has(invKey)) return false;
+        return true;
+      })
+      .map((item) => {
+        const hasCanonicalLabel =
+          typeof (item as any).paymentMethodLabel === "string" &&
+          String((item as any).paymentMethodLabel).trim().length > 0;
+        const rawRek = String(item.rekening || "").trim();
+        const rawMethod = String(item.metodePembayaran || "").trim();
+        const isZeroVerified =
+          (item as any).verifiedPaymentCount === 0 || Number(item.uangMasuk ?? 0) <= 0;
+        const isUnlinked =
+          rawRek === "Belum Terhubung" ||
+          rawRek === "Belum Dibayar" ||
+          rawMethod === "-" ||
+          rawMethod === "Belum Terhubung";
+
+        const isCash =
+          !isZeroVerified &&
+          !isUnlinked &&
+          (rawRek.toLowerCase().includes("cash") ||
+            rawRek.toLowerCase().includes("tunai") ||
+            rawMethod.toLowerCase().includes("cash") ||
+            rawMethod.toLowerCase().includes("tunai"));
+        const namaBank =
+          isCash || isZeroVerified || isUnlinked
+            ? ""
+            : String(
+                (item as any).namaBank ||
+                  (item as any).bank ||
+                  (rawRek !== "Belum Terhubung" && rawRek !== "Belum Dibayar" ? rawRek : "")
+              ).trim();
+        const metodePencairan = isZeroVerified
+          ? "-"
+          : isCash
+            ? "Cash"
+            : namaBank || (!isUnlinked && rawMethod)
+              ? "Transfer Bank"
+              : "-";
+        const noRekening = isCash || isZeroVerified ? "" : String((item as any).nomorRekening || (item as any).noRekening || "").trim();
+        const namaRekening = isCash || isZeroVerified ? "" : String((item as any).namaPemilikRekening || (item as any).namaRekening || "").trim();
+        const rekeningLabel = isZeroVerified
+          ? "Belum Dibayar"
+          : hasCanonicalLabel
+            ? String((item as any).paymentMethodLabel)
+            : isCash
+              ? "Tunai"
+              : namaBank || (!isUnlinked && rawMethod) || "Belum Terhubung";
 
       const metrics = calculateInvoiceProfitMetrics({
         dibayar: item.uangMasuk,
@@ -470,15 +444,20 @@ class FinanceStore {
 
       return {
         ...item,
+        rekening: rekeningLabel,
         profit: canonicalProfit,
         grossServiceMargin: metrics.grossServiceMargin,
         netTransactionMargin: metrics.netTransactionMargin,
         isGrossDeficit: metrics.isGrossDeficit,
         isNetDeficit: metrics.isNetDeficit,
         metodePencairan,
-        metodePembayaran: item.metodePembayaran || (isCash ? "Cash" : `Transfer ${rek}`),
+        metodePembayaran: isZeroVerified
+          ? "-"
+          : hasCanonicalLabel
+            ? String((item as any).paymentMethodLabel)
+            : item.metodePembayaran || (isCash ? "Tunai" : (namaBank ? `Transfer ${namaBank}` : "Belum Terhubung")),
         namaBank: isCash ? "" : namaBank,
-        bank: isCash ? "Tunai" : rek,
+        bank: isCash ? "Tunai" : namaBank,
         nomorRekening: noRekening,
         noRekening: noRekening,
         namaPemilikRekening: namaRekening,
@@ -486,6 +465,14 @@ class FinanceStore {
         tanggalUangMasuk: item.uangMasuk > 0 ? (item.tanggalBayar || (item as any).tanggalUangMasuk || item.tanggal) : "",
       };
     });
+
+    const nextSignature = JSON.stringify(computedList);
+    this.profitCacheDirty = false;
+    if (nextSignature !== this.cachedProfitSignature) {
+      this.cachedProfitList = computedList;
+      this.cachedProfitSignature = nextSignature;
+    }
+    return this.cachedProfitList;
   }
 
   public getRefundPendingList(): any[] {
@@ -560,13 +547,14 @@ class FinanceStore {
         const riwayatPembayaran = ord?.payment?.riwayatKoreksiPembayaran || [];
 
         // Financial Detail: Pass-Through Dana Titipan (Pajak Samsat / Kas Negara)
-        const pkb = ord?.finalPkb ?? ord?.pkb ?? (inv.biayaSamsat ? Math.round(inv.biayaSamsat * 0.7) : 0);
-        const swdkllj = ord?.finalSwdkllj ?? ord?.swdkllj ?? (inv.biayaSamsat ? Math.round(inv.biayaSamsat * 0.15) : 0);
+        const pkb = ord?.finalPkb ?? ord?.pkb ?? 0;
+        const swdkllj = ord?.finalSwdkllj ?? ord?.swdkllj ?? 0;
         const dendaSwdkllj = ord?.finalDendaSwdkllj ?? ord?.dendaSwdkllj ?? 0;
         const pnbpSamsat = ord?.finalMutasiKeluar ?? ord?.finalMutasiMasuk ?? 0;
-        const danaTitipanPajak = pkb + swdkllj + dendaSwdkllj + pnbpSamsat > 0
-          ? (pkb + swdkllj + dendaSwdkllj + pnbpSamsat)
-          : (inv.biayaSamsat || Math.round(totalTagihan * 0.75));
+        const rawOrderSamsat = Number((inv as any).biayaSamsat ?? (ord as any)?.costSnapshot?.biayaSamsat ?? 0);
+        const danaTitipanPajak = rawOrderSamsat > 0
+          ? rawOrderSamsat
+          : (pkb + swdkllj + dendaSwdkllj + pnbpSamsat);
 
         // Pendapatan Jasa Biro (Fee Biro Jasa SUN89)
         const biayaJasaBiro = ord?.finalBiayaJasa ?? ord?.biayaJasa ?? (Number(inv.profit) || Math.max(0, totalTagihan - danaTitipanPajak));
@@ -615,30 +603,27 @@ class FinanceStore {
           currentStep: ord?.currentStep ?? 4,
           metodePencairan: (ord?.payment?.metodePembayaran || inv.metodePembayaran || "").toLowerCase().includes("cash") ? "Cash" : "Transfer Bank",
           namaBank: (ord?.payment?.metodePembayaran || inv.metodePembayaran || "").toLowerCase().includes("cash") ? "" : (ord?.payment?.namaBank || inv.bank || (inv.metodePembayaran?.includes("BRI") ? "BRI" : inv.metodePembayaran?.includes("Mandiri") ? "Mandiri" : "BCA")),
-          nomorRekening: (ord?.payment?.metodePembayaran || inv.metodePembayaran || "").toLowerCase().includes("cash") ? "" : (ord?.payment?.noRekening || (inv as any).noRekening || "772-019-2831"),
-          namaPemilikRekening: (ord?.payment?.metodePembayaran || inv.metodePembayaran || "").toLowerCase().includes("cash") ? "" : (ord?.payment?.namaRekening || (inv as any).namaRekening || "PT Biro Jasa SUN89 Abadi"),
+          nomorRekening: (ord?.payment?.metodePembayaran || inv.metodePembayaran || "").toLowerCase().includes("cash") ? "" : (ord?.payment?.noRekening || (inv as any).noRekening || ""),
+          namaPemilikRekening: (ord?.payment?.metodePembayaran || inv.metodePembayaran || "").toLowerCase().includes("cash") ? "" : (ord?.payment?.namaRekening || (inv as any).namaRekening || ""),
           metodePembayaran: ord?.payment?.metodePembayaran || inv.metodePembayaran || (inv.bank ? `Transfer ${inv.bank}` : "Transfer BCA"),
           bank: ord?.payment?.namaBank || inv.bank || (inv.metodePembayaran?.includes("BRI") ? "BRI" : inv.metodePembayaran?.includes("Mandiri") ? "Mandiri" : inv.metodePembayaran?.includes("Cash") ? "Tunai" : "BCA"),
           rekening: (ord?.payment?.metodePembayaran || inv.metodePembayaran || "").toLowerCase().includes("cash") ? "Cash" : (ord?.payment?.namaBank || inv.bank || "BCA"),
-          namaRekening: (ord?.payment?.metodePembayaran || inv.metodePembayaran || "").toLowerCase().includes("cash") ? "" : (ord?.payment?.namaRekening || (inv as any).namaRekening || "PT Biro Jasa SUN89 Abadi"),
-          noRekening: (ord?.payment?.metodePembayaran || inv.metodePembayaran || "").toLowerCase().includes("cash") ? "" : (ord?.payment?.noRekening || (inv as any).noRekening || "772-019-2831"),
+          namaRekening: (ord?.payment?.metodePembayaran || inv.metodePembayaran || "").toLowerCase().includes("cash") ? "" : (ord?.payment?.namaRekening || (inv as any).namaRekening || ""),
+          noRekening: (ord?.payment?.metodePembayaran || inv.metodePembayaran || "").toLowerCase().includes("cash") ? "" : (ord?.payment?.noRekening || (inv as any).noRekening || ""),
           tanggalUangMasuk: (ord?.payment?.tanggalBayar && ord?.payment?.tanggalBayar !== "-") ? ord.payment.tanggalBayar : (inv.tanggalBayar && inv.tanggalBayar !== "-" ? inv.tanggalBayar : inv.tanggal),
         };
       });
-  }
-
-  private dismissedCashbackIds = new Set<string | number>();
-
-  public dismissCashback(id: number | string): void {
-    this.dismissedCashbackIds.add(id);
-    this.notify();
   }
 
   public getCashbackPendingList(): any[] {
     const seenOrders = new Set<string>();
     return this.invoices
       .filter((inv) => {
-        if (this.dismissedCashbackIds.has(inv.id) || (inv.orderNo && this.dismissedCashbackIds.has(inv.orderNo))) {
+        // Persistent DB completion state: once completed ("Selesai"), NEVER show in active queue
+        if (
+          inv.cashbackCompletionStatus === "COMPLETED" ||
+          Boolean(inv.cashbackCompletedAt)
+        ) {
           return false;
         }
 
@@ -652,10 +637,13 @@ class FinanceStore {
         const paid = Number(ord?.payment?.dibayar ?? inv.terbayar ?? inv.dibayar ?? 0);
         const overpaymentFromInv = Number(inv.overpayment || 0);
 
-        // QC-01 Fix: If order is cancelled and customer has deposited funds, it MUST appear in Cashback Terpending for refund!
+        // QC-01 Fix: If order is cancelled and customer has deposited funds, it MUST appear in Cashback Terpending for refund
         if (isCancelled) {
           const refundable = overpaymentFromInv > 0 ? overpaymentFromInv : paid;
-          if (refundable <= 0 || inv.refundStatus === "PROCESSED") {
+          if (refundable <= 0) return false;
+          // Show if still unpaid, or if paid via post-payout workflow awaiting "Selesai"
+          const isAwaitingComplete = inv.cashbackCompletionStatus === "PAID";
+          if (inv.refundStatus === "PROCESSED" && !isAwaitingComplete) {
             return false;
           }
           const key = inv.orderNo || `inv:${inv.id}`;
@@ -664,23 +652,13 @@ class FinanceStore {
           return true;
         }
 
-        const biayaPokok = (inv.biayaSamsat !== undefined && inv.biayaSamsat !== null)
-          ? Number(inv.biayaSamsat)
-          : (Number(ord?.pkb || 0) + Number(ord?.swdkllj || 0) + Number(ord?.dendaSwdkllj || 0));
-        const biayaJasa = (ord?.biayaJasa !== undefined && ord?.biayaJasa !== null)
-          ? Number(ord.biayaJasa)
-          : (Number((inv as any)?.biayaJasa) || Number(inv.profit) || 0);
-        const biayaAntarJemput = Number(ord?.biayaAntarJemput ?? (inv as any)?.biayaAntarJemput ?? 0);
-
-        const total = Number(inv.totalTagihan || ord?.payment?.totalBiaya) ||
-          (biayaPokok + biayaJasa + biayaAntarJemput);
-
-        const overpayment = Math.max(0, paid - total);
         const legacyCashback = Number(inv.cashback) || 0;
+        const isAwaitingComplete = inv.cashbackCompletionStatus === "PAID";
+        const hasCashbackPending =
+          legacyCashback > 0 &&
+          (inv.cashbackStatus === "PENDING" || inv.cashbackStatus !== "REALIZED" || isAwaitingComplete);
 
-        const hasCashbackPending = legacyCashback > 0 && (inv.cashbackStatus === "PENDING" || inv.cashbackStatus !== "REALIZED");
-
-        // Overpayment belongs in refund list, NOT cashback list (Scenario 12/13 requirement)
+        // Overpayment on non-cancelled orders belongs in refund list, NOT cashback list (Scenario 12/13 requirement)
         if (!hasCashbackPending) return false;
 
         // Dedup by orderNo if exists
@@ -711,7 +689,7 @@ class FinanceStore {
           (biayaPokok + biayaJasa + biayaAntarJemput));
 
         const overpayment = isCancelled ? (Number(inv.overpayment) || paid) : Math.max(0, paid - total);
-        const komisi = isCancelled ? 0 : ((Number(inv.cashback) > 0 && inv.cashbackStatus !== "REALIZED") ? Number(inv.cashback) : 0);
+        const komisi = isCancelled ? 0 : (Number(inv.cashback) > 0 ? Number(inv.cashbackPaidAmount || inv.cashback || 0) : 0);
 
         const orderNo = inv.orderNo || ord?.orderNo || "-";
         const nopol = ord?.nopol || inv.nopol || "-";
@@ -781,6 +759,67 @@ class FinanceStore {
           alasanPending: (inv as any)?.alasan_pending || (inv as any)?.alasan || (ord as any)?.alasanPending || (overpayment > 0 ? "Kelebihan pembayaran konsumen yang perlu dikembalikan" : "Komisi rekanan"),
           riwayatPembayaran: ord?.payment?.riwayatKoreksiPembayaran || [],
         };
+      });
+  }
+
+  /**
+   * Batch 4: Database-backed Cashback History ("Riwayat Cashback")
+   * Persists across reload, logout, and server restart.
+   */
+  public getCashbackHistoryList(): any[] {
+    const seenOrders = new Set<string>();
+    return this.invoices
+      .filter((inv) => {
+        const isCompleted = inv.cashbackCompletionStatus === "COMPLETED" || Boolean(inv.cashbackCompletedAt);
+        const isCancelled =
+          inv.status === "CANCELLED" ||
+          inv.billingStatus === "CANCELLED" ||
+          Boolean((inv as any).isCancelled);
+        const isLegacySettled =
+          (Number(inv.cashback || 0) > 0 && inv.cashbackStatus === "REALIZED" && inv.cashbackCompletionStatus !== "PAID") ||
+          (isCancelled && Number(inv.overpayment || 0) > 0 && inv.refundStatus === "PROCESSED" && inv.cashbackCompletionStatus !== "PAID");
+
+        if (!isCompleted && !isLegacySettled) return false;
+        const key = inv.orderNo || `inv:${inv.id}`;
+        if (seenOrders.has(key)) return false;
+        seenOrders.add(key);
+        return true;
+      })
+      .map((inv) => {
+        const ord = inv.orderNo ? orderRepository.getByOrderNo(inv.orderNo) : null;
+        const isCancelled =
+          inv.status === "CANCELLED" ||
+          inv.billingStatus === "CANCELLED" ||
+          Boolean((inv as any).isCancelled);
+        const overpayment = Number(inv.overpayment || 0);
+        const komisi = isCancelled ? 0 : Number(inv.cashbackPaidAmount || inv.cashback || 0);
+        const totalKewajiban = isCancelled && overpayment > 0 ? overpayment : (komisi > 0 ? komisi : overpayment);
+        const orderNo = inv.orderNo || ord?.orderNo || "-";
+        const nopol = ord?.nopol || inv.nopol || "-";
+        const customer = ord?.customer || inv.customer || "-";
+        const phone = ord?.nomorHP || (inv as any)?.phone || "-";
+        const tanggalMasukBerkas = ord?.tanggalMasukBerkas || (inv as any)?.tanggalMasukBerkas || inv.tanggal || "-";
+        const pengurusan = ord?.layanan || inv.jenisLayanan || inv.layanan || "Layanan Samsat";
+
+        return {
+          ...inv,
+          orderNo,
+          nopol,
+          customer,
+          phone,
+          tanggalMasukBerkas,
+          pengurusan,
+          nominalKelebihan: overpayment,
+          nominalKomisi: komisi,
+          jumlahCashback: totalKewajiban,
+          status: inv.cashbackCompletionStatus === "COMPLETED" ? "Selesai" : "Dibayar",
+          statusCashback: inv.cashbackCompletionStatus === "COMPLETED" ? "Selesai" : "Dibayar",
+        };
+      })
+      .sort((a: any, b: any) => {
+        const tA = new Date(a.cashbackCompletedAt || a.cashbackPaidAt || a.refundProcessedAt || a.tanggal || 0).getTime();
+        const tB = new Date(b.cashbackCompletedAt || b.cashbackPaidAt || b.refundProcessedAt || b.tanggal || 0).getTime();
+        return tB - tA;
       });
   }
 
@@ -1073,8 +1112,6 @@ class FinanceStore {
     const seenOrderNos = new Set<string>();
     const allOrders = rawAllOrders.filter((o) => {
       if (!o.orderNo) return true;
-      const cleanUpper = o.orderNo.toUpperCase();
-      if (this.deletedOrderNos.has(cleanUpper)) return false;
       if (seenOrderNos.has(o.orderNo)) return false;
       seenOrderNos.add(o.orderNo);
       return true;
@@ -1103,42 +1140,13 @@ class FinanceStore {
       ...(targetCategory !== category ? (this.contractDatasets[category] || []) : []),
     ];
 
-    if (this.isApiMode) {
-      // In API Mode: ONLY show live projected orders and any runtime additions (no mock fixtures)
-      const mappedManual = manualOrFixtureData.map((row: any) => ({
-        ...row,
-        "Status Pengerjaan": row["Status Pengerjaan"] || "-",
-        "Status Pembayaran": row["Status Pembayaran"] || "Tagihan Tidak Tersedia",
-        Status: row["Status"] || row["Status Pengerjaan"] || "-",
-      }));
-      return [...projectedRows, ...mappedManual];
-    }
-
-    // In Mock Mode: Show live projected orders deduplicated against legacy fixtures
-    const projectedOrderNos = new Set(projectedRows.map((r) => r.orderNo));
-    const filteredFixtures = manualOrFixtureData.filter(
-      (row: any) => !row.orderNo || !projectedOrderNos.has(row.orderNo)
-    );
-
-    // Apply neutral fallback for legacy mock fixtures (never fabricated progress)
-    const mappedFixtures = filteredFixtures.map((row: any) => {
-      const statusPengerjaan = row["Status Pengerjaan"] || "-";
-      let statusPembayaran = row["Status Pembayaran"];
-      if (!statusPembayaran) {
-        const inv = this.invoices.find(
-          (i) => row["No Invoice"] && (i.invoice === row["No Invoice"] || i.invoiceNo === row["No Invoice"])
-        );
-        statusPembayaran = inv ? deriveStatusPembayaran(inv) : "Tagihan Tidak Tersedia";
-      }
-      return {
-        ...row,
-        "Status Pengerjaan": statusPengerjaan,
-        "Status Pembayaran": statusPembayaran,
-        Status: row["Status"] || statusPengerjaan,
-      };
-    });
-
-    return [...projectedRows, ...mappedFixtures];
+    const mappedManual = manualOrFixtureData.map((row: any) => ({
+      ...row,
+      "Status Pengerjaan": row["Status Pengerjaan"] || "-",
+      "Status Pembayaran": row["Status Pembayaran"] || "Tagihan Tidak Tersedia",
+      Status: row["Status"] || row["Status Pengerjaan"] || "-",
+    }));
+    return [...projectedRows, ...mappedManual];
   }
 
   // =========================================================================
@@ -1156,122 +1164,17 @@ class FinanceStore {
   ): Promise<boolean> {
     if (amount <= 0) return false;
 
-    if (this.isApiMode) {
-      const ok = await Promise.resolve(financeRepository.recordPayment(invoiceId, amount, options));
-      if (ok) {
-        this.syncFromRepository();
-        const matched = this.invoices.find(
-          (inv) => inv.id === invoiceId || inv.invoice === String(invoiceId) || inv.invoiceNo === String(invoiceId)
-        );
-        if (matched) {
-          this.notifyPaymentSync(matched);
-        }
-      }
-      return !!ok;
-    }
-
-    const idx = this.invoices.findIndex((inv) => inv.id === invoiceId || inv.invoice === String(invoiceId));
-    if (idx === -1) return false;
-
-    const record = this.invoices[idx];
-    const newTerbayar = Math.min(record.totalTagihan, record.terbayar + amount);
-    const newSisa = Math.max(0, record.totalTagihan - newTerbayar);
-    const newStatus = derivePaymentStatus(record.totalTagihan, newTerbayar);
-
-    // REALIZATION RULE: Calculate cash newly received into company cash
-    const cashDelta = newTerbayar - record.cashRecordedAmount;
-
-    // PREVENT DUPLICATE CASH INFLOW: Only debit Kas Kantor if cash was NOT already recorded
-    if (cashDelta > 0) {
-      const lastTotal = this.kasKantor.length > 0 ? this.kasKantor[this.kasKantor.length - 1].total : 0;
-      const paymentDate = options?.tanggal || new Date().toLocaleDateString("id-ID");
-      const bankName = options?.bank || record.bank || "Kas Kantor";
-
-      const kasEntry: KasKantorItem = {
-        id: this.kasCounter++,
-        tanggal: paymentDate,
-        status: "Debit",
-        keterangan: `Pelunasan: ${record.invoice} - ${record.customer} (${record.nopol} / ${bankName})`,
-        debit: cashDelta,
-        kredit: 0,
-        total: lastTotal + cashDelta,
-        invoiceRef: record.invoice,
-      };
-
-      this.kasKantor.push(kasEntry);
-      record.cashRecordedAmount = newTerbayar;
-      record.isCashRealized = true;
-    }
-
-    record.terbayar = newTerbayar;
-    record.sisa = newSisa;
-    record.status = newStatus;
-    if (options?.paymentMethod) record.metodePembayaran = options.paymentMethod;
-    if (options?.bank) record.bank = options.bank;
-
-    // If fully paid, mark billing lifecycle completed so active tagihan clears
-    if (newStatus === "Lunas" && newSisa === 0) {
-      record.billingStatus = "COMPLETED";
-      record.completedAt = new Date().toISOString();
-      record.completedBy = options?.bank || "Finance Admin";
-    }
-
-    // Profit realization rule: Bayar di Awal must NOT finalize profit before Stage 5!
-    // Profit and cashback can only be marked REALIZED once finalCost is determined at Stage 5.
-    const isFinalized = record.settlementCondition && record.settlementCondition !== "PENDING_FINALIZATION";
-    if (newStatus === "Lunas" && isFinalized) {
-      record.profitStatus = "REALIZED";
-      record.cashbackStatus = "REALIZED";
-
-      // Also append or synchronize with profitData if not already present
-      const alreadyInProfit = this.profitData.some((p) => p.invoice === record.invoice || p.nopol === record.nopol);
-      if (!alreadyInProfit) {
-        this.profitData.unshift({
-          id: this.profitData.length + 1,
-          tanggal: record.tanggal,
-          nopol: record.nopol,
-          customer: record.customer,
-          namaBerkas: record.namaBerkas || "-",
-          pengurusan: record.jenisLayanan,
-          uangMasuk: record.totalTagihan,
-          biayaSamsat: record.biayaSamsat,
-          profit: record.profit,
-          rekening: record.bank || "BCA",
-          invoice: record.invoice,
-          tanggalTTB: record.tanggal,
-          ttb: `TTB_${record.invoice.replace(/[^0-9]/g, "") || "001"}`,
-        });
-      }
-    } else {
-      record.profitStatus = "PENDING";
-      record.cashbackStatus = "PENDING";
-      record.alasanPending = !isFinalized
-        ? "Menunggu verifikasi biaya final di Stage 5"
-        : "Menunggu pelunasan pembayaran";
-    }
-
-    // Synchronize corresponding Penjualan contract row if it exists
-    this.syncContractRowFromInvoice(record);
-
-    if (!options?.skipAudit) {
-      try {
-        auditLog.log({
-          userId: "usr-finance",
-          userName: "Finance User",
-          userRole: "finance",
-          action: "UPDATE",
-          module: "Finance - Kas Kantor",
-          details: `Pencatatan pembayaran ${record.invoice} (${record.customer}): Rp ${amount.toLocaleString('id-ID')} (${newStatus})`,
-          metadata: { invoice: record.invoice, amount, status: newStatus },
-        });
-      } catch {
-        // safe fallback
+    const ok = await Promise.resolve(financeRepository.recordPayment(invoiceId, amount, options));
+    if (ok) {
+      this.syncFromRepository();
+      const matched = this.invoices.find(
+        (inv) => inv.id === invoiceId || inv.invoice === String(invoiceId) || inv.invoiceNo === String(invoiceId)
+      );
+      if (matched) {
+        this.notifyPaymentSync(matched);
       }
     }
-
-    this.notifyPaymentSync(record);
-    this.notify();
-    return true;
+    return !!ok;
   }
 
   /**
@@ -1327,10 +1230,10 @@ class FinanceStore {
    * Transitions an invoice to COMPLETED lifecycle status so it is archived from active billing.
    * This is NOT a delete; historical financial record and ledger entries are completely preserved.
    */
-  public completeInvoice(
+  public async completeInvoice(
     invoiceId: number | string,
     completedBy?: string
-  ): boolean {
+  ): Promise<boolean> {
     const idx = this.invoices.findIndex((inv) => inv.id === invoiceId || inv.invoice === String(invoiceId) || inv.invoiceNo === String(invoiceId));
     if (idx === -1) return false;
 
@@ -1339,16 +1242,19 @@ class FinanceStore {
 
     // If not already Lunas, resolve payment first to ensure financial integrity
     if (record.status !== "Lunas") {
-      this.resolveInvoice(invoiceId, { skipAudit: true });
+      await Promise.resolve(this.resolveInvoice(invoiceId, { skipAudit: true }));
+    }
+
+    if (typeof (financeRepository as any).completeInvoice === "function") {
+      const persisted = await financeRepository.completeInvoice(Number(record.id), completedBy);
+      if (!persisted) {
+        return false;
+      }
     }
 
     record.billingStatus = "COMPLETED";
     record.completedAt = new Date().toISOString();
     record.completedBy = completedBy || "Admin";
-
-    if (this.isApiMode && typeof (financeRepository as any).completeInvoice === "function") {
-      financeRepository.completeInvoice(Number(record.id), completedBy);
-    }
 
     try {
       auditLog.log({
@@ -1441,34 +1347,7 @@ class FinanceStore {
     }
   ): Promise<boolean> {
     const idx = this.invoices.findIndex((inv) => inv.id === invoiceId || inv.invoice === String(invoiceId) || inv.invoiceNo === String(invoiceId));
-    if (idx === -1) {
-      // Graceful fallback for mock/preview items
-      const isCashFallback = options?.paymentMethod?.toLowerCase().includes("tunai") ||
-                             options?.paymentMethod?.toLowerCase().includes("cash") ||
-                             options?.bank?.toLowerCase().includes("tunai") ||
-                             options?.bank?.toLowerCase().includes("cash");
-      const payoutNominal = (options?.nominal !== undefined && Number(options.nominal) > 0)
-        ? Number(options.nominal)
-        : 250000;
-      const lastTotal = this.kasKantor.length > 0 ? this.kasKantor[this.kasKantor.length - 1].total : 0;
-      this.kasKantor.push({
-        id: this.kasCounter++,
-        tanggal: options?.tanggal || new Date().toISOString().split("T")[0],
-        kategori: "PENGELUARAN",
-        tipe: "OPERASIONAL",
-        keterangan: `Pencairan cashback / refund: ${options?.penerima || "Konsumen"} (${isCashFallback ? "Tunai - Kas Kantor" : options?.bank || "Transfer"})`,
-        debit: 0,
-        kredit: payoutNominal,
-        masuk: 0,
-        keluar: payoutNominal,
-        total: Math.max(0, lastTotal - payoutNominal),
-        status: "Tercatat",
-        metode: isCashFallback ? "Tunai" : (options?.paymentMethod || "Transfer Bank"),
-        bank: isCashFallback ? "Tunai" : (options?.bank || "BCA"),
-      });
-      this.notify();
-      return true;
-    }
+    if (idx === -1) return false;
     const record = this.invoices[idx];
 
     const proof = options?.buktiPembayaran || (options?.bukti ? {
@@ -1498,128 +1377,106 @@ class FinanceStore {
                    options?.bank === "—" ||
                    options?.bank === "-";
 
-    if (this.isApiMode && typeof (financeRepository as any).payoutCashback === "function") {
-      try {
-        await (financeRepository as any).payoutCashback(Number(record.id), {
-          nominal: amountToPay,
-          paymentType: pType,
-          penerima: options?.penerima || record.customer,
-          nomorHP: options?.nomorHP || record.phone || "-",
-          bank: isCash ? "Tunai" : (options?.bank || "BCA"),
-          noRekening: isCash ? "" : (options?.noRekening || ""),
-          namaRekening: isCash ? "" : (options?.namaRekening || options?.penerima || record.customer),
-          paymentMethod: options?.paymentMethod || (isCash ? "Cash" : "Transfer Bank"),
-          buktiPembayaran: proof,
-          catatan: options?.catatan,
-          tanggal: options?.tanggal || new Date().toISOString().split("T")[0],
-          idempotencyKey: options?.idempotencyKey,
-          expectedVersion: options?.expectedVersion,
-        });
-        this.syncFromRepository();
-        return true;
-      } catch (err) {
-        console.error("payoutCashback in financeStore failed:", err);
-        throw err;
-      }
+    if (typeof (financeRepository as any).payoutCashback !== "function") {
+      throw new Error("Provider keuangan aktif tidak mendukung pencairan cashback.");
     }
-
-    if (pType === "KELEBIHAN" || pType === "ALL") {
-      record.refundStatus = "PROCESSED";
-    }
-    if (pType === "KOMISI" || pType === "ALL") {
-      record.cashbackStatus = "REALIZED";
-    }
-
-    const lastTotal = this.kasKantor.length > 0 ? this.kasKantor[this.kasKantor.length - 1].total : 0;
-    const desc = pType === "KELEBIHAN"
-      ? `Pengembalian kelebihan bayar: ${record.invoice || record.invoiceNo} - ${record.customer} (${record.nopol})`
-      : (pType === "KOMISI"
-          ? `Pencairan komisi rekanan: ${record.invoice || record.invoiceNo} - ${record.customer} (${record.nopol})`
-          : `Pencairan cashback & refund: ${record.invoice || record.invoiceNo} - ${record.customer} (${record.nopol})`);
-
-    this.kasKantor.push({
-      id: this.kasCounter++,
-      tanggal: options?.tanggal || new Date().toLocaleDateString("id-ID"),
-      status: "Kredit",
-      keterangan: desc,
-      debit: 0,
-      kredit: amountToPay,
-      total: lastTotal - amountToPay,
-      invoiceRef: record.invoice || record.invoiceNo,
-    });
 
     try {
-      auditLog.log({
-        userId: "usr-finance",
-        userName: options?.processedBy || "Finance Admin",
-        userRole: "finance",
-        action: "UPDATE",
-        module: "Finance - Cashback",
-        details: `${desc}: Rp ${amountToPay.toLocaleString("id-ID")}`,
-        metadata: { invoice: record.invoice, amount: amountToPay, type: pType },
+      await (financeRepository as any).payoutCashback(Number(record.id), {
+        nominal: amountToPay,
+        paymentType: pType,
+        penerima: options?.penerima || record.customer,
+        nomorHP: options?.nomorHP || record.phone || "-",
+        bank: isCash ? "Tunai" : (options?.bank || "BCA"),
+        noRekening: isCash ? "" : (options?.noRekening || ""),
+        namaRekening: isCash ? "" : (options?.namaRekening || options?.penerima || record.customer),
+        paymentMethod: options?.paymentMethod || (isCash ? "Cash" : "Transfer Bank"),
+        buktiPembayaran: proof,
+        catatan: options?.catatan,
+        tanggal: options?.tanggal || new Date().toISOString().split("T")[0],
+        idempotencyKey: options?.idempotencyKey,
+        expectedVersion: options?.expectedVersion,
       });
-    } catch {}
+      this.syncFromRepository();
+      return true;
+    } catch (err) {
+      console.error("payoutCashback in financeStore failed:", err);
+      throw err;
+    }
+  }
 
-    this.notifyPaymentSync(record);
+  public async completeCashback(
+    invoiceId: number | string,
+    options?: {
+      catatan?: string;
+      idempotencyKey?: string;
+      expectedVersion?: number;
+    }
+  ): Promise<InvoiceBillingRecord> {
+    const record = this.invoices.find(
+      (inv) =>
+        inv.id === invoiceId ||
+        inv.invoice === String(invoiceId) ||
+        inv.invoiceNo === String(invoiceId)
+    );
+    if (!record) {
+      throw new Error("Invoice cashback tidak ditemukan.");
+    }
+    if (typeof (financeRepository as any).completeCashback !== "function") {
+      throw new Error("Provider keuangan aktif tidak mendukung penyelesaian cashback.");
+    }
+
+    const updated = await (financeRepository as any).completeCashback(Number(record.id), {
+      catatan: options?.catatan,
+      idempotencyKey:
+        options?.idempotencyKey ||
+        `cb-complete-${record.id}-v${Number((record as any).payoutVersion ?? (record.payoutHistory || []).length)}`,
+      expectedVersion:
+        options?.expectedVersion !== undefined
+          ? options.expectedVersion
+          : Number((record as any).payoutVersion ?? (record.payoutHistory || []).length),
+    });
+
+    this.syncFromRepository();
     this.notify();
-    return true;
+    return updated as InvoiceBillingRecord;
   }
 
   public async voidInvoicePayment(invoiceId: number | string, paymentId: number, reason: string): Promise<boolean> {
-    if (this.isApiMode) {
-      try {
-        const ok = await financeRepository.voidInvoicePayment(Number(invoiceId), paymentId, reason);
-        if (!ok) {
-          throw new Error("Provider keuangan aktif tidak mendukung pembatalan (Void) pembayaran.");
-        }
-        this.syncFromRepository();
-        return true;
-      } catch (err) {
-        console.error("voidInvoicePayment in financeStore failed:", err);
-        throw err;
+    try {
+      const ok = await financeRepository.voidInvoicePayment(Number(invoiceId), paymentId, reason);
+      if (!ok) {
+        throw new Error("Provider keuangan aktif tidak mendukung pembatalan (Void) pembayaran.");
       }
+      this.syncFromRepository();
+      return true;
+    } catch (err) {
+      console.error("voidInvoicePayment in financeStore failed:", err);
+      throw err;
     }
-    const idx = this.invoices.findIndex((inv) => inv.id === invoiceId || inv.invoice === String(invoiceId) || inv.invoiceNo === String(invoiceId));
-    if (idx !== -1) {
-      this.invoices[idx].status = "Belum Lunas";
-      this.notify();
-    }
-    return true;
   }
 
   public async voidCashbackPayout(invoiceId: number | string, reason: string): Promise<boolean> {
-    if (this.isApiMode) {
-      try {
-        const ok = await financeRepository.voidCashbackPayout(Number(invoiceId), reason);
-        if (!ok) {
-          throw new Error("Provider keuangan aktif tidak mendukung pembatalan (Void) cashback.");
-        }
-        this.syncFromRepository();
-        return true;
-      } catch (err) {
-        console.error("voidCashbackPayout in financeStore failed:", err);
-        throw err;
+    try {
+      const ok = await financeRepository.voidCashbackPayout(Number(invoiceId), reason);
+      if (!ok) {
+        throw new Error("Provider keuangan aktif tidak mendukung pembatalan (Void) cashback.");
       }
+      this.syncFromRepository();
+      return true;
+    } catch (err) {
+      console.error("voidCashbackPayout in financeStore failed:", err);
+      throw err;
     }
-    const idx = this.invoices.findIndex((inv) => inv.id === invoiceId || inv.invoice === String(invoiceId) || inv.invoiceNo === String(invoiceId));
-    if (idx !== -1) {
-      this.invoices[idx].refundStatus = "PENDING";
-      this.invoices[idx].cashbackStatus = "PENDING";
-      this.notify();
-    }
-    return true;
   }
 
   public async getVoidAuditHistory(): Promise<{ payments: any[]; cashbacks: any[] }> {
-    if (this.isApiMode) {
-      try {
-        return await financeRepository.getVoidAuditHistory();
-      } catch (err) {
-        console.error("getVoidAuditHistory failed:", err);
-        throw err;
-      }
+    try {
+      return await financeRepository.getVoidAuditHistory();
+    } catch (err) {
+      console.error("getVoidAuditHistory failed:", err);
+      throw err;
     }
-    return { payments: [], cashbacks: [] };
   }
 
   /**
@@ -1673,16 +1530,30 @@ class FinanceStore {
     if (updates.collectionStatus !== undefined) record.collectionStatus = updates.collectionStatus;
 
     const settlementCond = updates.settlementCondition || record.settlementCondition;
+    const isCancelledRecord =
+      String(newStatus || "").trim().toUpperCase() === "CANCELLED" ||
+      String((record as any).billingStatus || "").trim().toUpperCase() === "CANCELLED" ||
+      Boolean((record as any).isCancelled);
     const isFinalized = settlementCond && settlementCond !== "PENDING_FINALIZATION";
-    const isProfitRealized = newStatus === "Lunas" && isFinalized;
+    const isProfitRealized = !isCancelledRecord && newStatus === "Lunas" && isFinalized;
 
-    if (isProfitRealized) {
+    if (isCancelledRecord) {
+      record.profitStatus = "PENDING";
+      this.profitData = this.profitData.filter((p) => {
+        const pOrd = String((p as any).orderNo || "").trim().toUpperCase();
+        const rOrd = String((record as any).orderNo || orderNo || "").trim().toUpperCase();
+        return p.invoice !== record.invoice && (!rOrd || pOrd !== rOrd);
+      });
+    } else if (isProfitRealized) {
       record.profitStatus = "REALIZED";
       record.cashbackStatus = "REALIZED";
       if (!record.collectionStatus) record.collectionStatus = "LUNAS";
 
+      const recordOrderNo = String((record as any).orderNo || orderNo || "").trim().toUpperCase();
       const existingProfitIdx = this.profitData.findIndex(
-        (p) => p.invoice === record.invoice || (record.nopol && p.nopol === record.nopol)
+        (p) =>
+          (recordOrderNo && String((p as any).orderNo || "").trim().toUpperCase() === recordOrderNo) ||
+          p.invoice === record.invoice
       );
       if (existingProfitIdx >= 0) {
         this.profitData[existingProfitIdx] = {
@@ -1694,6 +1565,7 @@ class FinanceStore {
       } else {
         this.profitData.unshift({
           id: this.profitData.length + 1,
+          orderNo: (record as any).orderNo || orderNo || "",
           tanggal: record.tanggal,
           nopol: record.nopol,
           customer: record.customer,
@@ -1702,11 +1574,11 @@ class FinanceStore {
           uangMasuk: newTotal, // Final cost (strictly excludes overpayment)
           biayaSamsat: record.biayaSamsat,
           profit: record.profit,
-          rekening: record.bank || "BCA",
+          rekening: record.bank || "-",
           invoice: record.invoice,
           tanggalTTB: record.tanggal,
           ttb: `TTB_${record.invoice.replace(/[^0-9]/g, "") || "001"}`,
-        });
+        } as any);
       }
     } else {
       record.profitStatus = "PENDING";
@@ -1864,8 +1736,12 @@ class FinanceStore {
     }
 
     const settlementCond = updates.settlementCondition || current.settlementCondition;
+    const isCancelledUpdate =
+      String((updates as any).status || current.status || "").trim().toUpperCase() === "CANCELLED" ||
+      String((updates as any).billingStatus || (current as any).billingStatus || "").trim().toUpperCase() === "CANCELLED" ||
+      Boolean((updates as any).isCancelled ?? (current as any).isCancelled);
     const isFinalized = settlementCond && settlementCond !== "PENDING_FINALIZATION";
-    const isProfitRealized = (isLunas || status === "Kelebihan Bayar") && isFinalized;
+    const isProfitRealized = !isCancelledUpdate && (isLunas || status === "Kelebihan Bayar") && isFinalized;
 
     const profitMetrics = calculateInvoiceProfitMetrics({
       dibayar: paid,
@@ -1882,15 +1758,25 @@ class FinanceStore {
       totalTagihan: total,
       terbayar: paid,
       sisa: Math.max(0, total - paid),
-      status,
-      profit: updates.profit !== undefined ? updates.profit : calculatedProfit,
+      status: isCancelledUpdate ? ("CANCELLED" as any) : status,
+      profit: isCancelledUpdate ? 0 : (updates.profit !== undefined ? updates.profit : calculatedProfit),
       profitStatus: isProfitRealized ? "REALIZED" : "PENDING",
       cashbackStatus: isProfitRealized ? "REALIZED" : "PENDING",
     };
 
-    if (isProfitRealized) {
+    if (isCancelledUpdate) {
+      const currentOrderNo = String((current as any).orderNo || "").trim().toUpperCase();
+      this.profitData = this.profitData.filter(
+        (p) =>
+          p.invoice !== current.invoice &&
+          (!currentOrderNo || String((p as any).orderNo || "").trim().toUpperCase() !== currentOrderNo)
+      );
+    } else if (isProfitRealized) {
+      const currentOrderNo = String((current as any).orderNo || "").trim().toUpperCase();
       const existingProfitIdx = this.profitData.findIndex(
-        (p) => p.invoice === current.invoice || (current.nopol && p.nopol === current.nopol)
+        (p) =>
+          (currentOrderNo && String((p as any).orderNo || "").trim().toUpperCase() === currentOrderNo) ||
+          p.invoice === current.invoice
       );
       if (existingProfitIdx >= 0) {
         this.profitData[existingProfitIdx] = {
@@ -1902,6 +1788,7 @@ class FinanceStore {
       } else {
         this.profitData.unshift({
           id: this.profitData.length + 1,
+          orderNo: (current as any).orderNo || "",
           tanggal: current.tanggal,
           nopol: current.nopol,
           customer: current.customer,
@@ -1910,11 +1797,11 @@ class FinanceStore {
           uangMasuk: profitMetrics.recognizedRevenue, // Recognized revenue strictly excludes overpayment
           biayaSamsat: this.invoices[idx].biayaSamsat,
           profit: this.invoices[idx].profit,
-          rekening: current.bank || "BCA",
+          rekening: current.bank || "-",
           invoice: current.invoice,
           tanggalTTB: current.tanggal,
           ttb: `TTB_${current.invoice.replace(/[^0-9]/g, "") || "001"}`,
-        });
+        } as any);
       }
     }
 
@@ -1968,45 +1855,36 @@ class FinanceStore {
   // ==========================================
 
   public addKasKantor(item: Omit<KasKantorItem, "id" | "total"> & { total?: number }): KasKantorItem {
-    if (this.isApiMode) {
-      const added = financeRepository.addKasKantor ? financeRepository.addKasKantor(item as any) : null;
-      if (added) {
-        this.syncFromRepository();
-        return added;
-      }
+    if (!financeRepository.addKasKantor) {
+      throw new Error("Provider keuangan aktif tidak mendukung penambahan Kas Kantor.");
     }
-
-    const lastTotal = this.kasKantor.length > 0 ? this.kasKantor[this.kasKantor.length - 1].total : 0;
-    const runningTotal = item.total !== undefined ? item.total : lastTotal + item.debit - item.kredit;
-
-    const newItem: KasKantorItem = {
-      id: this.kasCounter++,
-      tanggal: item.tanggal,
-      status: item.status,
-      keterangan: item.keterangan,
-      debit: item.debit,
-      kredit: item.kredit,
-      penanggungJawab: item.penanggungJawab,
-      kategori: item.kategori,
-      orderNo: (item as any).orderNo,
-      invoiceNo: (item as any).invoiceNo,
-      total: runningTotal,
-      invoiceRef: item.invoiceRef,
-      paymentMethodId: (item as any).paymentMethodId || (item as any).payment_method_id || null,
-      paymentMethodSnapshot: (item as any).paymentMethodSnapshot || (item as any).payment_method_snapshot || null,
-    };
-
-    this.kasKantor.unshift(newItem);
-    this.notify();
-    return newItem;
+    const added = financeRepository.addKasKantor(item as any);
+    if (!added) {
+      throw new Error("Gagal menambahkan data Kas Kantor.");
+    }
+    this.syncFromRepository();
+    return added;
   }
 
-  public updateKasKantor(id: number, updates: Partial<KasKantorItem>): boolean {
-    const idx = this.kasKantor.findIndex((k) => k.id === id);
-    if (idx === -1) return false;
-    this.kasKantor[idx] = { ...this.kasKantor[idx], ...updates };
-    this.notify();
-    return true;
+  public async addKasKantorAsync(item: Omit<KasKantorItem, "id" | "total"> & { total?: number }): Promise<KasKantorItem> {
+    if (financeRepository.addKasKantorAsync) {
+      const added = await financeRepository.addKasKantorAsync(item as any);
+      this.syncFromRepository();
+      return added;
+    }
+    return this.addKasKantor(item);
+  }
+
+  public async updateKasKantor(
+    id: number,
+    updates: Partial<KasKantorItem> & { nominal?: number; reason?: string; editReason?: string }
+  ): Promise<KasKantorItem> {
+    if (!financeRepository.updateKasKantor) {
+      throw new Error("Provider keuangan aktif tidak mendukung pengeditan Kas Kantor.");
+    }
+    const updated = await financeRepository.updateKasKantor(id, updates);
+    this.syncFromRepository();
+    return updated;
   }
 
   public async deleteKasKantor(id: number, reason: string): Promise<boolean> {
@@ -2017,16 +1895,11 @@ class FinanceStore {
     const idx = this.kasKantor.findIndex((k) => k.id === id);
     if (idx === -1) return false;
 
-    if (this.isApiMode) {
-      if (financeRepository.deleteKasKantor) {
-        await financeRepository.deleteKasKantor(id, cleanReason);
-        this.syncFromRepository();
-        return true;
-      }
+    if (!financeRepository.deleteKasKantor) {
+      throw new Error("Provider keuangan aktif tidak mendukung penghapusan Kas Kantor.");
     }
-
-    this.kasKantor.splice(idx, 1);
-    this.notify();
+    await financeRepository.deleteKasKantor(id, cleanReason);
+    this.syncFromRepository();
     return true;
   }
 
@@ -2035,42 +1908,36 @@ class FinanceStore {
   // ==========================================
 
   public addKasMessenger(item: Omit<KasMessengerItem, "id" | "total"> & { total?: number }): KasMessengerItem {
-    if (this.isApiMode) {
-      const added = financeRepository.addKasMessenger ? financeRepository.addKasMessenger(item) : null;
-      if (added) {
-        this.syncFromRepository();
-        return added;
-      }
+    if (!financeRepository.addKasMessenger) {
+      throw new Error("Provider keuangan aktif tidak mendukung penambahan Kas Messenger.");
     }
-
-    const lastTotal = this.kasMessenger.length > 0 ? this.kasMessenger[this.kasMessenger.length - 1].total : 0;
-    const runningTotal = item.total !== undefined ? item.total : lastTotal + item.in - item.out;
-
-    const newItem: KasMessengerItem = {
-      id: this.kasCounter++,
-      tanggal: item.tanggal,
-      jenis: item.jenis,
-      messenger: item.messenger,
-      keterangan: item.keterangan,
-      in: item.in,
-      out: item.out,
-      total: runningTotal,
-      orderNo: (item as any).orderNo,
-      paymentMethodId: (item as any).paymentMethodId || (item as any).payment_method_id || null,
-      paymentMethodSnapshot: (item as any).paymentMethodSnapshot || (item as any).payment_method_snapshot || null,
-    };
-
-    this.kasMessenger.push(newItem);
-    this.notify();
-    return newItem;
+    const added = financeRepository.addKasMessenger(item);
+    if (!added) {
+      throw new Error("Gagal menambahkan data Kas Messenger.");
+    }
+    this.syncFromRepository();
+    return added;
   }
 
-  public updateKasMessenger(id: number, updates: Partial<KasMessengerItem>): boolean {
-    const idx = this.kasMessenger.findIndex((k) => k.id === id);
-    if (idx === -1) return false;
-    this.kasMessenger[idx] = { ...this.kasMessenger[idx], ...updates };
-    this.notify();
-    return true;
+  public async addKasMessengerAsync(item: Omit<KasMessengerItem, "id" | "total"> & { total?: number }): Promise<KasMessengerItem> {
+    if (financeRepository.addKasMessengerAsync) {
+      const added = await financeRepository.addKasMessengerAsync(item);
+      this.syncFromRepository();
+      return added;
+    }
+    return this.addKasMessenger(item);
+  }
+
+  public async updateKasMessenger(
+    id: number,
+    updates: Partial<KasMessengerItem> & { reason?: string; editReason?: string }
+  ): Promise<KasMessengerItem> {
+    if (!financeRepository.updateKasMessenger) {
+      throw new Error("Provider keuangan aktif tidak mendukung pengeditan Kas Messenger.");
+    }
+    const updated = await financeRepository.updateKasMessenger(id, updates);
+    this.syncFromRepository();
+    return updated;
   }
 
   public async deleteKasMessenger(id: number, reason: string): Promise<boolean> {
@@ -2081,16 +1948,11 @@ class FinanceStore {
     const idx = this.kasMessenger.findIndex((k) => k.id === id);
     if (idx === -1) return false;
 
-    if (this.isApiMode) {
-      if (financeRepository.deleteKasMessenger) {
-        await financeRepository.deleteKasMessenger(id, cleanReason);
-        this.syncFromRepository();
-        return true;
-      }
+    if (!financeRepository.deleteKasMessenger) {
+      throw new Error("Provider keuangan aktif tidak mendukung penghapusan Kas Messenger.");
     }
-
-    this.kasMessenger.splice(idx, 1);
-    this.notify();
+    await financeRepository.deleteKasMessenger(id, cleanReason);
+    this.syncFromRepository();
     return true;
   }
 
@@ -2099,28 +1961,15 @@ class FinanceStore {
   // ==========================================
 
   public addPengeluaran(item: Omit<PengeluaranItem, "id">): PengeluaranItem {
-    if (this.isApiMode) {
-      const added = financeRepository.addPengeluaran ? financeRepository.addPengeluaran(item) : null;
-      if (added) {
-        this.syncFromRepository();
-        return added;
-      }
+    if (!financeRepository.addPengeluaran) {
+      throw new Error("Provider keuangan aktif tidak mendukung penambahan Pengeluaran.");
     }
-
-    const nextId = Math.max(0, ...this.pengeluaran.map((p) => p.id)) + 1;
-    const newItem: PengeluaranItem = {
-      id: nextId,
-      tanggal: item.tanggal,
-      keterangan: item.keterangan,
-      nominal: item.nominal,
-      penanggungJawab: item.penanggungJawab,
-      kategori: (item as any).kategori,
-      orderNo: (item as any).orderNo,
-      invoiceNo: (item as any).invoiceNo,
-    };
-    this.pengeluaran.unshift(newItem);
-    this.notify();
-    return newItem;
+    const added = financeRepository.addPengeluaran(item);
+    if (!added) {
+      throw new Error("Gagal menambahkan data Pengeluaran.");
+    }
+    this.syncFromRepository();
+    return added;
   }
 
   public updatePengeluaran(id: number, updates: Partial<PengeluaranItem>): boolean {
@@ -2139,16 +1988,11 @@ class FinanceStore {
     const idx = this.pengeluaran.findIndex((p) => p.id === id);
     if (idx === -1) return false;
 
-    if (this.isApiMode) {
-      if (financeRepository.deletePengeluaran) {
-        await financeRepository.deletePengeluaran(id, cleanReason);
-        this.syncFromRepository();
-        return true;
-      }
+    if (!financeRepository.deletePengeluaran) {
+      throw new Error("Provider keuangan aktif tidak mendukung penghapusan Pengeluaran.");
     }
-
-    this.pengeluaran.splice(idx, 1);
-    this.notify();
+    await financeRepository.deletePengeluaran(id, cleanReason);
+    this.syncFromRepository();
     return true;
   }
 
@@ -3806,19 +3650,6 @@ class FinanceStore {
       cleanOrderNo = id.trim().toUpperCase();
     }
 
-    if (cleanOrderNo) {
-      this.deletedOrderNos.add(cleanOrderNo);
-      try {
-        if (typeof window !== "undefined" && window.localStorage) {
-          const stored = JSON.parse(localStorage.getItem("sun89_deleted_order_nos") || "[]");
-          if (!stored.includes(cleanOrderNo)) {
-            stored.push(cleanOrderNo);
-            localStorage.setItem("sun89_deleted_order_nos", JSON.stringify(stored));
-          }
-        }
-      } catch {}
-    }
-
     // Filter out from contract datasets across all categories
     for (const cat of Object.keys(this.contractDatasets) as PenjualanContractCategory[]) {
       const dataset = this.contractDatasets[cat];
@@ -3904,20 +3735,6 @@ class FinanceStore {
       await (orderRepository as any).deleteOrder(cleanOrderNo);
     }
 
-    // Apply local cache cleanup without issuing a second/redundant backend DELETE request
-    if (cleanOrderNo) {
-      this.deletedOrderNos.add(cleanOrderNo);
-      try {
-        if (typeof window !== "undefined" && window.localStorage) {
-          const stored = JSON.parse(localStorage.getItem("sun89_deleted_order_nos") || "[]");
-          if (!stored.includes(cleanOrderNo)) {
-            stored.push(cleanOrderNo);
-            localStorage.setItem("sun89_deleted_order_nos", JSON.stringify(stored));
-          }
-        }
-      } catch {}
-    }
-
     for (const cat of Object.keys(this.contractDatasets) as PenjualanContractCategory[]) {
       const dataset = this.contractDatasets[cat];
       if (Array.isArray(dataset)) {
@@ -3967,6 +3784,11 @@ class FinanceStore {
           inv.settlementCondition = "OVERPAID" as any;
         }
       }
+      this.profitData = this.profitData.filter((p) => {
+        const pOrd = String((p as any).orderNo || "").trim().toUpperCase();
+        const pInv = String(p.invoice || "").trim().toUpperCase();
+        return pOrd !== cleanNo && (!inv || (pInv !== String(inv.invoiceNo || "").trim().toUpperCase() && pInv !== String(inv.invoice || "").trim().toUpperCase()));
+      });
       // Update matching rows across contract datasets
       for (const cat of Object.keys(this.contractDatasets) as PenjualanContractCategory[]) {
         const dataset = this.contractDatasets[cat];
@@ -4007,79 +3829,80 @@ class FinanceStore {
   }
 
   public async refreshReimbursements(): Promise<void> {
-    if (!this.isApiMode) return;
-    try {
-      const token = typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
-      if (token) {
+    if (!this.canFetchReimbursements()) return;
+    if (this.reimbursementFetchPromise) return this.reimbursementFetchPromise;
+
+    const token = this.getReimbursementToken();
+    const capturedKey = this.buildReimbursementAuthKey();
+    if (!token) return;
+
+    this.reimbursementFetchPromise = (async () => {
+      try {
         const res = await fetch(`${APP_CONFIG.apiBaseUrl}/messenger/reimbursements`, {
           headers: { Authorization: `Bearer ${token}` },
         });
+        if (!this.canFetchReimbursements() || !res.ok) return;
         const payload = await res.json();
+        if (!this.canFetchReimbursements()) return;
         if (payload.success && Array.isArray(payload.data)) {
           this.reimbursementRequests = payload.data;
+          this.lastReimbursementAuthKey = capturedKey;
           this.notify();
         }
+      } catch {
+        // retain safe empty/prior state
+      } finally {
+        this.reimbursementFetchPromise = null;
       }
-    } catch {}
+    })();
+
+    return this.reimbursementFetchPromise;
   }
 
   public async submitReimbursement(
     data: Omit<ReimbursementRequest, "id" | "status" | "submittedAt">
   ): Promise<{ success: boolean; data?: ReimbursementRequest; error?: string }> {
-    if (this.isApiMode) {
-      try {
-        const token = typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
-        if (!token) {
-          return { success: false, error: "Sesi login tidak valid. Silakan login kembali." };
-        }
-
-        const res = await fetch(`${APP_CONFIG.apiBaseUrl}/messenger/reimbursements`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-          body: JSON.stringify(data),
-        });
-
-        const payload = await res.json();
-        if (!res.ok || !payload.success) {
-          const errMsg = payload.error?.message || payload.message || "Gagal menyimpan pengajuan biaya di server.";
-          return { success: false, error: errMsg };
-        }
-
-        const savedReq: ReimbursementRequest = payload.data;
-        this.reimbursementRequests = [
-          savedReq,
-          ...this.reimbursementRequests.filter((r) => r.id !== savedReq.id),
-        ];
-        this.notify();
-
-        try {
-          auditLog.log({
-            userId: data.employeeId,
-            userName: data.messengerName,
-            userRole: "messenger",
-            action: "CREATE",
-            module: "Reimbursement",
-            details: `Pengajuan biaya operasional ${data.category} sebesar Rp ${data.amount.toLocaleString("id-ID")}${data.orderNo ? ` (Order ${data.orderNo})` : ""}`,
-            metadata: { reimbursementId: savedReq.id, amount: data.amount, category: data.category, orderNo: data.orderNo },
-          });
-        } catch {}
-
-        return { success: true, data: savedReq };
-      } catch (err: any) {
-        return { success: false, error: err?.message || "Terjadi kesalahan jaringan saat mengirim pengajuan biaya." };
+    try {
+      const token = typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
+      if (!token) {
+        return { success: false, error: "Sesi login tidak valid. Silakan login kembali." };
       }
-    }
 
-    const nextNum = this.reimbursementRequests.length + 1;
-    const newReq: ReimbursementRequest = {
-      ...data,
-      id: `REIMB-${String(nextNum).padStart(3, "0")}`,
-      status: "Diajukan",
-      submittedAt: new Date().toISOString(),
-    };
-    this.reimbursementRequests.unshift(newReq);
-    this.notify();
-    return { success: true, data: newReq };
+      const res = await fetch(`${APP_CONFIG.apiBaseUrl}/messenger/reimbursements`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify(data),
+      });
+
+      const payload = await res.json();
+      if (!res.ok || !payload.success) {
+        const errMsg = payload.error?.message || payload.message || "Gagal menyimpan pengajuan biaya di server.";
+        return { success: false, error: errMsg };
+      }
+
+      const savedReq: ReimbursementRequest = payload.data;
+      this.reimbursementRequests = [
+        savedReq,
+        ...this.reimbursementRequests.filter((r) => r.id !== savedReq.id),
+      ];
+      this.notify();
+
+      try {
+        auditLog.log({
+          userId: data.employeeId,
+          userName: data.messengerName,
+          userRole: "messenger",
+          action: "CREATE",
+          module: "Reimbursement",
+          details: `Pengajuan biaya operasional ${data.category} sebesar Rp ${data.amount.toLocaleString("id-ID")}${data.orderNo ? ` (Order ${data.orderNo})` : ""}`,
+          metadata: { reimbursementId: savedReq.id, amount: data.amount, category: data.category, orderNo: data.orderNo },
+        });
+      } catch {}
+
+      return { success: true, data: savedReq };
+    } catch (err: any) {
+      return { success: false, error: err?.message || "Terjadi kesalahan jaringan saat mengirim pengajuan biaya." };
+    }
   }
 
   public async reviewReimbursement(
@@ -4095,176 +3918,190 @@ class FinanceStore {
     }
 
     const req = this.reimbursementRequests.find((r) => r.id === id);
-    if (!req && !this.isApiMode) {
-      return { success: false, error: `Pengajuan biaya '${id}' tidak ditemukan.` };
-    }
 
     const finalApproved = approvedAmount !== undefined ? approvedAmount : (decision === "Disetujui" ? (req?.amount || 0) : 0);
     const finalRejected = rejectedAmount !== undefined ? rejectedAmount : (decision === "Ditolak" ? (req?.amount || 0) : ((req?.amount || 0) - finalApproved));
 
-    if (this.isApiMode) {
-      try {
-        const token = typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
-        if (!token) {
-          return { success: false, error: "Sesi login tidak valid. Silakan login kembali." };
-        }
-
-        const res = await fetch(`${APP_CONFIG.apiBaseUrl}/messenger/reimbursements/${id}/review`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-          body: JSON.stringify({
-            decision,
-            reviewNotes,
-            approvedAmount: finalApproved,
-            rejectedAmount: finalRejected,
-          }),
-        });
-
-        const payload = await res.json();
-        if (!res.ok || !payload.success) {
-          const errMsg = payload.message || payload.error?.message || `Gagal mereview pengajuan (HTTP ${res.status})`;
-          return { success: false, error: errMsg };
-        }
-
-        const updatedData: ReimbursementRequest = payload.data;
-        const idx = this.reimbursementRequests.findIndex((r) => r.id === id);
-        if (idx !== -1) {
-          this.reimbursementRequests[idx] = updatedData;
-        } else {
-          this.reimbursementRequests.unshift(updatedData);
-        }
-
-        try {
-          auditLog.log({
-            userId: "usr-finance",
-            userName: reviewer.userName,
-            userRole: reviewer.role as any,
-            action: "UPDATE",
-            module: "Reimbursement Review",
-            details: `Pengajuan biaya ${id} (${updatedData.messengerName}) diubah status menjadi ${decision}${finalApproved > 0 ? ` (Disetujui Rp ${finalApproved.toLocaleString("id-ID")})` : ""}`,
-            metadata: { id, status: decision, approvedAmount: finalApproved, rejectedAmount: finalRejected },
-          });
-        } catch {}
-
-        this.notify();
-        return { success: true, data: updatedData };
-      } catch (err: any) {
-        return { success: false, error: err?.message || "Terjadi kesalahan jaringan saat memproses review." };
-      }
-    }
-
-    if (!req) return { success: false, error: "Pengajuan tidak ditemukan." };
-    if (req.status === "Dibayar") {
-      return { success: false, error: "Pengajuan biaya sudah dicairkan/dibayar dan tidak dapat diubah lagi." };
-    }
-    if (req.status === "Disetujui" && decision === "Disetujui") {
-      return { success: false, error: "Pengajuan biaya ini sudah disetujui sebelumnya." };
-    }
-
-    req.status = decision;
-    req.reviewedAt = new Date().toISOString();
-    req.reviewedBy = reviewer.userName;
-    req.approvedAmount = finalApproved;
-    req.rejectedAmount = finalRejected;
-    if (reviewNotes !== undefined) req.reviewNotes = reviewNotes;
-
     try {
-      auditLog.log({
-        userId: "usr-finance",
-        userName: reviewer.userName,
-        userRole: reviewer.role as any,
-        action: "UPDATE",
-        module: "Reimbursement Review",
-        details: `Pengajuan biaya ${id} (${req.messengerName}) diubah status menjadi ${decision}${finalApproved > 0 ? ` (Disetujui Rp ${finalApproved.toLocaleString("id-ID")})` : ""}`,
-        metadata: { id, status: decision, approvedAmount: finalApproved, rejectedAmount: finalRejected },
-      });
-    } catch {}
+      const token = typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
+      if (!token) {
+        return { success: false, error: "Sesi login tidak valid. Silakan login kembali." };
+      }
 
-    this.notify();
-    return { success: true, data: req };
+      const res = await fetch(`${APP_CONFIG.apiBaseUrl}/messenger/reimbursements/${id}/review`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          decision,
+          reviewNotes,
+          approvedAmount: finalApproved,
+          rejectedAmount: finalRejected,
+        }),
+      });
+
+      const payload = await res.json();
+      if (!res.ok || !payload.success) {
+        const errMsg = payload.message || payload.error?.message || `Gagal mereview pengajuan (HTTP ${res.status})`;
+        return { success: false, error: errMsg };
+      }
+
+      const updatedData: ReimbursementRequest = payload.data;
+      const idx = this.reimbursementRequests.findIndex((r) => r.id === id);
+      if (idx !== -1) {
+        this.reimbursementRequests[idx] = updatedData;
+      } else {
+        this.reimbursementRequests.unshift(updatedData);
+      }
+
+      try {
+        auditLog.log({
+          userId: "usr-finance",
+          userName: reviewer.userName,
+          userRole: reviewer.role as any,
+          action: "UPDATE",
+          module: "Reimbursement Review",
+          details: `Pengajuan biaya ${id} (${updatedData.messengerName}) diubah status menjadi ${decision}${finalApproved > 0 ? ` (Disetujui Rp ${finalApproved.toLocaleString("id-ID")})` : ""}`,
+          metadata: { id, status: decision, approvedAmount: finalApproved, rejectedAmount: finalRejected },
+        });
+      } catch {}
+
+      this.notify();
+      return { success: true, data: updatedData };
+    } catch (err: any) {
+      return { success: false, error: err?.message || "Terjadi kesalahan jaringan saat memproses review." };
+    }
   }
 
-  public payReimbursement(
+  public async payReimbursement(
     id: string,
     payer: { role: string; userName: string },
-    options?: { paymentMethod?: string; channel?: string }
-  ): boolean {
+    options?: { amount?: number; paymentMethod?: string; channel?: string; transactionRef?: string }
+  ): Promise<{ success: boolean; data?: ReimbursementRequest; error?: string }> {
     if (payer.role === "messenger") {
-      return false; // Messengers cannot disburse payments!
+      return { success: false, error: "Messenger tidak memiliki hak untuk mencairkan reimbursement." };
     }
 
     const req = this.reimbursementRequests.find((r) => r.id === id);
-    if (!req) return false;
-
-    if (req.status === "Dibayar") {
-      console.warn(`[FinanceStore] Reimbursement ${id} sudah dibayarkan.`);
-      return false; // Idempotency protection against double payout
+    if (req && req.status === "Dibayar") {
+      return { success: false, error: `Reimbursement ${id} sudah dibayarkan sebelumnya.` };
     }
-
-    const nowStr = new Date().toISOString().split("T")[0];
-    const nowIso = new Date().toISOString();
-    const amountToPay = req.approvedAmount !== undefined && req.approvedAmount > 0
-      ? req.approvedAmount
-      : req.amount;
-
-    // Create real cash outflow in Kas Messenger
-    const kasMessengerItem = this.addKasMessenger({
-      tanggal: nowStr,
-      jenis: "Operasional",
-      messenger: req.messengerName,
-      keterangan: `Reimbursement ${req.category}: ${req.note || req.category}${req.orderNo ? ` (${req.orderNo})` : ""} [Ref: ${id}]`,
-      in: 0,
-      out: amountToPay,
-      orderNo: req.orderNo,
-      penanggungJawab: payer.userName,
-      reimbursementId: req.id,
-      receiptUrl: req.receiptUrl,
-      kategori: req.category,
-    } as any);
-
-    req.status = "Dibayar";
-    req.paidAt = nowIso;
-    req.paidBy = payer.userName;
-    req.kasMessengerId = kasMessengerItem?.id;
-    req.channel = options?.channel || "Kas Messenger";
-    req.paymentMethod = options?.paymentMethod || "Kas Messenger (Tunai)";
 
     try {
-      auditLog.log({
-        userId: "usr-finance",
-        userName: payer.userName,
-        userRole: payer.role as any,
-        action: "UPDATE",
-        module: "Reimbursement Payout",
-        details: `Pencairan reimbursement ${id} sebesar Rp ${amountToPay.toLocaleString("id-ID")} kepada ${req.messengerName} dibukukan ke Kas Messenger`,
-        metadata: { id, amount: amountToPay, kasMessengerId: kasMessengerItem?.id },
+      const token =
+        typeof window !== "undefined"
+          ? localStorage.getItem("auth_token")
+          : typeof process !== "undefined"
+            ? process.env?.AUTH_TOKEN || null
+            : null;
+      if (!token) {
+        return { success: false, error: "Sesi login tidak valid. Silakan login kembali." };
+      }
+
+      const res = await fetch(`${APP_CONFIG.apiBaseUrl}/messenger/reimbursements/${encodeURIComponent(id)}/pay`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          amount: options?.amount,
+          paymentMethod: options?.paymentMethod || "Kas Messenger (Tunai)",
+          transactionRef: options?.transactionRef || `TRX-REIMB-${id}`,
+          channel: options?.channel || "Kas Messenger",
+        }),
       });
-    } catch {}
 
-    if (this.isApiMode) {
-      try {
-        const token = typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
-        if (token) {
-          fetch(`${APP_CONFIG.apiBaseUrl}/messenger/reimbursements/${id}/pay`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-            body: JSON.stringify({
-              paymentMethod: req.paymentMethod || "Kas Messenger (Tunai)",
-              transactionRef: req.transactionRef || `TRX-REIMB-${id}`,
-              channel: req.channel || "Kas Messenger",
-            }),
-          }).catch(() => {});
-        }
-      } catch {}
+      const payload = await res.json().catch(() => null);
+      if (!res.ok || !payload?.success) {
+        const errMsg = payload?.error?.message || payload?.message || `Gagal mencairkan reimbursement (HTTP ${res.status})`;
+        return { success: false, error: errMsg };
+      }
+
+      const updatedReq: ReimbursementRequest = payload.data;
+      const idx = this.reimbursementRequests.findIndex((r) => r.id === id);
+      if (idx !== -1) {
+        this.reimbursementRequests[idx] = updatedReq;
+      } else {
+        this.reimbursementRequests.unshift(updatedReq);
+      }
+
+      if (financeRepository.refreshKasMessenger) {
+        await financeRepository.refreshKasMessenger().catch(() => {});
+        this.syncFromRepository();
+      }
+      this.notify();
+      return { success: true, data: updatedReq };
+    } catch (err: any) {
+      return { success: false, error: err?.message || "Terjadi kesalahan jaringan saat mencairkan reimbursement." };
     }
+  }
 
-    this.notify();
-    return true;
+  public async voidReimbursement(
+    id: string,
+    voidReason: string
+  ): Promise<{ success: boolean; data?: ReimbursementRequest; error?: string }> {
+    const cleanReason = String(voidReason || "").trim();
+    if (!cleanReason) {
+      return { success: false, error: "Alasan pembatalan (void) wajib diisi." };
+    }
+    try {
+      const token =
+        typeof window !== "undefined"
+          ? localStorage.getItem("auth_token")
+          : typeof process !== "undefined"
+            ? process.env?.AUTH_TOKEN || null
+            : null;
+      if (!token) {
+        return { success: false, error: "Sesi login tidak valid. Silakan login kembali." };
+      }
+
+      const res = await fetch(`${APP_CONFIG.apiBaseUrl}/messenger/reimbursements/${encodeURIComponent(id)}/void`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ voidReason: cleanReason }),
+      });
+
+      const payload = await res.json().catch(() => null);
+      if (!res.ok || !payload?.success) {
+        const errMsg = payload?.error?.message || payload?.message || `Gagal membatalkan pencairan reimbursement (HTTP ${res.status})`;
+        return { success: false, error: errMsg };
+      }
+
+      const updatedReq: ReimbursementRequest = payload.data;
+      const idx = this.reimbursementRequests.findIndex((r) => r.id === id);
+      if (idx !== -1) {
+        this.reimbursementRequests[idx] = updatedReq;
+      }
+
+      if (financeRepository.refreshKasMessenger) {
+        await financeRepository.refreshKasMessenger().catch(() => {});
+        this.syncFromRepository();
+      }
+      this.notify();
+      return { success: true, data: updatedReq };
+    } catch (err: any) {
+      return { success: false, error: err?.message || "Terjadi kesalahan jaringan saat membatalkan pencairan reimbursement." };
+    }
   }
 }
 
 // Global Singleton Instance
 export const financeStore = new FinanceStore();
+
+const stableRefreshFinance = () => financeStore.initFromApi();
+
+const stableFetchFilteredProfitList = async (
+  filters?: {
+    paymentMethodId?: string;
+    startDate?: string;
+    endDate?: string;
+    category?: string;
+  },
+  options?: { signal?: AbortSignal }
+): Promise<ProfitItem[] | null> => {
+  const provider: any = financeRepository;
+  if (typeof provider.fetchFilteredProfitList === "function") {
+    return provider.fetchFilteredProfitList(filters, options);
+  }
+  return null;
+};
 
 // React Hook
 export function useFinanceStore() {
@@ -4274,14 +4111,20 @@ export function useFinanceStore() {
     return financeStore.subscribe(() => setTick((t) => t + 1));
   }, []);
 
-  return {
-    invoices: financeStore.getInvoices(),
-    tagihanList: financeStore.getTagihanList(),
-    completedTagihanList: financeStore.getCompletedTagihanList(),
-    profitList: financeStore.getProfitList(),
+    return {
+      invoices: financeStore.getInvoices(),
+      tagihanList: financeStore.getTagihanList(),
+      completedTagihanList: financeStore.getCompletedTagihanList(),
+      profitList: financeStore.getProfitList(),
+      isLoading: financeRepository.isLoading(),
+      error: financeRepository.getError(),
+      profitError: financeRepository.getProfitError(),
+      refresh: stableRefreshFinance,
+      fetchFilteredProfitList: stableFetchFilteredProfitList,
     refundPendingList: financeStore.getRefundPendingList(),
     profitPendingList: financeStore.getProfitPendingList(),
     cashbackPendingList: financeStore.getCashbackPendingList(),
+    cashbackHistoryList: financeStore.getCashbackHistoryList(),
     belumBayarList: financeStore.getBelumBayarList(),
     kasKantorList: financeStore.getKasKantorList(),
     kasMessengerList: financeStore.getKasMessengerList(),
@@ -4310,9 +4153,11 @@ export function useFinanceStore() {
     reconcileOrderNo: financeStore.reconcileOrderNo.bind(financeStore),
     removeInvoiceByOrderNo: financeStore.removeInvoiceByOrderNo.bind(financeStore),
     addKasKantor: financeStore.addKasKantor.bind(financeStore),
+    addKasKantorAsync: financeStore.addKasKantorAsync.bind(financeStore),
     updateKasKantor: financeStore.updateKasKantor.bind(financeStore),
     deleteKasKantor: financeStore.deleteKasKantor.bind(financeStore),
     addKasMessenger: financeStore.addKasMessenger.bind(financeStore),
+    addKasMessengerAsync: financeStore.addKasMessengerAsync.bind(financeStore),
     updateKasMessenger: financeStore.updateKasMessenger.bind(financeStore),
     deleteKasMessenger: financeStore.deleteKasMessenger.bind(financeStore),
     addPengeluaran: financeStore.addPengeluaran.bind(financeStore),
@@ -4321,10 +4166,10 @@ export function useFinanceStore() {
     updateInvoiceFromOrder: financeStore.updateInvoiceFromOrder.bind(financeStore),
     processRefund: financeStore.processRefund.bind(financeStore),
     processCashbackPayment: financeStore.processCashbackPayment.bind(financeStore),
+    completeCashback: financeStore.completeCashback.bind(financeStore),
     voidInvoicePayment: financeStore.voidInvoicePayment.bind(financeStore),
     voidCashbackPayout: financeStore.voidCashbackPayout.bind(financeStore),
     getVoidAuditHistory: financeStore.getVoidAuditHistory.bind(financeStore),
-    dismissCashback: financeStore.dismissCashback.bind(financeStore),
     onPaymentSync: financeStore.onPaymentSync.bind(financeStore),
 
     // Reimbursement (Pengajuan Biaya)
@@ -4334,5 +4179,6 @@ export function useFinanceStore() {
     submitReimbursement: financeStore.submitReimbursement.bind(financeStore),
     reviewReimbursement: financeStore.reviewReimbursement.bind(financeStore),
     payReimbursement: financeStore.payReimbursement.bind(financeStore),
+    voidReimbursement: financeStore.voidReimbursement.bind(financeStore),
   };
 }

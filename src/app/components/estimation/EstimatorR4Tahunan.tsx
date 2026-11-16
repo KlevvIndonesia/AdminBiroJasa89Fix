@@ -66,6 +66,7 @@ export function EstimatorR4Tahunan({
 
   // Template Config Dialog
   const [isConfigOpen, setIsConfigOpen] = useState(false);
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [configForm, setConfigForm] = useState({
     koefisienDenda: template.koefisienDenda.toString(),
     biayaJasa: template.biayaJasa.toString(),
@@ -128,31 +129,66 @@ export function EstimatorR4Tahunan({
     setIsConfigOpen(true);
   };
 
-  const handleSaveConfig = () => {
+  const handleSaveConfig = async () => {
+    if (isSavingConfig) return;
     const koef = parseFloat(configForm.koefisienDenda);
     const jasa = parseInt(configForm.biayaJasa, 10);
     const swd = parseInt(configForm.swdklljPokok, 10);
     const skp = parseInt(configForm.biayaCetakSkp, 10);
 
-    if (isNaN(koef) || koef < 0 || isNaN(jasa) || isNaN(swd) || isNaN(skp)) {
+    if (
+      isNaN(koef) ||
+      !Number.isFinite(koef) ||
+      koef < 0 ||
+      koef > 1 ||
+      isNaN(jasa) ||
+      jasa < 0 ||
+      isNaN(swd) ||
+      swd < 0 ||
+      isNaN(skp) ||
+      skp < 0
+    ) {
       toast.error("Parameter konfigurasi tidak valid!");
       return;
     }
 
-    store.updateTemplateParams(template.id, {
-      koefisienDenda: koef,
-      biayaJasa: jasa,
-      swdklljPokok: swd,
-      biayaCetakSkp: skp,
-    });
-    setIsConfigOpen(false);
-    toast.success("Konfigurasi template berhasil diperbarui dan tersimpan!");
+    setIsSavingConfig(true);
+    try {
+      const res = await store.updateTemplateParamsAsync(template.id, {
+        koefisienDenda: koef,
+        biayaJasa: jasa,
+        swdklljPokok: swd,
+        biayaCetakSkp: skp,
+      });
+      if (!res.success) {
+        toast.error(res.error || "Gagal menyimpan konfigurasi template ke server!");
+        return;
+      }
+      setIsConfigOpen(false);
+      toast.success("Konfigurasi template berhasil diperbarui dan tersimpan!");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Gagal menyimpan konfigurasi template.");
+    } finally {
+      setIsSavingConfig(false);
+    }
   };
 
-  const handleResetTemplate = () => {
-    store.resetToDefault(template.id);
-    setIsConfigOpen(false);
-    toast.success("Konfigurasi template dikembalikan ke default Excel.");
+  const handleResetTemplate = async () => {
+    if (isSavingConfig) return;
+    setIsSavingConfig(true);
+    try {
+      const res = await store.resetToDefaultAsync(template.id);
+      if (!res.success) {
+        toast.error(res.error || "Gagal mereset konfigurasi template di server!");
+        return;
+      }
+      setIsConfigOpen(false);
+      toast.success("Konfigurasi template dikembalikan ke default Excel.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Gagal mereset konfigurasi template.");
+    } finally {
+      setIsSavingConfig(false);
+    }
   };
 
   return (
@@ -177,6 +213,7 @@ export function EstimatorR4Tahunan({
           <Button
             variant="outline"
             size="sm"
+            disabled={isSavingConfig}
             onClick={handleOpenConfig}
             className="h-8 text-xs gap-1.5 border-border hover:bg-muted/50"
           >
@@ -491,7 +528,7 @@ export function EstimatorR4Tahunan({
                       <span className="font-medium text-foreground">{item.name}</span>
                       <span
                         className={cn(
-                          "text-[9px] px-1.5 py-0.2 rounded font-mono font-medium",
+                          "text-[11px] px-1.5 py-0.5 rounded font-mono font-medium",
                           item.category === "PKB"
                             ? "bg-blue-500/10 text-blue-600 border border-blue-500/20"
                             : item.category === "DENDA_PKB"
@@ -510,7 +547,7 @@ export function EstimatorR4Tahunan({
                         {item.code}
                       </span>
                       {item.isManual && (
-                        <span className="text-[9px] px-1 py-0.2 rounded bg-muted text-muted-foreground">
+                        <span className="text-[11px] px-1 py-0.5 rounded bg-muted text-muted-foreground">
                           Manual
                         </span>
                       )}
@@ -555,7 +592,7 @@ export function EstimatorR4Tahunan({
                 <div>
                   <div className="text-[11px] font-semibold text-foreground uppercase tracking-wide flex items-center gap-1.5">
                     Biaya ACC ID
-                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-700 dark:text-amber-400 font-normal">
+                    <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-700 dark:text-amber-400 font-normal">
                       Tidak Masuk Total
                     </span>
                   </div>
@@ -589,7 +626,12 @@ export function EstimatorR4Tahunan({
       </div>
 
       {/* Template Configuration Dialog */}
-      <Dialog open={isConfigOpen} onOpenChange={setIsConfigOpen}>
+      <Dialog
+        open={isConfigOpen}
+        onOpenChange={(open) => {
+          if (!isSavingConfig) setIsConfigOpen(open);
+        }}
+      >
         <DialogContent className="sm:max-w-md border-border">
           <DialogHeader>
             <DialogTitle className="text-base font-bold text-foreground flex items-center gap-2">
@@ -610,6 +652,7 @@ export function EstimatorR4Tahunan({
               <Input
                 type="number"
                 step="0.01"
+                disabled={isSavingConfig}
                 value={configForm.koefisienDenda}
                 onChange={(e) => setConfigForm({ ...configForm, koefisienDenda: e.target.value })}
                 className="font-mono text-xs"
@@ -623,6 +666,7 @@ export function EstimatorR4Tahunan({
               </div>
               <Input
                 type="number"
+                disabled={isSavingConfig}
                 value={configForm.biayaJasa}
                 onChange={(e) => setConfigForm({ ...configForm, biayaJasa: e.target.value })}
                 className="font-mono text-xs"
@@ -636,6 +680,7 @@ export function EstimatorR4Tahunan({
               </div>
               <Input
                 type="number"
+                disabled={isSavingConfig}
                 value={configForm.swdklljPokok}
                 onChange={(e) => setConfigForm({ ...configForm, swdklljPokok: e.target.value })}
                 className="font-mono text-xs"
@@ -649,6 +694,7 @@ export function EstimatorR4Tahunan({
               </div>
               <Input
                 type="number"
+                disabled={isSavingConfig}
                 value={configForm.biayaCetakSkp}
                 onChange={(e) => setConfigForm({ ...configForm, biayaCetakSkp: e.target.value })}
                 className="font-mono text-xs"
@@ -661,6 +707,7 @@ export function EstimatorR4Tahunan({
               type="button"
               variant="ghost"
               size="sm"
+              disabled={isSavingConfig}
               onClick={handleResetTemplate}
               className="text-xs text-muted-foreground hover:text-foreground gap-1"
             >
@@ -668,11 +715,19 @@ export function EstimatorR4Tahunan({
               Reset Default Excel
             </Button>
             <div className="flex items-center gap-2">
-              <Button type="button" variant="outline" size="sm" onClick={() => setIsConfigOpen(false)}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={isSavingConfig}
+                onClick={() => {
+                  if (!isSavingConfig) setIsConfigOpen(false);
+                }}
+              >
                 Batal
               </Button>
-              <Button type="button" size="sm" onClick={handleSaveConfig}>
-                Simpan
+              <Button type="button" size="sm" disabled={isSavingConfig} onClick={handleSaveConfig}>
+                {isSavingConfig ? "Menyimpan..." : "Simpan"}
               </Button>
             </div>
           </DialogFooter>

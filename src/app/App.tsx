@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, lazy, Suspense } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef, lazy, Suspense } from "react";
 import { useLocation, useNavigate, Routes, Route, Navigate } from "react-router";
 import { motion, AnimatePresence } from "motion/react";
 import { 
@@ -88,7 +88,11 @@ import { usePermissionStore, permissionStore } from "./data/permissionStore";
 import { orderStore } from "./data/orderStore";
 import { financeStore } from "./data/financeStore";
 import { pricingStore } from "./data/pricingStore";
+import { estimationStore } from "./data/estimationStore";
 import { serviceStore, useServiceStore } from "./data/serviceStore";
+import { paymentMethodStore } from "./data/paymentMethodStore";
+import { karyawanPenggunaAdapter } from "./data/karyawanPenggunaAdapter";
+import { apiEmployeeProvider } from "../data/api/apiEmployeeProvider";
 import { auditLog } from "./utils/auditLog";
 import { APP_CONFIG } from "./config/appConfig";
 import { menuItems, MenuItem } from "./config/navigationConfig";
@@ -214,6 +218,8 @@ function AppContent() {
 
   // Authoritative Role & Permission Store
   const { canViewPage, getFilteredMenuItems } = usePermissionStore();
+  const initSessionGenerationRef = useRef(0);
+  const skipBootAuthMeRef = useRef(false);
 
   // Dynamic notifications derived from real unpaid invoices & active orders
   const { notifications, unreadCount, markAllAsRead, markAsRead } = useNotifications();
@@ -234,14 +240,82 @@ function AppContent() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isMobileSidebarOpen]);
 
+  // Load authoritative permissions FIRST, then initialize only permitted stores
+  const initializeAuthorizedStores = async (roleOverride?: string | null) => {
+    const sessionGen = ++initSessionGenerationRef.current;
+    const effectiveRole = roleOverride ?? permissionStore.getSessionRole();
+    if (effectiveRole) {
+      permissionStore.hydrateSession(effectiveRole, { notify: false, requireAuthoritativeSync: true });
+    }
+    try {
+      await permissionStore.initFromApi();
+    } catch {
+      return;
+    }
+
+    if (sessionGen !== initSessionGenerationRef.current || !localStorage.getItem("auth_token")) {
+      return;
+    }
+
+    // Fail-closed: if authoritative permission matrix failed to load, never use default permissions
+    if (permissionStore.hasHydrationFailed() || !permissionStore.hasInitializedFromApi()) {
+      return;
+    }
+
+    if (roleOverride) {
+      permissionStore.hydrateSession(roleOverride);
+    }
+
+    const jobs: Promise<any>[] = [
+      pricingStore.initFromApi(),
+      serviceStore.initFromApi(),
+      paymentMethodStore.initFromApi(),
+      estimationStore.initFromBackend(),
+    ];
+    if (
+      permissionStore.canAccessApiEndpoint("orders", roleOverride) ||
+      permissionStore.canAccessApiEndpoint("orders-archived", roleOverride) ||
+      permissionStore.canAccessApiEndpoint("messenger-tasks", roleOverride)
+    ) {
+      jobs.push(orderStore.initFromApi());
+    }
+    if (
+      permissionStore.canAccessApiEndpoint("finance-invoices", roleOverride) ||
+      permissionStore.canAccessApiEndpoint("finance-kas-kantor", roleOverride) ||
+      permissionStore.canAccessApiEndpoint("finance-pengeluaran", roleOverride) ||
+      permissionStore.canAccessApiEndpoint("finance-kas-messenger", roleOverride)
+    ) {
+      jobs.push(financeStore.initFromApi());
+    }
+    if (permissionStore.canAccessApiEndpoint("audit-logs", roleOverride)) {
+      jobs.push(auditLog.initFromApi());
+    }
+    if (
+      permissionStore.canAccessApiEndpoint("employees", roleOverride) ||
+      permissionStore.canAccessApiEndpoint("users", roleOverride)
+    ) {
+      jobs.push(karyawanPenggunaAdapter.refresh());
+    }
+    await Promise.allSettled(jobs);
+  };
+
   // Verify token on mount and initialize stores if authenticated
   useEffect(() => {
     if (!isAuthenticated) return;
+    if (skipBootAuthMeRef.current) {
+      skipBootAuthMeRef.current = false;
+      return;
+    }
 
     const token = localStorage.getItem("auth_token");
     if (!token) {
       handleLogout();
       return;
+    }
+
+    const bootGen = initSessionGenerationRef.current;
+    if (userRole) {
+      permissionStore.hydrateSession(userRole, { notify: false, requireAuthoritativeSync: true });
     }
 
     // Verify token validity against backend /api/auth/me
@@ -252,13 +326,18 @@ function AppContent() {
       },
     })
       .then(async (res) => {
+        if (bootGen !== initSessionGenerationRef.current || !localStorage.getItem("auth_token")) {
+          return;
+        }
         if (res.status === 401) {
           handleLogout();
         } else if (res.ok) {
+          let resolvedRole = userRole;
           try {
             const payload = await res.json();
             if (payload?.success && payload.data) {
               if (payload.data.role && payload.data.role !== userRole) {
+                resolvedRole = payload.data.role;
                 setUserRole(payload.data.role);
                 const savedUserStr = localStorage.getItem("auth_user");
                 if (savedUserStr) {
@@ -272,20 +351,20 @@ function AppContent() {
             }
           } catch {}
 
-          // Initialize all core stores in parallel with valid token
-          Promise.allSettled([
-            orderStore.initFromApi(),
-            financeStore.initFromApi(),
-            pricingStore.initFromApi(),
-            serviceStore.initFromApi(),
-            auditLog.initFromApi(),
-            permissionStore.initFromApi(),
-          ]).catch(() => {});
+          initializeAuthorizedStores(resolvedRole).catch(() => {});
         }
       })
       .catch(() => {
-        // Network fallback
-        orderStore.initFromApi().catch(() => {});
+        // Fail-closed: only trigger offline fallback if authoritative permissions were already initialized
+        if (
+          bootGen === initSessionGenerationRef.current &&
+          permissionStore.hasInitializedFromApi() &&
+          !permissionStore.hasHydrationFailed() &&
+          (permissionStore.canAccessApiEndpoint("orders") ||
+            permissionStore.canAccessApiEndpoint("messenger-tasks"))
+        ) {
+          orderStore.initFromApi().catch(() => {});
+        }
       });
   }, [isAuthenticated]);
 
@@ -304,12 +383,9 @@ function AppContent() {
     id: string,
     empId?: string
   ) => {
-    setUserRole(role);
-    setUserName(name);
-    setUserId(id);
+    initSessionGenerationRef.current++;
+    skipBootAuthMeRef.current = true;
     const finalEmpId = empId || '';
-    setEmployeeId(finalEmpId);
-    setIsAuthenticated(true);
 
     try {
       localStorage.setItem(
@@ -328,14 +404,13 @@ function AppContent() {
       // ignore
     }
 
-    // Initialize all core stores in parallel with fresh session
-    Promise.allSettled([
-      orderStore.initFromApi(),
-      financeStore.initFromApi(),
-      pricingStore.initFromApi(),
-      auditLog.initFromApi(),
-      permissionStore.initFromApi(),
-    ]).catch(() => {});
+    permissionStore.hydrateSession(role, { notify: false, requireAuthoritativeSync: true });
+    setUserRole(role);
+    setUserName(name);
+    setUserId(id);
+    setEmployeeId(finalEmpId);
+    setIsAuthenticated(true);
+    initializeAuthorizedStores(role).catch(() => {});
 
     // Target route after login
     const targetPath = (location.state as any)?.from?.pathname || (role === 'messenger' ? '/messenger/workspace' : '/dashboard');
@@ -343,12 +418,18 @@ function AppContent() {
   };
 
   const handleLogout = () => {
+    initSessionGenerationRef.current++;
+    skipBootAuthMeRef.current = false;
     try {
       localStorage.removeItem("auth_token");
       localStorage.removeItem("auth_user");
     } catch {
       // ignore
     }
+    permissionStore.clearSession();
+    orderStore.clearSessionData();
+    karyawanPenggunaAdapter.clearSessionData();
+    apiEmployeeProvider.clearSessionData();
     setIsAuthenticated(false);
     setUserRole(null);
     setUserName("");
@@ -391,7 +472,7 @@ function AppContent() {
 
   // 3.5 Immediate Redirect for removed /finance/pengeluaran to /finance/kas-kantor
   if (location.pathname === "/finance/pengeluaran") {
-    return <Navigate to="/finance/kas-kantor" replace />;
+    return <Navigate to={`/finance/kas-kantor${location.search}`} replace />;
   }
 
   // 4. Standard Desktop / Admin Shell
@@ -418,6 +499,12 @@ function AppContent() {
     if (navigationGuard?.isDirty && path !== location.pathname) {
       setPendingNavPath(path);
       setIsNavConfirmOpen(true);
+      return;
+    }
+    if (path === `${location.pathname}${location.search}`) {
+      if (isMobileSidebarOpen) {
+        setIsMobileSidebarOpen(false);
+      }
       return;
     }
     navigate(path);
@@ -582,7 +669,6 @@ function AppContent() {
                             <DropdownMenuItem
                               key={catKey}
                               onSelect={() => handleNavigate(`/finance/data-penjualan/${catKey}`)}
-                              onClick={() => handleNavigate(`/finance/data-penjualan/${catKey}`)}
                               className={cn(
                                 "cursor-pointer text-xs font-medium py-2 px-2.5 flex items-center justify-between",
                                 isSelected && "bg-primary/10 text-primary font-bold"
@@ -617,7 +703,6 @@ function AppContent() {
                             <DropdownMenuItem
                               key={svc.key}
                               onSelect={() => handleNavigate(`/master-data/biaya-layanan/${svc.key}`)}
-                              onClick={() => handleNavigate(`/master-data/biaya-layanan/${svc.key}`)}
                               className={cn(
                                 "cursor-pointer text-xs font-medium py-2 px-2.5 flex items-center justify-between",
                                 isSelected && "bg-primary/10 text-primary font-bold"
@@ -707,7 +792,10 @@ function AppContent() {
                 return (
                   <span key={crumb} className="inline-flex items-center gap-1.5">
                     {idx > 0 && <span className="opacity-40">/</span>}
-                    <span className={cn(isLast ? "text-foreground font-medium" : "text-muted-foreground")}>
+                    <span
+                      className={cn(isLast ? "text-foreground font-medium" : "text-muted-foreground")}
+                      aria-current={isLast ? "page" : undefined}
+                    >
                       {crumb}
                     </span>
                   </span>
@@ -719,6 +807,7 @@ function AppContent() {
 
         {/* Page Content */}
         <main className="flex-1 overflow-auto overscroll-contain min-w-0 w-full">
+          <h1 className="sr-only">{routeMeta.title}</h1>
           <ErrorBoundary
             resetKey={location.pathname}
             fallbackTitle={`Terjadi kendala saat memuat ${routeMeta.title}`}
@@ -909,9 +998,9 @@ function SidebarContent({
             </div>
             {isSidebarOpen && (
               <div className="min-w-0">
-                <h1 className="text-sm font-semibold tracking-tight text-foreground leading-tight truncate">
+                <span className="block text-sm font-semibold tracking-tight text-foreground leading-tight truncate">
                   Admin SUN89
-                </h1>
+                </span>
                 <p className="text-[11px] text-muted-foreground font-normal truncate">Biro Jasa System</p>
               </div>
             )}

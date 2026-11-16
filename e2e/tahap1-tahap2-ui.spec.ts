@@ -1,15 +1,10 @@
 import { test, expect } from "@playwright/test";
+import { loginAs } from "./helpers/authHelper";
 
 test.describe("Tahap 1 & Tahap 2 UI Verification", () => {
   test.beforeEach(async ({ page }) => {
     test.setTimeout(60000);
-    await page.goto("http://localhost:3000/login", { waitUntil: "domcontentloaded" });
-    await page.fill("#email", "svp@birojasa.com");
-    await page.fill("#password", "admin123");
-    await page.click("button[type='submit']");
-
-    // Wait until dashboard is loaded
-    await page.waitForURL("**/dashboard", { timeout: 15000 });
+    await loginAs(page, "svp@birojasa.com", "admin123");
   });
 
   test("Verify Belum Bayar Cetak Invoice A5 & WhatsApp Buttons", async ({ page }) => {
@@ -18,17 +13,17 @@ test.describe("Tahap 1 & Tahap 2 UI Verification", () => {
     await page.waitForURL("**/finance/belum-bayar", { timeout: 15000 });
     await page.waitForSelector("text=Memuat halaman...", { state: "detached", timeout: 15000 }).catch(() => {});
 
-    // Verify "Cetak" and "Kirim WA" buttons exist in table
+    // Verify "Cetak" button and WhatsApp link exist in table (WhatsApp action unified into customer phone column link)
     const cetakButtons = page.locator("button", { hasText: "Cetak" });
-    const waButtons = page.locator("button", { hasText: "Kirim WA" });
+    const waLinks = page.locator("a[href*='wa.me']");
 
     await expect(cetakButtons.first()).toBeVisible({ timeout: 15000 });
-    await expect(waButtons.first()).toBeVisible({ timeout: 15000 });
+    await expect(waLinks.first()).toBeVisible({ timeout: 15000 });
 
     const cetakCount = await cetakButtons.count();
     expect(cetakCount).toBeGreaterThan(0);
 
-    const waCount = await waButtons.count();
+    const waCount = await waLinks.count();
     expect(waCount).toBeGreaterThan(0);
 
     // Click first "Cetak" button

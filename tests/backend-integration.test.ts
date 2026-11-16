@@ -7,6 +7,7 @@ import test from "node:test";
 import assert from "node:assert";
 import http from "node:http";
 import { createApp } from "../server/src/app";
+import { dbOrderRepository } from "../server/src/repositories/dbOrderRepository";
 
 function startTestServer(): Promise<{ server: http.Server; baseUrl: string }> {
   return new Promise((resolve) => {
@@ -101,7 +102,24 @@ test("Backend API - Orders: Retrieve active orders and query single order", asyn
     });
     const { data: { token } } = await loginRes.json() as any;
 
-    // 3. Authenticated access succeeds with 200
+    // 3. Ensure at least one active Stage 1 order exists (seed starts clean with 0 dummy orders)
+    await fetch(`${baseUrl}/api/orders`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        customer: "PT Query Test",
+        nomorHP: "081211112222",
+        layanan: "Perpanjangan STNK Tahunan",
+        nopol: "B 1111 QRY",
+        totalEstimasi: 450000,
+        biayaJasa: 150000,
+      }),
+    });
+
+    // 4. Authenticated access succeeds with 200
     const res = await fetch(`${baseUrl}/api/orders`, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -152,6 +170,15 @@ test("Backend API - Order Lifecycle: Create, advance, verify-payment, archive", 
         nopol: "B 9999 EXP",
         totalEstimasi: 1850000,
         biayaJasa: 500000,
+        payment: {
+          tipePembayaran: "Bayar di Awal",
+          metodePembayaran: "Transfer Bank",
+          nominalDibayarAwal: 1850000,
+          nominalPembayaran: 1850000,
+          totalBiaya: 1850000,
+          dibayar: 1850000,
+          kurang: 0,
+        },
       }),
     });
 
@@ -161,15 +188,36 @@ test("Backend API - Order Lifecycle: Create, advance, verify-payment, archive", 
     assert.strictEqual(createdBody.data.customer, "PT Test Integrasi Express");
     assert.strictEqual(createdBody.data.currentStageName, "Verifikasi");
 
-    // 3. Verify Payment at Stage 1 (Penerimaan Berkas / Verifikasi Dokumen & Pembayaran)
-    const verifyRes = await fetch(`${baseUrl}/api/orders/${newOrderNo}/verify-payment`, {
+    // 3. Verify Payment at Stage 1 requires finance-tagihan authority (Admin rejected 403, Finance allowed 200)
+    const finLoginRes = await fetch(`${baseUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "finance@birojasa.com", password: "finance123" }),
+    });
+    const { data: { token: financeToken } } = await finLoginRes.json() as any;
+
+    const adminVerifyRes = await fetch(`${baseUrl}/api/orders/${newOrderNo}/verify-payment`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({
+        verifierName: "Admin Operasional",
+        buktiPembayaran: { fileUrl: "https://proof.example.com/transfer.jpg" },
+      }),
+    });
+    assert.strictEqual(adminVerifyRes.status, 403);
+
+    const verifyRes = await fetch(`${baseUrl}/api/orders/${newOrderNo}/verify-payment`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${financeToken}`,
+      },
+      body: JSON.stringify({
         verifierName: "Kasir Test",
+        confirmedAmount: 1850000,
         buktiPembayaran: { fileUrl: "https://proof.example.com/transfer.jpg" },
       }),
     });
@@ -194,7 +242,24 @@ test("Backend API - Order Lifecycle: Create, advance, verify-payment, archive", 
     assert.strictEqual(advBody.data.currentStageName, "Penjadwalan");
     assert.strictEqual(advBody.data.currentStep, 2);
 
-    // 5. Archive Order
+    // 5. Archiving at Stage 2 MUST fail with 400 INVALID_ARCHIVE_STAGE
+    const earlyArchRes = await fetch(`${baseUrl}/api/orders/${newOrderNo}/archive`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    assert.strictEqual(earlyArchRes.status, 400);
+    const earlyArchBody = await earlyArchRes.json() as any;
+    assert.strictEqual(earlyArchBody.error?.code, "INVALID_ARCHIVE_STAGE");
+
+    // Advance authoritative DB state to Stage 8 (Dokumen Telah Diterima) -> Archive succeeds (200)
+    dbOrderRepository.updateOrder(newOrderNo, {
+      currentStep: 8,
+      currentStageName: "Dokumen Telah Diterima",
+      isReceived: true,
+    });
     const archRes = await fetch(`${baseUrl}/api/orders/${newOrderNo}/archive`, {
       method: "POST",
       headers: {

@@ -18,6 +18,7 @@ import { AlertTriangle, Loader2, ChevronDown, Check } from "lucide-react";
 import { formatRupiah } from "../utils/financeFormatters";
 import { computeDataPenjualanTotals } from "../../domain/finance/dataPenjualanTotals";
 import { Button } from "./ui/button";
+import { Input } from "./ui/input";
 import { cn } from "./ui/utils";
 import {
   DropdownMenu,
@@ -122,12 +123,12 @@ export function DataPenjualan() {
   useEffect(() => {
     if (rawCategory) {
       if (LEGACY_CATEGORY_MAP[rawCategory]) {
-        navigate(`/finance/data-penjualan/${LEGACY_CATEGORY_MAP[rawCategory]}`, { replace: true });
+        navigate(`/finance/data-penjualan/${LEGACY_CATEGORY_MAP[rawCategory]}${location.search}`, { replace: true });
       } else if (!VALID_CATEGORIES.includes(rawCategory as CanonicalSalesCategory)) {
-        navigate("/finance/data-penjualan/perpanjangan-1-tahun", { replace: true });
+        navigate(`/finance/data-penjualan/perpanjangan-1-tahun${location.search}`, { replace: true });
       }
     }
-  }, [rawCategory, navigate]);
+  }, [rawCategory, location.search, navigate]);
 
   const [isAdding, setIsAdding] = useState(false);
   const [editingItem, setEditingItem] = useState<{
@@ -598,7 +599,7 @@ export function DataPenjualan() {
                 <span className="text-[10px] text-destructive font-normal">Wajib diketik sama persis</span>
               )}
             </label>
-            <input
+            <Input
               type="text"
               value={deleteConfirmText}
               onChange={(e) => {
@@ -607,10 +608,10 @@ export function DataPenjualan() {
               }}
               placeholder="HAPUS DATA"
               className={cn(
-                "w-full px-3 py-2 rounded-md border text-xs font-mono tracking-wider uppercase text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1",
+                "w-full h-9 px-3 py-2 font-mono tracking-wider uppercase",
                 deleteConfirmText.trim() !== "HAPUS DATA"
-                  ? "border-destructive/60 bg-destructive/5 focus:ring-destructive"
-                  : "border-emerald-500 bg-emerald-50/10 focus:ring-emerald-500"
+                  ? "border-destructive/60 bg-destructive/5 focus-visible:ring-destructive"
+                  : "border-emerald-500 bg-emerald-50/10 focus-visible:ring-emerald-500"
               )}
             />
           </div>

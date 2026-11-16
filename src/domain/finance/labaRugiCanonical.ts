@@ -29,7 +29,21 @@ import {
   ProfitItem,
   classifyFinancialTransaction,
 } from "./types";
-import { parseDateSafe } from "../../app/data/dashboardAdapter";
+import {
+  getPeriodBoundsWib,
+  getWibPartsFromEpochMs,
+  isBeforePeriodStartWib,
+  matchesPeriodWib,
+  parseDateFlexibleWib,
+} from "./datePeriod";
+
+export interface DateAnomalyDiagnostic {
+  entity: "invoice" | "kas_kantor" | "kas_messenger" | "pengeluaran";
+  id?: number | string;
+  reference: string;
+  rawDate: unknown;
+  reason: string;
+}
 
 export interface LabaRugiTransactionRow {
   id: number;
@@ -125,6 +139,12 @@ export interface CanonicalLabaRugiSummary {
   quarantinedAmount: number;       // Total tagihan terkarantina
   quarantinedInvoices: any[];      // List objek terkarantina
   anomalyInvoices: any[];          // List transaksi dengan peringatan (e.g. S > T)
+  invalidDateCount?: number;       // Jumlah record bertanggal kosong/tidak valid yang dikecualikan dari periode
+  invalidDateDiagnostics?: DateAnomalyDiagnostic[];
+  kasKantorDebitNonInternal?: number;
+  kasKantorKreditGross?: number;
+  kasMessengerInNonInternal?: number;
+  kasMessengerOutGross?: number;
   cashFlowReconciliation?: CashFlowReconciliationSummary;
 }
 
@@ -150,40 +170,16 @@ export function isQuarantinedInvoice(inv: any): boolean {
 }
 
 /**
- * Robust date parser supporting ISO, DD/MM/YYYY, and Indonesian full text dates (e.g. "21 Oktober 2026")
+ * Robust date parser supporting ISO (with timezone), SQLite UTC timestamps,
+ * YYYY-MM-DD, DD/MM/YYYY, and Indonesian text dates (e.g. "21 Oktober 2026")
+ * anchored deterministically in Asia/Jakarta (WIB).
  */
 export function parseDateFlexible(val?: string | Date | null): Date | null {
-  if (!val) return null;
-  if (val instanceof Date) return isNaN(val.getTime()) ? null : val;
-
-  const str = String(val).trim();
-  if (!str || str === "-") return null;
-
-  // Try standard parseDateSafe first
-  const parsed = parseDateSafe(str);
-  if (parsed && !isNaN(parsed.getTime())) return parsed;
-
-  // Handle Indonesian text format: "21 Oktober 2026" or "21 Okt 2026"
-  for (let i = 0; i < INDONESIAN_MONTH_NAMES_FULL.length; i++) {
-    const full = INDONESIAN_MONTH_NAMES_FULL[i].toLowerCase();
-    const short = INDONESIAN_MONTH_NAMES_SHORT[i].toLowerCase();
-    const lower = str.toLowerCase();
-    if (lower.includes(full) || lower.includes(short)) {
-      const match = lower.match(/(d{1,2})s+([a-z]+)s+(d{4})/);
-      if (match) {
-        const day = parseInt(match[1], 10);
-        const year = parseInt(match[3], 10);
-        const d = new Date(year, i, day);
-        if (!isNaN(d.getTime())) return d;
-      }
-    }
-  }
-
-  return null;
+  return parseDateFlexibleWib(val);
 }
 
 /**
- * Evaluates whether a date matches the chosen period filter.
+ * Evaluates whether a date matches the chosen period filter in Asia/Jakarta (WIB).
  */
 function matchesPeriod(
   d: Date | null,
@@ -192,43 +188,7 @@ function matchesPeriod(
   customStart?: string,
   customEnd?: string
 ): boolean {
-  if (!d) return true; // Keep undated items visible in general list
-  if (!period || period === "all") return true;
-
-  const year = referenceDate.getFullYear();
-  const month = referenceDate.getMonth();
-  const day = referenceDate.getDate();
-
-  if (period === "daily") {
-    // Shows transactions in the active month
-    return d.getFullYear() === year && d.getMonth() === month;
-  }
-
-  if (period === "weekly") {
-    // Shows transactions in the active month
-    return d.getFullYear() === year && d.getMonth() === month;
-  }
-
-  if (period === "monthly") {
-    // Shows transactions in the active year
-    return d.getFullYear() === year;
-  }
-
-  if (period === "yearly") {
-    // Shows all years
-    return true;
-  }
-
-  if (period === "custom" && customStart && customEnd) {
-    const s = parseDateFlexible(customStart);
-    const e = parseDateFlexible(customEnd);
-    if (e) e.setHours(23, 59, 59, 999);
-    if (s && d < s) return false;
-    if (e && d > e) return false;
-    return true;
-  }
-
-  return true;
+  return matchesPeriodWib(d, period, referenceDate, customStart, customEnd);
 }
 
 /**
@@ -295,7 +255,8 @@ export function computeCanonicalLabaRugi(
   fallbackProfitData?: ProfitItem[],
   customStartDate?: string,
   customEndDate?: string,
-  kasKantorList?: KasKantorItem[]
+  kasKantorList?: KasKantorItem[],
+  referenceDate: Date = new Date()
 ): CanonicalLabaRugiSummary {
   interface NormalizedInflow {
     tanggal: string;
@@ -314,6 +275,7 @@ export function computeCanonicalLabaRugi(
   let quarantinedCount = 0;
   let quarantinedAmount = 0;
   const anomalyInvoices: any[] = [];
+  const invalidDateDiagnostics: DateAnomalyDiagnostic[] = [];
 
   let pendingUnpaidBalance = 0;
   let pendingProfit = 0;
@@ -321,6 +283,7 @@ export function computeCanonicalLabaRugi(
   let realizedCashback = 0;
   let totalGrossReceipts = 0;
   let totalOverpayment = 0;
+  const realizedCashbackInvoiceRefs = new Set<string>();
 
   // 1. Process Inflows & Invoices
   if (Array.isArray(invoices) && invoices.length > 0) {
@@ -343,11 +306,30 @@ export function computeCanonicalLabaRugi(
         return;
       }
 
+      const dateStr = inv.tanggalBayar || inv.tanggal || (inv as any).tanggalInvoice || (inv as any).createdAt || "";
+      const dateObj = parseDateFlexible(dateStr);
+      const invRef = String(inv.invoice || inv.invoiceNo || inv.orderNo || `INV-${inv.id}`);
+      if (!dateObj) {
+        invalidDateDiagnostics.push({
+          entity: "invoice",
+          id: inv.id,
+          reference: invRef,
+          rawDate: dateStr || null,
+          reason: "Tanggal invoice kosong atau tidak valid menurut kalender Asia/Jakarta",
+        });
+      }
+
+      const invoiceInPeriod = matchesPeriod(dateObj, periodFilter, referenceDate, customStartDate, customEndDate);
+
       const totalTagihan = Number(inv.totalTagihan ?? (inv as any).total_tagihan ?? 0);
 
       // Calculate NetCustomerReceipts (Canonical Contract A: Only status_verifikasi = TERVERIFIKASI & is_void = 0)
       let grossReceipts = 0;
-      if (Array.isArray((inv as any).payoutHistory) && (inv as any).payoutHistory.length > 0) {
+      const hasVerifiedPaymentEntries =
+        Array.isArray((inv as any).payoutHistory) &&
+        (inv as any).payoutHistory.some((p: any) => p.statusVerifikasi !== undefined || p.status_verifikasi !== undefined);
+
+      if (hasVerifiedPaymentEntries) {
         grossReceipts = (inv as any).payoutHistory
           .filter((p: any) => !p.is_void && (p.statusVerifikasi === "TERVERIFIKASI" || p.status_verifikasi === "TERVERIFIKASI"))
           .reduce((sum: number, p: any) => sum + Number(p.nominal || p.amount || 0), 0);
@@ -363,23 +345,35 @@ export function computeCanonicalLabaRugi(
       const eligiblePayment = Math.min(netCustomerReceipts, totalTagihan);
       const overpayment = Math.max(0, netCustomerReceipts - totalTagihan);
 
-      totalGrossReceipts += netCustomerReceipts;
-      totalOverpayment += overpayment;
+      if (invoiceInPeriod) {
+        totalGrossReceipts += netCustomerReceipts;
+        totalOverpayment += overpayment;
 
-      // Pending unpaid balance
-      const sisa = Math.max(0, totalTagihan - eligiblePayment);
-      if (sisa > 0) {
-        pendingUnpaidBalance += sisa;
+        // Pending unpaid balance
+        const sisa = Math.max(0, totalTagihan - eligiblePayment);
+        if (sisa > 0) {
+          pendingUnpaidBalance += sisa;
+        }
       }
 
-      // Track Cashback
+      // Track Cashback strictly within active period (using disbursement date for realized cashback)
       const cashbackNominal = Number(inv.cashback ?? (inv as any).cashback_nominal ?? 0);
       if (cashbackNominal > 0) {
         const cbStatus = String(inv.cashbackStatus ?? (inv as any).cashback_status ?? "PENDING").toUpperCase();
         if (cbStatus === "PENDING") {
-          pendingCashback += cashbackNominal;
-        } else if (cbStatus === "PAID" || cbStatus === "PROCESSED") {
-          realizedCashback += cashbackNominal;
+          if (invoiceInPeriod) {
+            pendingCashback += cashbackNominal;
+          }
+        } else if (cbStatus === "REALIZED" || cbStatus === "PAID" || cbStatus === "PROCESSED") {
+          const cbDateStr = (inv as any).cashbackPaidAt || dateStr;
+          const cbDateObj = parseDateFlexible(cbDateStr);
+          if (matchesPeriod(cbDateObj, periodFilter, referenceDate, customStartDate, customEndDate)) {
+            const cbPaidAmount = Number((inv as any).cashbackPaidAmount || cashbackNominal);
+            realizedCashback += cbPaidAmount;
+            if (inv.invoiceNo) realizedCashbackInvoiceRefs.add(String(inv.invoiceNo).toUpperCase());
+            if (inv.invoice) realizedCashbackInvoiceRefs.add(String(inv.invoice).toUpperCase());
+            if (inv.orderNo) realizedCashbackInvoiceRefs.add(String(inv.orderNo).toUpperCase());
+          }
         }
       }
 
@@ -402,20 +396,19 @@ export function computeCanonicalLabaRugi(
               : (rawBiayaSamsat === 0 && isExplicitZero ? "EXPLICIT_ZERO" : "ESTIMATED_COST"))
       );
 
-      const dateStr = inv.tanggalBayar || inv.tanggal || (inv as any).tanggalInvoice || (inv as any).createdAt || "";
-      const dateObj = parseDateFlexible(dateStr);
-
       // Guard 5: S > T (Discrepancy Warning)
       if (rawBiayaSamsat > totalTagihan && totalTagihan > 0) {
-        anomalyInvoices.push({
-          invoiceNo: inv.invoice || inv.invoiceNo || `INV-${inv.id}`,
-          orderNo: inv.orderNo || "-",
-          customer: inv.customer || "Customer",
-          totalTagihan,
-          biayaSamsat: rawBiayaSamsat,
-          anomalyReason: `Biaya Samsat (Rp ${rawBiayaSamsat.toLocaleString("id-ID")}) melebihi Total Tagihan (Rp ${totalTagihan.toLocaleString("id-ID")})`,
-        });
-        pendingProfit += Math.max(0, totalTagihan - rawBiayaSamsat);
+        if (invoiceInPeriod) {
+          anomalyInvoices.push({
+            invoiceNo: inv.invoice || inv.invoiceNo || `INV-${inv.id}`,
+            orderNo: inv.orderNo || "-",
+            customer: inv.customer || "Customer",
+            totalTagihan,
+            biayaSamsat: rawBiayaSamsat,
+            anomalyReason: `Biaya Samsat (Rp ${rawBiayaSamsat.toLocaleString("id-ID")}) melebihi Total Tagihan (Rp ${totalTagihan.toLocaleString("id-ID")})`,
+          });
+          pendingProfit += Math.max(0, totalTagihan - rawBiayaSamsat);
+        }
         return; // Guard 5 holds transaction in Customer Advance / Anomaly
       }
 
@@ -425,7 +418,9 @@ export function computeCanonicalLabaRugi(
         costClassification === "ESTIMATED_COST" ||
         costVerificationStatus === "PENDING_VERIFICATION"
       ) {
-        pendingProfit += Math.max(0, totalTagihan - rawBiayaSamsat);
+        if (invoiceInPeriod) {
+          pendingProfit += Math.max(0, totalTagihan - rawBiayaSamsat);
+        }
         return; // Hold in Customer Advance; recognizedRevenue = 0, Matched COGS = 0
       }
 
@@ -491,11 +486,56 @@ export function computeCanonicalLabaRugi(
     });
   }
 
-  // 2. Helper to filter out Pass-Through and Internal Transfers
+  // 2. Helper to filter out Pass-Through, Internal Transfers, Capital Movements, Overpayment Refunds, and linked Partner Cashbacks
   const isExcludedFromOperationalExpense = (item: any): boolean => {
     if (isInternalTransferTransaction(item)) return true;
     const classification = classifyFinancialTransaction(item);
-    return classification === "SAMSAT_PASS_THROUGH" || classification === "INTERNAL_TRANSFER";
+    if (
+      classification === "SAMSAT_PASS_THROUGH" ||
+      classification === "INTERNAL_TRANSFER" ||
+      classification === "CAPITAL_INJECTION" ||
+      classification === "CUSTOMER_REFUND"
+    ) {
+      return true;
+    }
+    // Prevent double-counting Partner Cashback already recognized in `realizedCashback` on invoices
+    if (classification === "PARTNER_COMMISSION") {
+      const refInv = String((item as any).invoiceNo || (item as any).orderNo || "").trim().toUpperCase();
+      const ketLower = String(item.keterangan || "").toLowerCase();
+      if (ketLower.startsWith("pencairan komisi rekanan:") || (refInv && realizedCashbackInvoiceRefs.has(refInv))) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // Helper to identify non-operating external debits on Kas Kantor/Messenger (exclude modal, internal transfers, invoice payment mirrors, voids)
+  const isNonOperatingDebit = (item: any): boolean => {
+    const ket = String(item.keterangan || "");
+    const lowerKet = ket.toLowerCase();
+    const kategori = String(item.kategori || "").toUpperCase();
+    if (
+      (item as any).is_void ||
+      item.status === "VOIDED" ||
+      ket.startsWith("[VOID") ||
+      ket.startsWith("[BATAL")
+    ) {
+      return true;
+    }
+    if (isInternalTransferTransaction(item)) return true;
+    const classification = classifyFinancialTransaction(item);
+    if (classification === "CAPITAL_INJECTION" || classification === "INTERNAL_TRANSFER") {
+      return true;
+    }
+    // Invoice customer payments posted to kas_kantor are already counted in Data Penjualan (totalPemasukan)
+    if (
+      kategori === "PEMBAYARAN_INVOICE" ||
+      lowerKet.startsWith("penerimaan pembayaran invoice") ||
+      Boolean((item as any).invoiceNo)
+    ) {
+      return true;
+    }
+    return false;
   };
 
   // 3. Prepare office expense items (excluding voided, non-operational, internal transfers, and Samsat pass-through)
@@ -525,8 +565,8 @@ export function computeCanonicalLabaRugi(
       if (
         (item as any).is_void ||
         item.status === "VOIDED" ||
-        String(item.keterangan || "").startsWith("[VOID]") ||
-        String(item.keterangan || "").startsWith("[BATAL/VOID]")
+        String(item.keterangan || "").startsWith("[VOID") ||
+        String(item.keterangan || "").startsWith("[BATAL")
       ) {
         return;
       }
@@ -542,12 +582,23 @@ export function computeCanonicalLabaRugi(
         return;
       }
 
+      const dObj = parseDateFlexible(item.tanggal);
+      if (!dObj) {
+        invalidDateDiagnostics.push({
+          entity: "kas_kantor",
+          id: item.id,
+          reference: String((item as any).invoiceNo || (item as any).orderNo || item.keterangan || `KK-${item.id}`),
+          rawDate: item.tanggal ?? null,
+          reason: "Tanggal Kas Kantor kosong atau tidak valid menurut kalender Asia/Jakarta",
+        });
+      }
+
       normalizedKantor.push({
         tanggal: item.tanggal,
         keterangan: item.keterangan || "Pengeluaran Kantor (Kas Kantor)",
         invoice: (item as any).invoiceNo || (item as any).orderNo || "-",
         nominal,
-        dateObj: parseDateFlexible(item.tanggal),
+        dateObj: dObj,
       });
     });
 
@@ -596,11 +647,39 @@ export function computeCanonicalLabaRugi(
   }
 
   // 4. Prepare messenger expense items (excluding voided, pass-through Samsat, and internal transfers)
+  // Collect voided references from Kas Messenger reversals (e.g. "[VOID/BATAL] Reversal ... [Ref: REIMB-001]")
+  const messengerVoidedRefCounts = new Map<string, number>();
+  (kasMessengerList || []).forEach((item) => {
+    const ket = String(item.keterangan || "");
+    if (ket.includes("[VOID") || ket.includes("[BATAL")) {
+      const match = ket.match(/\[Ref:\s*([^\]]+)\]/);
+      if (match && match[1]) {
+        const refId = match[1].trim();
+        messengerVoidedRefCounts.set(refId, (messengerVoidedRefCounts.get(refId) || 0) + 1);
+      }
+    }
+  });
+
+  // Track active disbursement refs to cancel only reversed payout entries (supports void followed by clean re-pay)
+  const remainingVoidCancelCounts = new Map(messengerVoidedRefCounts);
   const normalizedMessenger = (kasMessengerList || [])
     .filter((item) => {
       const outVal = Number(item.out || (item as any).kredit || 0);
       if (outVal <= 0) return false;
-      if (String(item.keterangan || "").startsWith("[VOID]")) return false;
+      const ket = String(item.keterangan || "");
+      if (
+        (item as any).is_void ||
+        ket.startsWith("[VOID") ||
+        ket.startsWith("[BATAL")
+      ) {
+        return false;
+      }
+      const refMatch = ket.match(/\[Ref:\s*([^\]]+)\]/);
+      const refId = (item.reimbursementId || (refMatch && refMatch[1] ? refMatch[1].trim() : "")) || "";
+      if (refId && (remainingVoidCancelCounts.get(refId) || 0) > 0) {
+        remainingVoidCancelCounts.set(refId, (remainingVoidCancelCounts.get(refId) || 1) - 1);
+        return false;
+      }
       return !isExcludedFromOperationalExpense(item);
     })
     .map((item) => ({
@@ -673,8 +752,45 @@ export function computeCanonicalLabaRugi(
     ...tableBiayaSamsat,
   ];
 
-  // 6. Apply Period Filtering
-  const filteredRows = allTableRows.filter((r) => matchesPeriod(r.dateObj, periodFilter, new Date(), customStartDate, customEndDate));
+  // 6. Apply Period Filtering (strict Asia/Jakarta half-open bounds)
+  const filteredRows = allTableRows.filter((r) => matchesPeriod(r.dateObj, periodFilter, referenceDate, customStartDate, customEndDate));
+
+  let kasKantorDebitNonInternal = 0;
+  for (const k of kasKantorList || []) {
+    const debit = Number(k.debit || 0);
+    if (debit <= 0) continue;
+    const refMatch = String(k.keterangan || "").match(/\[Ref:\s*([^\]]+)\]/);
+    if (refMatch && voidedRefIds.has(refMatch[1].trim())) continue;
+    if (isNonOperatingDebit(k)) continue;
+    const dObj = parseDateFlexible(k.tanggal);
+    if (!dObj) {
+      invalidDateDiagnostics.push({
+        entity: "kas_kantor",
+        id: k.id,
+        reference: String((k as any).invoiceNo || (k as any).orderNo || k.keterangan || `KK-${k.id}`),
+        rawDate: k.tanggal ?? null,
+        reason: "Tanggal debit Kas Kantor kosong atau tidak valid",
+      });
+    }
+    if (matchesPeriod(dObj, periodFilter, referenceDate, customStartDate, customEndDate)) {
+      kasKantorDebitNonInternal += debit;
+    }
+  }
+
+  let kasMessengerInNonInternal = 0;
+  for (const km of kasMessengerList || []) {
+    const masuk = Number(km.in ?? (km as any).masuk ?? (km as any).debit ?? 0);
+    if (masuk <= 0) continue;
+    const ket = String(km.keterangan || "");
+    if ((km as any).is_void || ket.startsWith("[VOID") || ket.startsWith("[BATAL")) continue;
+    if (isInternalTransferTransaction(km)) continue;
+    const classification = classifyFinancialTransaction(km);
+    if (classification === "CAPITAL_INJECTION" || classification === "INTERNAL_TRANSFER") continue;
+    const dObj = parseDateFlexible(km.tanggal);
+    if (matchesPeriod(dObj, periodFilter, referenceDate, customStartDate, customEndDate)) {
+      kasMessengerInNonInternal += masuk;
+    }
+  }
 
   let totalPemasukan = 0;
   let totalBiayaSamsat = 0;
@@ -703,30 +819,29 @@ export function computeCanonicalLabaRugi(
   const tablePemasukanCount = filteredRows.filter((r) => r.type === "in").length;
   const tablePengeluaranCount = filteredRows.filter((r) => r.type === "out").length;
 
-  // 7. Dynamic Granular Period Chart Aggregation (Harian, Mingguan, Bulanan, Tahunan, Custom)
+  // 7. Dynamic Granular Period Chart Aggregation (Harian, Mingguan, Bulanan, Tahunan, Custom) in Asia/Jakarta
   const chartData: LabaRugiMonthlyItem[] = [];
+  const refWib = getWibPartsFromEpochMs(referenceDate.getTime()) || getWibPartsFromEpochMs(Date.now())!;
 
   if (periodFilter === "daily" || (periodFilter === "custom" && customStartDate && customEndDate)) {
-    // Harian / Custom: Group by Date (DD/MM)
-    const dailyMap = new Map<string, { label: string; pendapatan: number; pengeluaran: number; date: Date }>();
-    
-    // Aggregate strictly from filteredRows (within active period)
+    const dailyMap = new Map<string, { label: string; pendapatan: number; pengeluaran: number }>();
+
     filteredRows.forEach((r) => {
-      const d = r.dateObj || new Date();
-      const day = String(d.getDate()).padStart(2, "0");
-      const month = String(d.getMonth() + 1).padStart(2, "0");
-      const key = `${d.getFullYear()}-${month}-${day}`;
+      const parts = r.dateObj ? getWibPartsFromEpochMs(r.dateObj.getTime()) : refWib;
+      const p = parts || refWib;
+      const day = String(p.day).padStart(2, "0");
+      const month = String(p.month).padStart(2, "0");
+      const key = p.ymd;
       const label = `${day}/${month}`;
 
       if (!dailyMap.has(key)) {
-        dailyMap.set(key, { label, pendapatan: 0, pengeluaran: 0, date: d });
+        dailyMap.set(key, { label, pendapatan: 0, pengeluaran: 0 });
       }
       const b = dailyMap.get(key)!;
       if (r.type === "in") b.pendapatan += r.nominal;
       else b.pengeluaran += r.nominal;
     });
 
-    // Sort chronologically
     const sortedDaily = Array.from(dailyMap.entries()).sort((a, b) => a[0].localeCompare(b[0]));
     if (sortedDaily.length > 0) {
       sortedDaily.forEach(([_, b]) => {
@@ -738,17 +853,14 @@ export function computeCanonicalLabaRugi(
         });
       });
     } else {
-      // Empty placeholder for selected month
-      const now = new Date();
       chartData.push({
-        bulan: `01/${String(now.getMonth() + 1).padStart(2, "0")}`,
+        bulan: `${String(refWib.day).padStart(2, "0")}/${String(refWib.month).padStart(2, "0")}`,
         pendapatan: 0,
         pengeluaran: 0,
         laba: 0,
       });
     }
   } else if (periodFilter === "weekly") {
-    // Mingguan: Group by Week of Month (Mgg 1 .. Mgg 5)
     const weeklyBuckets: { [w: string]: { label: string; pendapatan: number; pengeluaran: number } } = {
       w1: { label: "Mgg 1", pendapatan: 0, pengeluaran: 0 },
       w2: { label: "Mgg 2", pendapatan: 0, pengeluaran: 0 },
@@ -758,8 +870,8 @@ export function computeCanonicalLabaRugi(
     };
 
     filteredRows.forEach((r) => {
-      const d = r.dateObj || new Date();
-      const dateNum = d.getDate();
+      const parts = r.dateObj ? getWibPartsFromEpochMs(r.dateObj.getTime()) : refWib;
+      const dateNum = (parts || refWib).day;
       let wKey = "w1";
       if (dateNum > 28) wKey = "w5";
       else if (dateNum > 21) wKey = "w4";
@@ -779,10 +891,10 @@ export function computeCanonicalLabaRugi(
       });
     });
   } else if (periodFilter === "yearly") {
-    // Tahunan: Group by Year (e.g. 2024, 2025, 2026)
     const yearlyMap = new Map<number, { pendapatan: number; pengeluaran: number }>();
-    allTableRows.forEach((r) => {
-      const yr = r.dateObj ? r.dateObj.getFullYear() : new Date().getFullYear();
+    filteredRows.forEach((r) => {
+      const parts = r.dateObj ? getWibPartsFromEpochMs(r.dateObj.getTime()) : refWib;
+      const yr = (parts || refWib).year;
       if (!yearlyMap.has(yr)) {
         yearlyMap.set(yr, { pendapatan: 0, pengeluaran: 0 });
       }
@@ -804,22 +916,22 @@ export function computeCanonicalLabaRugi(
       });
     } else {
       chartData.push({
-        bulan: String(new Date().getFullYear()),
+        bulan: String(refWib.year),
         pendapatan: 0,
         pengeluaran: 0,
         laba: 0,
       });
     }
   } else {
-    // Bulanan / All: Group by Month (Jan .. Des)
+    // Bulanan / All: Group by Month (Jan .. Des) in Asia/Jakarta
     const monthlyBuckets: { [monthIdx: number]: { pendapatan: number; pengeluaran: number } } = {};
     for (let m = 0; m < 12; m++) {
       monthlyBuckets[m] = { pendapatan: 0, pengeluaran: 0 };
     }
 
     filteredRows.forEach((r) => {
-      const d = r.dateObj;
-      const mIdx = d ? d.getMonth() : 0;
+      const parts = r.dateObj ? getWibPartsFromEpochMs(r.dateObj.getTime()) : null;
+      const mIdx = parts ? parts.month - 1 : 0;
       if (r.type === "in") {
         monthlyBuckets[mIdx].pendapatan += r.nominal;
       } else {
@@ -869,7 +981,13 @@ export function computeCanonicalLabaRugi(
     quarantinedAmount,
     quarantinedInvoices,
     anomalyInvoices,
-    cashFlowReconciliation: computeCashFlowReconciliation(kasKantorList, kasMessengerList, periodFilter, customStartDate, customEndDate),
+    invalidDateCount: invalidDateDiagnostics.length,
+    invalidDateDiagnostics,
+    kasKantorDebitNonInternal,
+    kasKantorKreditGross: pengeluaranKantor + realizedCashback,
+    kasMessengerInNonInternal,
+    kasMessengerOutGross: pengeluaranMessenger,
+    cashFlowReconciliation: computeCashFlowReconciliation(kasKantorList, kasMessengerList, periodFilter, customStartDate, customEndDate, referenceDate),
   };
 }
 
@@ -886,51 +1004,29 @@ export function computeCashFlowReconciliation(
   customEndDate?: string,
   referenceDate: Date = new Date()
 ): CashFlowReconciliationSummary {
-  const refYear = referenceDate.getFullYear();
-  const refMonth = referenceDate.getMonth();
-  const refDay = referenceDate.getDate();
+  const bounds = getPeriodBoundsWib(periodFilter, referenceDate, customStartDate, customEndDate);
+  const refParts = getWibPartsFromEpochMs(referenceDate.getTime()) || getWibPartsFromEpochMs(Date.now())!;
 
-  let startDate: Date | null = null;
-  let endDate: Date | null = null;
   let periodLabel = "Semua Periode";
-
-  if (periodFilter === "daily") {
-    // Current month days or today
-    startDate = new Date(refYear, refMonth, 1, 0, 0, 0, 0);
-    endDate = new Date(refYear, refMonth + 1, 0, 23, 59, 59, 999);
-    periodLabel = `Harian (${INDONESIAN_MONTH_NAMES_FULL[refMonth]} ${refYear})`;
-  } else if (periodFilter === "weekly") {
-    startDate = new Date(refYear, refMonth, 1, 0, 0, 0, 0);
-    endDate = new Date(refYear, refMonth + 1, 0, 23, 59, 59, 999);
-    periodLabel = `Mingguan (${INDONESIAN_MONTH_NAMES_FULL[refMonth]} ${refYear})`;
-  } else if (periodFilter === "monthly") {
-    startDate = new Date(refYear, 0, 1, 0, 0, 0, 0);
-    endDate = new Date(refYear, 11, 31, 23, 59, 59, 999);
-    periodLabel = `Bulanan (Tahun ${refYear})`;
-  } else if (periodFilter === "yearly") {
-    startDate = null;
-    endDate = null;
-    periodLabel = "Tahunan (Semua Tahun)";
-  } else if (periodFilter === "custom" && customStartDate && customEndDate) {
-    startDate = parseDateFlexible(customStartDate);
-    endDate = parseDateFlexible(customEndDate);
-    if (endDate) {
-      endDate.setHours(23, 59, 59, 999);
-    }
-    periodLabel = `${customStartDate} s/d ${customEndDate}`;
+  if (bounds.normalizedPeriod === "daily") {
+    periodLabel = `Harian (${refParts.day} ${INDONESIAN_MONTH_NAMES_FULL[refParts.month - 1]} ${refParts.year})`;
+  } else if (bounds.normalizedPeriod === "weekly") {
+    periodLabel = `Mingguan (${bounds.startYmd} s/d ${bounds.endYmd})`;
+  } else if (bounds.normalizedPeriod === "monthly") {
+    periodLabel = `Bulanan (${INDONESIAN_MONTH_NAMES_FULL[refParts.month - 1]} ${refParts.year})`;
+  } else if (bounds.normalizedPeriod === "yearly") {
+    periodLabel = `Tahunan (${refParts.year})`;
+  } else if (bounds.normalizedPeriod === "custom" && (customStartDate || customEndDate)) {
+    periodLabel = `${customStartDate || "-"} s/d ${customEndDate || "-"}`;
   }
 
-  // Helper to check if date falls in period
+  // Helper to check if date falls strictly inside active Asia/Jakarta bounds (rejects null/invalid for bounded periods)
   const isInPeriod = (d: Date | null): boolean => {
-    if (!d) return true;
-    if (startDate && d < startDate) return false;
-    if (endDate && d > endDate) return false;
-    return true;
+    return matchesPeriodWib(d, periodFilter, referenceDate, customStartDate, customEndDate);
   };
 
   const isBeforePeriod = (d: Date | null): boolean => {
-    if (!d || !startDate) return false;
-    return d < startDate;
+    return isBeforePeriodStartWib(d, periodFilter, referenceDate, customStartDate, customEndDate);
   };
 
   // Backward compatibility helper pointing to canonical detection

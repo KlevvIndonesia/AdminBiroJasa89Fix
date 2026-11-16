@@ -8,20 +8,32 @@
 
 import { Employee, EmployeeCreateInput, EmployeeUpdateInput } from "../../domain/employee/types";
 import { APP_CONFIG } from "../../app/config/appConfig";
+import { permissionStore } from "../../app/data/permissionStore";
 
 export class ApiEmployeeProvider {
-  private baseUrl: string;
+  private customBaseUrl: string | null = null;
   private employees: Employee[] = [];
   private listeners: Set<() => void> = new Set();
   private isInitialized = false;
   private isLoadingState = false;
   private lastError: Error | null = null;
+  private fetchPromise: Promise<void> | null = null;
 
-  constructor(baseUrl = APP_CONFIG.apiBaseUrl) {
-    this.baseUrl = baseUrl.replace(/\/$/, "");
-    if (typeof window === "undefined" || (typeof window !== "undefined" && window.localStorage?.getItem("auth_token"))) {
+  constructor(baseUrl?: string) {
+    if (baseUrl !== undefined) {
+      this.customBaseUrl = baseUrl.replace(/\/$/, "");
+    }
+    if (
+      typeof window !== "undefined" &&
+      window.localStorage?.getItem("auth_token") &&
+      permissionStore.canAccessApiEndpoint("employees")
+    ) {
       this.initFromApi();
     }
+  }
+
+  private get baseUrl(): string {
+    return (this.customBaseUrl ?? APP_CONFIG.apiBaseUrl).replace(/\/$/, "");
   }
 
   private getAuthHeader(): Record<string, string> {
@@ -43,34 +55,56 @@ export class ApiEmployeeProvider {
 
   public async initFromApi(): Promise<void> {
     const authHeaders = this.getAuthHeader();
-    if (!authHeaders.Authorization) {
+    if (!authHeaders.Authorization || !permissionStore.canAccessApiEndpoint("employees")) {
       this.isLoadingState = false;
+      this.lastError = null;
       return;
+    }
+    if (this.fetchPromise) {
+      return this.fetchPromise;
     }
     this.isLoadingState = true;
     this.lastError = null;
-    try {
-      const res = await fetch(`${this.baseUrl}/employees`, {
-        headers: { "Content-Type": "application/json", ...authHeaders },
-      });
-      if (!res.ok) {
-        if (res.status === 401 && typeof window !== "undefined") {
-          window.dispatchEvent(new CustomEvent("sun89_auth_unauthorized"));
+    this.fetchPromise = (async () => {
+      try {
+        const res = await fetch(`${this.baseUrl}/employees`, {
+          headers: { "Content-Type": "application/json", ...authHeaders },
+        });
+        if (!res.ok) {
+          if (res.status === 401 && typeof window !== "undefined") {
+            window.dispatchEvent(new CustomEvent("sun89_auth_unauthorized"));
+          }
+          throw new Error(`Gagal memuat karyawan dari server (HTTP ${res.status})`);
         }
-        throw new Error(`Gagal memuat karyawan dari server (HTTP ${res.status})`);
-      }
-      const payload = await res.json();
-      if (payload.success && Array.isArray(payload.data)) {
-        this.employees = payload.data;
-        this.isInitialized = true;
+        const payload = await res.json();
+        if (payload.success && Array.isArray(payload.data)) {
+          this.employees = payload.data;
+          this.isInitialized = true;
+          this.isLoadingState = false;
+          this.notify();
+        }
+      } catch (err: any) {
         this.isLoadingState = false;
+        this.lastError = err instanceof Error ? err : new Error(String(err));
         this.notify();
+      } finally {
+        this.fetchPromise = null;
       }
-    } catch (err: any) {
-      this.isLoadingState = false;
-      this.lastError = err instanceof Error ? err : new Error(String(err));
-      this.notify();
-    }
+    })();
+    return this.fetchPromise;
+  }
+
+  public clearSessionData(): void {
+    this.employees = [];
+    this.isInitialized = false;
+    this.isLoadingState = false;
+    this.lastError = null;
+    this.fetchPromise = null;
+    this.notify();
+  }
+
+  public isReady(): boolean {
+    return this.isInitialized;
   }
 
   public subscribe(listener: () => void): () => void {

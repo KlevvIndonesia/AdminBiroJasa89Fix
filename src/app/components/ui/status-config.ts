@@ -21,16 +21,16 @@ export type StatusSemantic =
   | 'purple';
 
 /**
- * Standardized soft background & border tokens with #333333 text:
+ * Standardized soft background, foreground & border tokens (Light & Dark AA contrast):
  */
 export const STATUS_STYLES: Record<StatusSemantic, string> = {
-  success: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800/50',
-  info: 'bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300 border-blue-200 dark:border-blue-800/50',
-  warning: 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300 border-amber-200 dark:border-amber-800/50',
-  error: 'bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-300 border-rose-200 dark:border-rose-800/50',
-  neutral: 'bg-slate-100 text-slate-700 dark:bg-slate-800/60 dark:text-slate-300 border-slate-200 dark:border-slate-700/60',
-  role: 'bg-slate-100 text-slate-700 dark:bg-slate-800/60 dark:text-slate-300 border-slate-200 dark:border-slate-700/60',
-  purple: 'bg-purple-50 text-purple-700 dark:bg-purple-950/40 dark:text-purple-300 border-purple-200 dark:border-purple-800/50',
+  success: 'bg-status-success-bg text-status-success-fg border-status-success-border',
+  info: 'bg-status-info-bg text-status-info-fg border-status-info-border',
+  warning: 'bg-status-warning-bg text-status-warning-fg border-status-warning-border',
+  error: 'bg-status-error-bg text-status-error-fg border-status-error-border',
+  neutral: 'bg-status-neutral-bg text-status-neutral-fg border-status-neutral-border',
+  role: 'bg-status-neutral-bg text-status-neutral-fg border-status-neutral-border',
+  purple: 'bg-status-purple-bg text-status-purple-fg border-status-purple-border',
 };
 
 /**
@@ -107,6 +107,8 @@ export const BUSINESS_STATUS_MAP: Record<string, StatusSemantic> = {
   'Belum Diverifikasi': 'warning',
   'Belum Verifikasi': 'warning',
   'belum verifikasi': 'warning',
+  'Belum Aktif': 'warning',
+  'belum aktif': 'warning',
   'Belum Dijadwalkan': 'warning',
   'belum dijadwalkan': 'warning',
   'Belum Dijadwal': 'warning',

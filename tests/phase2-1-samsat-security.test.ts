@@ -589,8 +589,16 @@ test("PHASE 2.1: SAMSAT SECURITY & WORKFLOW INTEGRITY SUITE", async (suite) => {
     // 1. Complete Cycle 1
     orderService.completeSamsatProcess(orderNo, {}, courierA);
 
+    // 1b. Complete Cycle 1 Jemput Hasil Samsat legitimately before Stage 4 -> 5
+    dbOrderRepository.updateOrder(orderNo, {
+      samsatPickupMessengerId: courierA.employeeId,
+      samsatPickupMessengerName: courierA.nama,
+    });
+    orderService.acceptMessengerTask(orderNo, "Jemput Hasil Samsat", courierA);
+    orderService.completeSamsatPickupTask(orderNo, courierA, {});
+
     // 2. Advance to Step 5
-    orderService.advanceOrder(orderNo, "Verifikasi Ulang", {}, courierA);
+    orderService.advanceOrder(orderNo, "Verifikasi Ulang", {}, adminUser);
 
     // 3. Admin rolls back to Step 4
     const rolledBack = orderService.rollbackOrder(orderNo, "Proses Samsat", {}, adminUser);

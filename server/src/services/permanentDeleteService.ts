@@ -3,7 +3,7 @@
  * Phase 4B Batch 2B — Kas Messenger & Kas Kantor
  * 
  * Strict Acceptance Invariants:
- * 1. Restricted strictly to SVP role (users.role === 'svp' re-validated in-transaction).
+ * 1. Restricted strictly to canonical administrator (SVP) role (resolveAuthenticatedDbActor canonicalRole === 'administrator' re-validated in-transaction).
  * 2. Mandatory X-Idempotency-Key header and reason (>= 10 characters).
  * 3. Exact fail-closed blocker evaluations for:
  *    - kas_kantor: linked verified payment (409), MODAL_AWAL (400), subsequent negative balance (409).
@@ -19,6 +19,7 @@ import crypto from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { db, runInTransaction } from "../database/db";
 import { ApiError } from "../middleware/errorHandler";
+import { resolveAuthenticatedDbActor, parsePositiveDbUserId } from "../utils/canonicalIdentity";
 import {
   recalculateKasKantorRunningBalances,
   recalculateKasMessengerRunningBalances,
@@ -73,24 +74,29 @@ export function deletePermanentlyWithAuditAndIdempotency(
 
   // 5. Execute Atomic Transaction under Reserved Write Lock (BEGIN IMMEDIATE)
   return runInTransaction(() => {
-    // 5.1 In-Transaction Actor Re-Validation Under Write Lock (TOCTOU Defense)
-    const actorRow = targetDb.prepare(`
-      SELECT id, nama, role, status
-      FROM users
-      WHERE id = ?
-    `).get(cleanActorId) as { id: number | string; nama: string; role: string; status: string } | undefined;
-
-    if (!actorRow) {
-      throw new ApiError(403, "FORBIDDEN_USER_NOT_FOUND", "Pengguna terautentikasi tidak ditemukan di database.");
+    // 5.1 In-Transaction Canonical Actor Re-Validation Under Write Lock (TOCTOU Defense)
+    const actorResolution = resolveAuthenticatedDbActor(cleanActorId, targetDb);
+    if (!actorResolution.ok) {
+      if (actorResolution.code === "FORBIDDEN_USER_NOT_FOUND") {
+        throw new ApiError(403, "FORBIDDEN_USER_NOT_FOUND", "Pengguna terautentikasi tidak ditemukan di database.");
+      }
+      if (actorResolution.code === "FORBIDDEN_USER_INACTIVE") {
+        throw new ApiError(403, "FORBIDDEN_USER_INACTIVE", "Akun pengguna tidak aktif.");
+      }
+      throw new ApiError(
+        403,
+        "FORBIDDEN_NOT_SVP",
+        "Penghapusan permanen hanya diizinkan untuk Administrator (SVP)."
+      );
     }
 
-    if (actorRow.status !== "Aktif") {
-      throw new ApiError(403, "FORBIDDEN_USER_INACTIVE", "Akun pengguna tidak aktif.");
-    }
-
-    const verifiedRole = String(actorRow.role || "").trim().toLowerCase();
-    if (verifiedRole !== "svp") {
-      throw new ApiError(403, "FORBIDDEN_NOT_SVP", "Penghapusan permanen hanya diizinkan untuk Supervisor (role: svp).");
+    const actor = actorResolution.actor;
+    if (actor.canonicalRole !== "administrator") {
+      throw new ApiError(
+        403,
+        "FORBIDDEN_NOT_SVP",
+        "Penghapusan permanen hanya diizinkan untuk Administrator (SVP)."
+      );
     }
 
     // 5.2 Compute Canonical Request Hash & Scope
@@ -100,7 +106,7 @@ export function deletePermanentlyWithAuditAndIdempotency(
       table,
       id: String(id),
       reason: cleanReason,
-      actorId: cleanActorId,
+      actorId: actor.canonicalUserId,
     });
     const requestHash = crypto.createHash("sha256").update(payloadToHash).digest("hex");
 
@@ -119,10 +125,11 @@ export function deletePermanentlyWithAuditAndIdempotency(
     } | undefined;
 
     if (existingIdem) {
+      const storedNumericId = existingIdem.user_id ? parsePositiveDbUserId(existingIdem.user_id) : null;
       const isActorMatch = existingIdem.user_id !== null &&
         existingIdem.user_id !== undefined &&
-        (String(existingIdem.user_id) === String(cleanActorId) ||
-         Number(existingIdem.user_id) === Number(cleanActorId));
+        (String(existingIdem.user_id) === actor.canonicalUserId ||
+         (storedNumericId !== null && storedNumericId === actor.numericUserId));
       const isResourceMatch = existingIdem.resource_id === String(id) && existingIdem.scope === scope;
       const isPayloadMatch = existingIdem.request_hash === requestHash;
 
@@ -183,8 +190,8 @@ export function deletePermanentlyWithAuditAndIdempotency(
 
     if (table === "messenger_reimbursements") {
       const currentStatus = String(existing.status || "").toLowerCase().trim();
-      if (currentStatus !== "draft" && currentStatus !== "rejected") {
-        throw new ApiError(409, "CANNOT_DELETE_ACTIVE_REIMBURSEMENT", `Reimbursement #${id} dengan status '${existing.status}' tidak dapat dihapus. Hanya status 'draft' atau 'rejected' yang diizinkan.`);
+      if (!["draft", "rejected", "ditolak"].includes(currentStatus)) {
+        throw new ApiError(409, "CANNOT_DELETE_ACTIVE_REIMBURSEMENT", `Reimbursement #${id} dengan status '${existing.status}' tidak dapat dihapus. Hanya status 'draft', 'rejected', atau 'Ditolak' yang diizinkan.`);
       }
       // Check 1: Forward relation to kas_messenger
       if (existing.kas_messenger_id) {
@@ -213,9 +220,9 @@ export function deletePermanentlyWithAuditAndIdempotency(
       VALUES (?, ?, ?, ?, 'PERMANENT_DELETE', ?, ?, ?, datetime('now'))
     `).run(
       auditId,
-      String(cleanActorId),
-      actorRow.nama,
-      actorRow.role,
+      actor.canonicalUserId,
+      actor.nama,
+      actor.canonicalRole,
       table === "kas_kantor" ? "Kas Kantor" : table === "kas_messenger" ? "Kas Messenger" : table === "pengeluaran" ? "Pengeluaran" : "Reimbursement",
       `Penghapusan permanen entri #${id} oleh SVP (Alasan: ${cleanReason})`,
       JSON.stringify({ targetId: id, deletedSnapshot: existing, idempotencyKey: cleanKey })
@@ -249,7 +256,7 @@ export function deletePermanentlyWithAuditAndIdempotency(
     `).run(
       scopedKey,
       scope,
-      String(cleanActorId),
+      actor.canonicalUserId,
       requestHash,
       String(id),
       JSON.stringify(responsePayload)

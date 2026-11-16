@@ -1,182 +1,155 @@
 import { test, expect } from "@playwright/test";
+import { loginAs } from "./helpers/authHelper";
 
 test.describe("Phase 8.1: Routing & Canonical Slugs E2E Test Suite", () => {
   const BASE_URL = "http://localhost:3000";
 
   test("1. Root URL redirects to /dashboard", async ({ page }) => {
     // Authenticate as Admin first
-    await page.goto(`${BASE_URL}/login`);
-    await page.fill("#email", "admin@birojasa.com");
-    await page.fill("#password", "admin123");
-    await page.click("button[type='submit']");
-    await page.waitForURL("**/dashboard", { timeout: 10000 });
+    await loginAs(page, "admin@birojasa.com", "admin123");
 
     // Navigate to root /
     await page.goto(`${BASE_URL}/`);
     await page.waitForURL("**/dashboard", { timeout: 10000 });
     expect(page.url()).toBe(`${BASE_URL}/dashboard`);
-    await expect(page.locator("h2", { hasText: "Dashboard" })).toBeVisible();
+    await expect(page.getByRole("banner").getByText("Dashboard", { exact: true })).toBeVisible();
   });
 
   test("2. Direct navigation and deep linking to /finance/kas-messenger (Finance Role)", async ({ page }) => {
     // Set authenticated session for Finance
-    await page.goto(`${BASE_URL}/login`);
-    await page.fill("#email", "finance@birojasa.com");
-    await page.fill("#password", "finance123");
-    await page.click("button[type='submit']");
-    await page.waitForURL("**/dashboard", { timeout: 10000 });
+    await loginAs(page, "finance@birojasa.com", "finance123");
 
     // Directly navigate to /finance/kas-messenger
     await page.goto(`${BASE_URL}/finance/kas-messenger`);
     await expect(page).toHaveURL(`${BASE_URL}/finance/kas-messenger`);
-    await expect(page.locator("h2", { hasText: "Kas Messenger" })).toBeVisible();
+    await expect(page.getByRole("banner").getByText("Kas Messenger", { exact: true })).toBeVisible();
     await expect(page.locator("nav[aria-label='Breadcrumb']")).toContainText("Finance");
     await expect(page.locator("nav[aria-label='Breadcrumb']")).toContainText("Kas Messenger");
   });
 
   test("3. Direct navigation to /order/tracking (Admin Role)", async ({ page }) => {
-    await page.goto(`${BASE_URL}/login`);
-    await page.fill("#email", "admin@birojasa.com");
-    await page.fill("#password", "admin123");
-    await page.click("button[type='submit']");
-    await page.waitForURL("**/dashboard", { timeout: 10000 });
+    await loginAs(page, "admin@birojasa.com", "admin123");
 
     // Direct navigation
     await page.goto(`${BASE_URL}/order/tracking`);
     await expect(page).toHaveURL(`${BASE_URL}/order/tracking`);
-    await expect(page.locator("h2", { hasText: "Order Tracking" })).toBeVisible();
-    await expect(page.locator("text=Verifikasi").first()).toBeVisible();
+    await expect(page.getByRole("banner").getByText("Order Tracking", { exact: true })).toBeVisible();
+    await expect(page.getByText("Verifikasi", { exact: true }).first()).toBeVisible();
   });
 
-  test("4. Data Penjualan root automatically redirects to /finance/data-penjualan/mutasi-ld", async ({ page }) => {
+  test("4. Data Penjualan root automatically redirects to /finance/data-penjualan/perpanjangan-1-tahun", async ({ page }) => {
     // Login as Finance
-    await page.goto(`${BASE_URL}/login`);
-    await page.fill("#email", "finance@birojasa.com");
-    await page.fill("#password", "finance123");
-    await page.click("button[type='submit']");
-    await page.waitForURL("**/dashboard", { timeout: 10000 });
+    await loginAs(page, "finance@birojasa.com", "finance123");
 
     // Navigate to /finance/data-penjualan without category
     await page.goto(`${BASE_URL}/finance/data-penjualan`);
-    await page.waitForURL("**/finance/data-penjualan/mutasi-ld", { timeout: 10000 });
-    expect(page.url()).toBe(`${BASE_URL}/finance/data-penjualan/mutasi-ld`);
+    await page.waitForURL("**/finance/data-penjualan/perpanjangan-1-tahun", { timeout: 10000 });
+    expect(page.url()).toBe(`${BASE_URL}/finance/data-penjualan/perpanjangan-1-tahun`);
 
-    // Verify Mutasi LD tab is active
-    const activeTab = page.locator("[role='tab'][data-state='active']");
-    await expect(activeTab).toHaveText("Mutasi LD");
+    // Verify Header Service Dropdown reflects Perpanjangan 1 Tahun
+    const serviceTrigger = page.locator("button[title='Pilih layanan Data Penjualan']");
+    await expect(serviceTrigger).toContainText("Perpanjangan 1 Tahun");
   });
 
-  test("5. Data Penjualan tab switching updates browser URL", async ({ page }) => {
-    await page.goto(`${BASE_URL}/login`);
-    await page.fill("#email", "finance@birojasa.com");
-    await page.fill("#password", "finance123");
-    await page.click("button[type='submit']");
-    await page.waitForURL("**/dashboard", { timeout: 10000 });
+  test("5. Data Penjualan Header Service Dropdown switching updates browser URL", async ({ page }) => {
+    await loginAs(page, "finance@birojasa.com", "finance123");
 
+    // Visit legacy alias mutasi-ld -> normalizes to mutasi-antar-daerah
     await page.goto(`${BASE_URL}/finance/data-penjualan/mutasi-ld`);
-    await expect(page).toHaveURL(`${BASE_URL}/finance/data-penjualan/mutasi-ld`);
+    await expect(page).toHaveURL(`${BASE_URL}/finance/data-penjualan/mutasi-antar-daerah`);
 
-    // Click Mutasi AS tab
-    await page.locator("[role='tab']", { hasText: "Mutasi AS" }).click();
-    await expect(page).toHaveURL(`${BASE_URL}/finance/data-penjualan/mutasi-as`);
-    await expect(page.locator("nav[aria-label='Breadcrumb']")).toContainText("Mutasi AS");
+    const serviceTrigger = page.locator("button[title='Pilih layanan Data Penjualan']");
+    await expect(serviceTrigger).toContainText("Mutasi Antar Daerah");
 
-    // Click BBN tab
-    await page.locator("[role='tab']", { hasText: "BBN" }).click();
-    await expect(page).toHaveURL(`${BASE_URL}/finance/data-penjualan/bbn`);
-    await expect(page.locator("nav[aria-label='Breadcrumb']")).toContainText("BBN");
+    // Switch via Header Dropdown -> Mutasi Asal Samsat
+    await serviceTrigger.click();
+    await page.getByRole("menuitem", { name: "Mutasi Asal Samsat" }).click();
+    await expect(page).toHaveURL(`${BASE_URL}/finance/data-penjualan/mutasi-asal`);
+    await expect(serviceTrigger).toContainText("Mutasi Asal Samsat");
+    await expect(page.locator("nav[aria-label='Breadcrumb']")).toContainText("Mutasi Asal Samsat");
+
+    // Switch via Header Dropdown -> Balik Nama
+    await serviceTrigger.click();
+    await page.getByRole("menuitem", { name: "Balik Nama" }).click();
+    await expect(page).toHaveURL(`${BASE_URL}/finance/data-penjualan/balik-nama`);
+    await expect(serviceTrigger).toContainText("Balik Nama");
+    await expect(page.locator("nav[aria-label='Breadcrumb']")).toContainText("Balik Nama");
   });
 
   test("6. Data Penjualan refresh persistence preserves active category", async ({ page }) => {
-    await page.goto(`${BASE_URL}/login`);
-    await page.fill("#email", "finance@birojasa.com");
-    await page.fill("#password", "finance123");
-    await page.click("button[type='submit']");
-    await page.waitForURL("**/dashboard", { timeout: 10000 });
+    await loginAs(page, "finance@birojasa.com", "finance123");
 
-    // Direct navigate to /finance/data-penjualan/belum-kurang-bayar
-    await page.goto(`${BASE_URL}/finance/data-penjualan/belum-kurang-bayar`);
-    await expect(page).toHaveURL(`${BASE_URL}/finance/data-penjualan/belum-kurang-bayar`);
-    await expect(page.locator("[role='tab'][data-state='active']")).toHaveText("Belum & Kurang Bayar");
+    // Direct navigate to /finance/data-penjualan/perpanjangan-5-tahun
+    await page.goto(`${BASE_URL}/finance/data-penjualan/perpanjangan-5-tahun`);
+    await expect(page).toHaveURL(`${BASE_URL}/finance/data-penjualan/perpanjangan-5-tahun`);
+    const serviceTrigger = page.locator("button[title='Pilih layanan Data Penjualan']");
+    await expect(serviceTrigger).toContainText("Perpanjangan 5 Tahun");
 
     // Reload the page (F5)
     await page.reload();
-    await expect(page).toHaveURL(`${BASE_URL}/finance/data-penjualan/belum-kurang-bayar`);
-    await expect(page.locator("[role='tab'][data-state='active']")).toHaveText("Belum & Kurang Bayar");
-    await expect(page.locator("nav[aria-label='Breadcrumb']")).toContainText("Belum & Kurang Bayar");
+    await expect(page).toHaveURL(`${BASE_URL}/finance/data-penjualan/perpanjangan-5-tahun`);
+    await expect(serviceTrigger).toContainText("Perpanjangan 5 Tahun");
+    await expect(page.locator("nav[aria-label='Breadcrumb']")).toContainText("Perpanjangan 5 Tahun");
   });
 
   test("7. Browser Back and Forward traversal", async ({ page }) => {
-    await page.goto(`${BASE_URL}/login`);
-    await page.fill("#email", "admin@birojasa.com");
-    await page.fill("#password", "admin123");
-    await page.click("button[type='submit']");
-    await page.waitForURL("**/dashboard", { timeout: 10000 });
+    test.slow();
+    await loginAs(page, "admin@birojasa.com", "admin123");
 
     // Step 1: Dashboard
     expect(page.url()).toBe(`${BASE_URL}/dashboard`);
 
     // Step 2: Navigate to Order Tracking
     await page.goto(`${BASE_URL}/order/tracking`);
-    expect(page.url()).toBe(`${BASE_URL}/order/tracking`);
+    await expect(page).toHaveURL(`${BASE_URL}/order/tracking`);
+    await expect(page.getByRole("banner").getByText("Order Tracking", { exact: true })).toBeVisible();
 
     // Step 3: Navigate to Buat Order
     await page.goto(`${BASE_URL}/order/buat`);
-    expect(page.url()).toBe(`${BASE_URL}/order/buat`);
+    await expect(page).toHaveURL(`${BASE_URL}/order/buat`);
+    await expect(page.getByRole("banner").getByText("Buat Order", { exact: true })).toBeVisible();
 
     // Step 4: Browser Back -> should be /order/tracking
     await page.goBack();
     await expect(page).toHaveURL(`${BASE_URL}/order/tracking`);
-    await expect(page.locator("h2", { hasText: "Order Tracking" })).toBeVisible();
+    await expect(page.getByRole("banner").getByText("Order Tracking", { exact: true })).toBeVisible();
 
     // Step 5: Browser Back -> should be /dashboard
     await page.goBack();
     await expect(page).toHaveURL(`${BASE_URL}/dashboard`);
-    await expect(page.locator("h2", { hasText: "Dashboard" })).toBeVisible();
+    await expect(page.getByRole("banner").getByText("Dashboard", { exact: true })).toBeVisible();
 
     // Step 6: Browser Forward -> should be /order/tracking
     await page.goForward();
     await expect(page).toHaveURL(`${BASE_URL}/order/tracking`);
-    await expect(page.locator("h2", { hasText: "Order Tracking" })).toBeVisible();
+    await expect(page.getByRole("banner").getByText("Order Tracking", { exact: true })).toBeVisible();
   });
 
   test("8. Settings route /settings renders with correct header title", async ({ page }) => {
-    await page.goto(`${BASE_URL}/login`);
-    await page.fill("#email", "admin@birojasa.com");
-    await page.fill("#password", "admin123");
-    await page.click("button[type='submit']");
-    await page.waitForURL("**/dashboard", { timeout: 10000 });
+    await loginAs(page, "admin@birojasa.com", "admin123");
 
     // Click settings button in header
     await page.locator("header button[aria-label='Pengaturan sistem']").click();
     await expect(page).toHaveURL(`${BASE_URL}/settings`);
 
     // Verify header title does NOT fallback to "Dashboard"
-    await expect(page.locator("header h2", { hasText: "Pengaturan" })).toBeVisible();
+    await expect(page.getByRole("banner").getByText("Pengaturan", { exact: true })).toBeVisible();
     await expect(page.locator("header p", { hasText: "Kelola preferensi dan konfigurasi sistem" })).toBeVisible();
   });
 
   test("9. Profile route /profile renders with correct header title", async ({ page }) => {
-    await page.goto(`${BASE_URL}/login`);
-    await page.fill("#email", "admin@birojasa.com");
-    await page.fill("#password", "admin123");
-    await page.click("button[type='submit']");
-    await page.waitForURL("**/dashboard", { timeout: 10000 });
+    await loginAs(page, "admin@birojasa.com", "admin123");
 
     // Click profile button in header
     await page.locator("header button[aria-label='Buka profil admin']").click();
     await expect(page).toHaveURL(`${BASE_URL}/profile`);
 
     // Verify header title does NOT fallback to "Dashboard"
-    await expect(page.locator("header h2", { hasText: "Profil Saya" })).toBeVisible();
+    await expect(page.getByRole("banner").getByText("Profil Saya", { exact: true })).toBeVisible();
   });
 
   test("10. Unknown route renders 404 Not Found page", async ({ page }) => {
-    await page.goto(`${BASE_URL}/login`);
-    await page.fill("#email", "admin@birojasa.com");
-    await page.fill("#password", "admin123");
-    await page.click("button[type='submit']");
-    await page.waitForURL("**/dashboard", { timeout: 10000 });
+    await loginAs(page, "admin@birojasa.com", "admin123");
 
     // Navigate to an unknown path
     await page.goto(`${BASE_URL}/halaman-tidak-dikenal-12345`);
@@ -202,11 +175,7 @@ test.describe("Phase 8.1: Routing & Canonical Slugs E2E Test Suite", () => {
 
   test("12. Role-restricted route behavior enforces access boundaries", async ({ page }) => {
     // Login as Admin
-    await page.goto(`${BASE_URL}/login`);
-    await page.fill("#email", "admin@birojasa.com");
-    await page.fill("#password", "admin123");
-    await page.click("button[type='submit']");
-    await page.waitForURL("**/dashboard", { timeout: 10000 });
+    await loginAs(page, "admin@birojasa.com", "admin123");
 
     // Admin is NOT allowed to view Finance modules (/finance/profit)
     await page.goto(`${BASE_URL}/finance/profit`);

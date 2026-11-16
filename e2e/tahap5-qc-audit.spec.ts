@@ -1,28 +1,112 @@
 import { test, expect } from "@playwright/test";
+import { loginAs } from "./helpers/authHelper";
 
 test.describe("Tahap 5 QC Forensic Audit Verification Suite", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto("http://localhost:3000/login", { waitUntil: "domcontentloaded" });
-    await page.fill("#email", "svp@birojasa.com");
-    await page.fill("#password", "admin123");
-    await page.click("button[type='submit']");
-
-    // Wait until dashboard is loaded
-    await page.waitForURL("**/dashboard", { timeout: 15000 });
+    await loginAs(page, "svp@birojasa.com", "admin123");
   });
 
   test("1. Verify Cancelled Orders with Paid Deposits Appear in Cashback Terpending (QC-01 Fix)", async ({ page }) => {
-    await page.evaluate(() => { window.location.href = "/finance/cashback-pending"; });
-    await page.waitForURL("**/finance/cashback-pending", { timeout: 15000 });
-    await expect(page.locator("text=Cashback Terpending").first()).toBeVisible({ timeout: 15000 });
-    await expect(page.locator("table")).toBeVisible({ timeout: 15000 });
+    const token = await page.evaluate(() => window.localStorage.getItem("auth_token"));
+    expect(token).toBeTruthy();
+    const authHeaders = {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    };
 
-    const pageContent = await page.content();
-    const hasOrd3 = pageContent.includes("ORD-0003");
-    const hasOrd4 = pageContent.includes("ORD-0004");
-    console.log(`ORD-0003 in Cashback Terpending: ${hasOrd3}, ORD-0004: ${hasOrd4}`);
+    const suffix = Date.now().toString().slice(-4);
+    const uniqueCustomer = `QC01 Refund E2E ${suffix}`;
+    let createdOrderNo: string | null = null;
 
-    expect(hasOrd3 || hasOrd4).toBeTruthy();
+    try {
+      // Discover an active payment method dynamically from sandbox API
+      const pmRes = await page.request.get("http://localhost:3001/api/payment-methods?status=Aktif", {
+        headers: authHeaders,
+      });
+      expect(pmRes.ok()).toBeTruthy();
+      const pmList = (await pmRes.json()).data || [];
+      expect(pmList.length).toBeGreaterThan(0);
+      const pm = pmList[0];
+
+      // 1) Create synthetic order with initial deposit (Bayar di Awal)
+      const createRes = await page.request.post("http://localhost:3001/api/orders", {
+        headers: authHeaders,
+        data: {
+          customer: uniqueCustomer,
+          namaPemilik: uniqueCustomer,
+          nomorHP: `08129977${suffix}`,
+          layanan: "Perpanjangan 1 Tahun",
+          nopol: `B ${suffix} QC1`,
+          biayaPokok: 200000,
+          biayaJasa: 100000,
+          biayaAntarJemput: 50000,
+          totalBiaya: 350000,
+          metodePembayaran: pm.nama_metode,
+          payment: {
+            tipePembayaran: "Bayar di Awal",
+            metodePembayaran: pm.nama_metode,
+            metode_pembayaran_id: pm.id,
+            nominalDibayarAwal: 350000,
+            totalBiaya: 350000,
+            dibayar: 0,
+          },
+        },
+      });
+      expect(createRes.status()).toBe(201);
+      const createdOrder = (await createRes.json()).data;
+      createdOrderNo = createdOrder.orderNo;
+      expect(createdOrderNo).toBeTruthy();
+
+      // 2) Verify initial Bayar di Awal deposit directly via /verify-payment with proof payload
+      const initialPaymentId = createdOrder?.payment?.paymentRecords?.[0]?.id;
+      const verifyRes = await page.request.post(
+        `http://localhost:3001/api/orders/${encodeURIComponent(createdOrderNo!)}/verify-payment`,
+        {
+          headers: authHeaders,
+          data: {
+            confirmedAmount: 350000,
+            notes: "E2E QC-01 verified initial deposit",
+            ...(initialPaymentId ? { paymentId: initialPaymentId } : {}),
+            buktiPembayaran: {
+              fileName: "e2e-qc01-deposit.pdf",
+              fileUrl: "http://localhost:3001/e2e-qc01-deposit.pdf",
+              fileType: "pdf",
+            },
+          },
+        }
+      );
+      const verifyBodyText = await verifyRes.text();
+      expect(verifyRes.ok(), `verify-payment failed (${verifyRes.status()}): ${verifyBodyText}`).toBeTruthy();
+
+      // 3) Cancel order via canonical cancel endpoint -> must divert paid deposit to Cashback Terpending
+      const cancelRes = await page.request.post(
+        `http://localhost:3001/api/orders/${encodeURIComponent(createdOrderNo!)}/cancel`,
+        {
+          headers: authHeaders,
+          data: {
+            reason: "E2E QC-01 test cancellation with paid deposit",
+          },
+        }
+      );
+      expect(cancelRes.ok()).toBeTruthy();
+
+      // Reload app cleanly so UI store pulls fresh sandbox state and inspect /finance/cashback-pending
+      await page.goto("http://localhost:3000/finance/cashback-pending", { waitUntil: "domcontentloaded" });
+      await expect(page.getByRole("banner").getByText("Cashback Terpending").first()).toBeVisible({ timeout: 15000 });
+      await expect(page.locator("table")).toBeVisible({ timeout: 15000 });
+
+      // Search exact synthetic order and assert it renders inside Cashback Terpending with Kelebihan Bayar
+      const searchBox = page.getByPlaceholder(/Cari nama customer/i);
+      await searchBox.fill(createdOrderNo!);
+      await expect(page.locator("table tbody tr", { hasText: createdOrderNo! })).toBeVisible({ timeout: 10000 });
+      await expect(page.locator("table tbody tr", { hasText: uniqueCustomer })).toContainText("350.000");
+    } finally {
+      if (createdOrderNo) {
+        await page.request.delete(`http://localhost:3001/api/orders/${encodeURIComponent(createdOrderNo)}`, {
+          headers: authHeaders,
+        }).catch(() => {});
+      }
+    }
   });
 
   test("2. Verify WhatsApp Universal Phone Format in Belum Bayar (QC-05 Fix)", async ({ page }) => {
@@ -57,6 +141,7 @@ test.describe("Tahap 5 QC Forensic Audit Verification Suite", () => {
       const rowText = await rows.nth(i).innerText();
       expect(rowText.includes("ORD-0003")).toBeFalsy();
       expect(rowText.includes("ORD-0004")).toBeFalsy();
+      expect(rowText.toLowerCase().includes("dibatalkan")).toBeFalsy();
     }
   });
 
@@ -66,10 +151,10 @@ test.describe("Tahap 5 QC Forensic Audit Verification Suite", () => {
     await expect(page.locator("text=Buku Kas Kantor").first()).toBeVisible({ timeout: 15000 });
     await expect(page.locator("table")).toBeVisible({ timeout: 15000 });
 
-    // Verify presence of summary cards
-    await expect(page.locator("text=Total penerimaan debit")).toBeVisible();
-    await expect(page.locator("text=Total pengeluaran kredit")).toBeVisible();
-    await expect(page.locator("text=Saldo kas kantor")).toBeVisible();
+    // Verify presence of summary cards (FinanceSummary labels)
+    await expect(page.locator("text=Total Penerimaan (Debit)")).toBeVisible();
+    await expect(page.locator("text=Total Pengeluaran (Kredit)")).toBeVisible();
+    await expect(page.locator("text=Saldo Kas Kantor")).toBeVisible();
   });
 
   test("5. Verify Berita Acara Rekonsiliasi Tutup Kas Harian Modal (Tahap 5 Enhancement)", async ({ page }) => {

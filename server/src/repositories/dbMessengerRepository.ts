@@ -36,23 +36,25 @@ export class DbMessengerRepository {
     return rows.map((r) => this.mapRowToReimbursement(r));
   }
 
-  public getReimbursementById(id: string): ReimbursementRequest | undefined {
-    const stmt = db.prepare("SELECT * FROM messenger_reimbursements WHERE id = ?");
+  public getReimbursementById(id: string, targetDb?: any): ReimbursementRequest | undefined {
+    const activeDb = targetDb ?? db;
+    const stmt = activeDb.prepare("SELECT * FROM messenger_reimbursements WHERE id = ?");
     const row = stmt.get(id) as any;
     if (!row) return undefined;
     return this.mapRowToReimbursement(row);
   }
 
-  public createReimbursement(reimb: ReimbursementRequest): void {
-    const stmt = db.prepare(`
+  public createReimbursement(reimb: ReimbursementRequest, targetDb?: any): void {
+    const activeDb = targetDb ?? db;
+    const stmt = activeDb.prepare(`
       INSERT INTO messenger_reimbursements (
-        id, employee_id, messenger_name, order_no, category, amount,
+        id, employee_id, messenger_id, messenger_name, order_no, category, amount,
         approved_amount, rejected_amount, date, note, receipt_url, receipt_name,
         status, items_json, submitted_at, reviewed_at, reviewed_by, review_notes,
         paid_at, paid_by, payment_method, transaction_ref, pengeluaran_id,
         kas_messenger_id, channel, updated_at
       ) VALUES (
-        ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?,
@@ -63,6 +65,7 @@ export class DbMessengerRepository {
     stmt.run(
       reimb.id,
       reimb.employeeId,
+      (reimb as any).messengerId || null,
       reimb.messengerName,
       reimb.orderNo || null,
       reimb.category,
@@ -89,13 +92,14 @@ export class DbMessengerRepository {
     );
   }
 
-  public updateReimbursement(id: string, updates: Partial<ReimbursementRequest>): boolean {
-    const existing = this.getReimbursementById(id);
+  public updateReimbursement(id: string, updates: Partial<ReimbursementRequest>, targetDb?: any): boolean {
+    const activeDb = targetDb ?? db;
+    const existing = this.getReimbursementById(id, activeDb);
     if (!existing) return false;
 
     const merged = { ...existing, ...updates };
 
-    const stmt = db.prepare(`
+    const stmt = activeDb.prepare(`
       UPDATE messenger_reimbursements SET
         category = ?,
         amount = ?,
@@ -124,8 +128,8 @@ export class DbMessengerRepository {
     const res = stmt.run(
       merged.category,
       merged.amount,
-      merged.approvedAmount || 0,
-      merged.rejectedAmount || 0,
+      merged.approvedAmount ?? 0,
+      merged.rejectedAmount ?? 0,
       merged.date,
       merged.note || null,
       merged.receiptUrl || null,
@@ -148,17 +152,25 @@ export class DbMessengerRepository {
     return res.changes > 0;
   }
 
-  public getNextReimbursementId(): string {
-    const stmt = db.prepare("SELECT COUNT(*) as count FROM messenger_reimbursements");
-    const row = stmt.get() as { count: number };
-    const count = (row?.count || 0) + 1;
-    return `REIMB-${String(count).padStart(3, "0")}`;
+  public getNextReimbursementId(targetDb?: any): string {
+    const activeDb = targetDb ?? db;
+    const rows = activeDb.prepare("SELECT id FROM messenger_reimbursements").all() as Array<{ id: string }>;
+    let maxSeq = 0;
+    for (const r of rows) {
+      const m = /^REIMB-(\d+)$/i.exec(String(r.id || "").trim());
+      if (m) {
+        const n = Number(m[1]);
+        if (Number.isFinite(n) && n > maxSeq) maxSeq = n;
+      }
+    }
+    return `REIMB-${String(maxSeq + 1).padStart(3, "0")}`;
   }
 
   private mapRowToReimbursement(r: any): ReimbursementRequest {
     return {
       id: r.id,
       employeeId: r.employee_id,
+      messengerId: r.messenger_id || undefined,
       messengerName: r.messenger_name,
       orderNo: r.order_no || undefined,
       category: r.category,

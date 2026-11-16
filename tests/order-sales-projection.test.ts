@@ -30,9 +30,107 @@ import {
 import { financeStore } from "../src/app/data/financeStore";
 import { orderStore } from "../src/app/data/orderStore";
 import { orderRepository } from "../src/data/repositories/orderRepository";
-import { MockOrderProvider } from "./fixtures/mock/mockOrderProvider";
+import { financeRepository } from "../src/data/repositories/financeRepository";
+import { ApiFinanceProvider } from "../src/data/api/apiFinanceProvider";
 import { ApiOrderProvider } from "../src/data/api/apiOrderProvider";
-import type { OperationalOrder } from "../src/domain/order/types";
+import { STAGES, type IOrderDataProvider, type OperationalOrder, type StageName } from "../src/domain/order/types";
+import type { IFinanceDataProvider, InvoiceBillingRecord } from "../src/domain/finance/types";
+
+class InMemoryOrderTestDouble implements IOrderDataProvider {
+  private orders = new Map<string, OperationalOrder>();
+  private archived = new Set<string>();
+  private listeners = new Set<() => void>();
+
+  getActiveOrders(): Record<StageName, OperationalOrder[]> {
+    const res = {} as Record<StageName, OperationalOrder[]>;
+    for (const s of STAGES) res[s] = [];
+    for (const o of this.orders.values()) {
+      if (this.archived.has(o.orderNo)) continue;
+      const st = (STAGES as readonly string[]).includes(o.currentStageName) ? (o.currentStageName as StageName) : "Verifikasi";
+      res[st].push({ ...o });
+    }
+    return res;
+  }
+  getArchivedOrders(): OperationalOrder[] {
+    return Array.from(this.archived).map((no) => this.orders.get(no)!).filter(Boolean).map((o) => ({ ...o, isArchived: true }));
+  }
+  getAllFlat(): OperationalOrder[] {
+    return Array.from(this.orders.values()).map((o) => ({ ...o, isArchived: this.archived.has(o.orderNo) || o.isArchived }));
+  }
+  getOrderByNo(orderNo: string): OperationalOrder | undefined {
+    const o = this.orders.get(orderNo);
+    return o ? { ...o, isArchived: this.archived.has(o.orderNo) || o.isArchived } : undefined;
+  }
+  getOrdersByStage(stage: StageName): OperationalOrder[] {
+    return this.getActiveOrders()[stage] || [];
+  }
+  addOrder(order: OperationalOrder): void {
+    this.orders.set(order.orderNo, { ...order });
+    this.notify();
+  }
+  updateOrder(orderNo: string, updates: Partial<OperationalOrder>): boolean {
+    const cur = this.orders.get(orderNo);
+    if (!cur) return false;
+    this.orders.set(orderNo, { ...cur, ...updates });
+    this.notify();
+    return true;
+  }
+  advanceOrder(orderNo: string, targetStage: StageName, updates: Partial<OperationalOrder>): boolean {
+    return this.updateOrder(orderNo, { ...updates, currentStageName: targetStage });
+  }
+  rollbackOrder(orderNo: string, targetStage: StageName, updates: Partial<OperationalOrder>): boolean {
+    return this.updateOrder(orderNo, { ...updates, currentStageName: targetStage });
+  }
+  archiveOrder(orderNo: string): boolean {
+    if (!this.orders.has(orderNo)) return false;
+    this.archived.add(orderNo);
+    this.notify();
+    return true;
+  }
+  deleteOrder(orderNo: string): boolean {
+    this.archived.delete(orderNo);
+    const ok = this.orders.delete(orderNo);
+    if (ok) this.notify();
+    return ok;
+  }
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  private notify(): void {
+    this.listeners.forEach((fn) => fn());
+  }
+}
+
+class InMemoryFinanceTestDouble implements IFinanceDataProvider {
+  public invoices: InvoiceBillingRecord[] = [];
+  private listeners = new Set<() => void>();
+
+  getInvoices(): InvoiceBillingRecord[] { return [...this.invoices]; }
+  getTagihanList(): InvoiceBillingRecord[] { return this.invoices.filter((i) => i.sisa > 0); }
+  getCompletedTagihanList(): InvoiceBillingRecord[] { return this.invoices.filter((i) => i.sisa === 0); }
+  getInvoiceById(id: number): InvoiceBillingRecord | undefined { return this.invoices.find((i) => i.id === id); }
+  getInvoiceByOrderNo(orderNo: string): InvoiceBillingRecord | undefined { return this.invoices.find((i) => i.orderNo === orderNo); }
+  getProfitList() { return []; }
+  getKasKantorList() { return []; }
+  getKasMessengerList() { return []; }
+  getPengeluaranList() { return []; }
+  recordPayment(idOrInvoice: number | string, paymentAmount: number): boolean {
+    const inv = this.invoices.find((i) => i.id === idOrInvoice || i.invoice === String(idOrInvoice));
+    if (!inv) return false;
+    inv.terbayar = Math.min(inv.totalTagihan, inv.terbayar + paymentAmount);
+    inv.sisa = Math.max(0, inv.totalTagihan - inv.terbayar);
+    inv.status = inv.sisa === 0 ? "Lunas" : inv.terbayar > 0 ? "Kurang Bayar" : "Belum Bayar";
+    this.listeners.forEach((fn) => fn());
+    return true;
+  }
+  resolveInvoice(): boolean { return false; }
+  completeInvoice(): boolean { return false; }
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+}
 
 function createMockOrder(overrides: Partial<OperationalOrder> = {}): OperationalOrder {
   return {
@@ -198,10 +296,9 @@ test("Phase 9.0 & 9.1 — 4. projectOrderToContractRow Stage 8 unarchived vs arc
   assert.strictEqual(archivedRow["Status BPKB"], "Selesai");
 });
 
-test("Phase 9.0 — 5. Mock mode: newly created order appears immediately in Data Penjualan tab", () => {
-  financeStore.setApiMode(false);
-  const mockProvider = new MockOrderProvider();
-  orderRepository.setProvider(mockProvider);
+test("Phase 9.0 — 5. Newly created order appears immediately in Data Penjualan tab", () => {
+  const orderDouble = new InMemoryOrderTestDouble();
+  orderRepository.setProvider(orderDouble);
 
   const newOrder = createMockOrder({
     orderNo: "ORD-PROJ-001",
@@ -221,8 +318,7 @@ test("Phase 9.0 — 5. Mock mode: newly created order appears immediately in Dat
   assert.strictEqual(found["Jenis Pengurusan"], "Mutasi Luar Daerah");
 });
 
-test("Phase 9.0 — 6. Mock mode: deduplication against legacy fixtures is idempotent", () => {
-  financeStore.setApiMode(false);
+test("Phase 9.0 — 6. Deduplication against existing rows is idempotent", () => {
   const initialRows = financeStore.getContractData("mutasi-ld");
   const initialCount = initialRows.length;
 
@@ -236,10 +332,8 @@ test("Phase 9.0 — 6. Mock mode: deduplication against legacy fixtures is idemp
 });
 
 test("Phase 9.0 — 7. API mode: zero mock fixtures leak into operational tabs", () => {
-  financeStore.setApiMode(true);
-  const mockProvider = new MockOrderProvider();
-  // Clear any existing orders in provider for test isolation
-  orderRepository.setProvider(mockProvider);
+  const orderDouble = new InMemoryOrderTestDouble();
+  orderRepository.setProvider(orderDouble);
 
   // When no orders match, operational tabs in API mode must be empty (0 mock fixtures!)
   const emptyMutasiLd = financeStore.getContractData("mutasi-ld");
@@ -259,7 +353,6 @@ test("Phase 9.0 — 7. API mode: zero mock fixtures leak into operational tabs",
 });
 
 test("Phase 9.0 — 8. Reactive projection updates when orders are added or updated", () => {
-  financeStore.setApiMode(false);
   let notifyCount = 0;
   const unsub = financeStore.subscribe(() => {
     notifyCount++;
@@ -355,9 +448,8 @@ test("Phase 9.0 — 11. addContractData handles safe ID generation without NaN",
 });
 
 test("Phase 9.0 — 12. Strict preservation of financial tabs 6-8", () => {
-  financeStore.setApiMode(false);
-  const mockProvider = new MockOrderProvider();
-  orderRepository.setProvider(mockProvider);
+  const orderDouble = new InMemoryOrderTestDouble();
+  orderRepository.setProvider(orderDouble);
 
   // 1. Seed unpaid invoice for belum-kurang-bayar
   financeStore.addInvoice({
@@ -527,9 +619,8 @@ test("Phase 9.1 — 15. Operational column contracts contain Status Pengerjaan &
 });
 
 test("Phase 9.1 — 16. Strict invoice linking: matching customer or nopol without orderNo/invoiceNo MUST NOT link", () => {
-  financeStore.setApiMode(false);
-  const mockProvider = new MockOrderProvider();
-  orderRepository.setProvider(mockProvider);
+  const orderDouble = new InMemoryOrderTestDouble();
+  orderRepository.setProvider(orderDouble);
 
   // Add an invoice to financeStore with nopol "B 1234 XYZ" and customer "PT. Strictly Separate"
   financeStore.addInvoice({
@@ -567,9 +658,8 @@ test("Phase 9.1 — 16. Strict invoice linking: matching customer or nopol witho
 });
 
 test("Phase 9.1 — 17. Strict invoice linking: matching orderNo or payment.invoiceNo successfully links", () => {
-  financeStore.setApiMode(false);
-  const mockProvider = new MockOrderProvider();
-  orderRepository.setProvider(mockProvider);
+  const orderDouble = new InMemoryOrderTestDouble();
+  orderRepository.setProvider(orderDouble);
 
   // 1. Link by orderNo
   financeStore.addInvoice({
@@ -628,8 +718,7 @@ test("Phase 9.1 — 17. Strict invoice linking: matching orderNo or payment.invo
   assert.strictEqual(foundByInv["Status Pembayaran"], "Kurang Bayar");
 });
 
-test("Phase 9.1 — 18. Mock mode legacy fixtures fallback to neutral status without fabricated progress", () => {
-  financeStore.setApiMode(false);
+test("Phase 9.1 — 18. Unlinked non-order rows fallback to neutral status without fabricated progress", () => {
   (financeStore as any).contractDatasets["mutasi-antar-daerah"] = [
     {
       id: 99991,
@@ -665,9 +754,8 @@ test("Phase 9.1 — 18. Mock mode legacy fixtures fallback to neutral status wit
 });
 
 test("Phase 9.1 — 19. Order lifecycle transitions update projected Status Pengerjaan reactively", () => {
-  financeStore.setApiMode(false);
-  const mockProvider = new MockOrderProvider();
-  orderRepository.setProvider(mockProvider);
+  const orderDouble = new InMemoryOrderTestDouble();
+  orderRepository.setProvider(orderDouble);
 
   const lifecycleOrder = createMockOrder({
     orderNo: "ORD-LIFECYCLE-900",
@@ -695,56 +783,70 @@ test("Phase 9.1 — 19. Order lifecycle transitions update projected Status Peng
   assert.strictEqual(target?.["Status Pengerjaan"], "Selesai");
 });
 
-test("Phase 9.1 — 20. Payment realization updates Status Pembayaran reactively", () => {
-  financeStore.setApiMode(false);
-  const mockProvider = new MockOrderProvider();
-  orderRepository.setProvider(mockProvider);
+test("Phase 9.1 — 20. Payment realization updates Status Pembayaran reactively", async () => {
+  const orderDouble = new InMemoryOrderTestDouble();
+  const financeDouble = new InMemoryFinanceTestDouble();
+  orderRepository.setProvider(orderDouble);
+  financeRepository.setProvider(financeDouble);
+  try {
+    const orderNo = "ORD-PAY-REAL-101";
+    const inv: InvoiceBillingRecord = {
+      id: 9101,
+      tanggal: "17/10/2026",
+      customer: "Pay Real Customer",
+      nopol: "B 1234 PAY",
+      jenisLayanan: "Tarik Berkas",
+      totalTagihan: 5000000,
+      terbayar: 0,
+      sisa: 5000000,
+      status: "Belum Bayar",
+      billingStatus: "ACTIVE",
+      jatuhTempo: "17/10/2026",
+      invoice: "INV-PAY-101",
+      orderNo: orderNo,
+      isCashRealized: false,
+      cashRecordedAmount: 0,
+    };
+    financeDouble.invoices.push(inv);
+    financeStore.syncFromRepository();
 
-  const orderNo = "ORD-PAY-REAL-101";
-  const inv = financeStore.addInvoice({
-    customer: "Pay Real Customer",
-    nopol: "B 1234 PAY",
-    totalTagihan: 5000000,
-    terbayar: 0,
-    status: "Belum Bayar",
-    orderNo: orderNo,
-    invoice: "INV-PAY-101",
-  });
+    const order = createMockOrder({
+      orderNo: orderNo,
+      customer: "Pay Real Customer",
+      nopol: "B 1234 PAY",
+      layanan: "Tarik Berkas",
+    });
+    orderRepository.saveOrder(order);
 
-  const order = createMockOrder({
-    orderNo: orderNo,
-    customer: "Pay Real Customer",
-    nopol: "B 1234 PAY",
-    layanan: "Tarik Berkas",
-  });
-  orderRepository.saveOrder(order);
+    // Initial: Belum Bayar
+    let rows = financeStore.getContractData("tarik-berkas");
+    let target = rows.find((r) => r.orderNo === orderNo);
+    assert.strictEqual(target?.["Status Pembayaran"], "Belum Bayar");
 
-  // Initial: Belum Bayar
-  let rows = financeStore.getContractData("tarik-berkas");
-  let target = rows.find((r) => r.orderNo === orderNo);
-  assert.strictEqual(target?.["Status Pembayaran"], "Belum Bayar");
+    // Partial payment of 2,000,000 -> Kurang Bayar
+    await financeStore.recordPayment(inv.id, 2000000);
+    rows = financeStore.getContractData("tarik-berkas");
+    target = rows.find((r) => r.orderNo === orderNo);
+    assert.strictEqual(target?.["Status Pembayaran"], "Kurang Bayar");
 
-  // Partial payment of 2,000,000 -> Kurang Bayar
-  financeStore.recordPayment(inv.id, 2000000);
-  rows = financeStore.getContractData("tarik-berkas");
-  target = rows.find((r) => r.orderNo === orderNo);
-  assert.strictEqual(target?.["Status Pembayaran"], "Kurang Bayar");
-
-  // Full settlement of remaining 3,000,000 -> Lunas
-  financeStore.recordPayment(inv.id, 3000000);
-  rows = financeStore.getContractData("tarik-berkas");
-  target = rows.find((r) => r.orderNo === orderNo);
-  assert.strictEqual(target?.["Status Pembayaran"], "Lunas");
+    // Full settlement of remaining 3,000,000 -> Lunas
+    await financeStore.recordPayment(inv.id, 3000000);
+    rows = financeStore.getContractData("tarik-berkas");
+    target = rows.find((r) => r.orderNo === orderNo);
+    assert.strictEqual(target?.["Status Pembayaran"], "Lunas");
+  } finally {
+    financeRepository.setProvider(new ApiFinanceProvider());
+    financeStore.syncFromRepository();
+  }
 });
 
 // ============================================================================
 // PHASE 9.2 — ACTION INTEGRITY: CANONICAL VIEW/EDIT & CONDITIONAL ADD TESTS
 // ============================================================================
 
-test("Phase 9.2 — 21. Action Integrity: 'Lihat' resolution distinguishes canonical orders vs legacy mock fixtures", () => {
-  financeStore.setApiMode(false);
-  const mockProvider = new MockOrderProvider();
-  orderRepository.setProvider(mockProvider);
+test("Phase 9.2 — 21. Action Integrity: 'Lihat' resolution distinguishes canonical orders vs unlinked manual rows", () => {
+  const orderDouble = new InMemoryOrderTestDouble();
+  orderRepository.setProvider(orderDouble);
 
   // 1. Projected Order
   const canonicalOrder = createMockOrder({
@@ -778,9 +880,8 @@ test("Phase 9.2 — 21. Action Integrity: 'Lihat' resolution distinguishes canon
 });
 
 test("Phase 9.2 — 22. Action Integrity: '+ Tambah Data' creates canonical order at Stage 1 and projects without duplication", () => {
-  financeStore.setApiMode(false);
-  const mockProvider = new MockOrderProvider();
-  orderRepository.setProvider(mockProvider);
+  const orderDouble = new InMemoryOrderTestDouble();
+  orderRepository.setProvider(orderDouble);
 
   const initialCount = financeStore.getContractData("mutasi-as").length;
 
@@ -820,7 +921,6 @@ test("Phase 9.2 — 22. Action Integrity: '+ Tambah Data' creates canonical orde
 });
 
 test("Phase 9.2 — 23. Action Integrity: '+ Tambah Data' strictly rejects invalid submissions", () => {
-  financeStore.setApiMode(false);
   const initialOrderCount = orderRepository.getAllFlat().length;
 
   // Missing customer
@@ -847,9 +947,8 @@ test("Phase 9.2 — 23. Action Integrity: '+ Tambah Data' strictly rejects inval
 });
 
 test("Phase 9.2 — 24. Action Integrity: 'Edit' safely mutates canonical order fields and persists", () => {
-  financeStore.setApiMode(false);
-  const mockProvider = new MockOrderProvider();
-  orderRepository.setProvider(mockProvider);
+  const orderDouble = new InMemoryOrderTestDouble();
+  orderRepository.setProvider(orderDouble);
 
   const order = createMockOrder({
     orderNo: "ORD-EDIT-SAFE-1",
@@ -886,9 +985,8 @@ test("Phase 9.2 — 24. Action Integrity: 'Edit' safely mutates canonical order 
 });
 
 test("Phase 9.2 — 25. Action Integrity: 'Edit' protects derived statuses and computed amounts from generic cell overwrites", () => {
-  financeStore.setApiMode(false);
-  const mockProvider = new MockOrderProvider();
-  orderRepository.setProvider(mockProvider);
+  const orderDouble = new InMemoryOrderTestDouble();
+  orderRepository.setProvider(orderDouble);
 
   const order = createMockOrder({
     orderNo: "ORD-EDIT-DERIVED-1",
@@ -1190,7 +1288,7 @@ test("Phase 9.4 — 30. Anti-ghost row cleanup on API creation failure (Finding 
       async () => {
         await apiProvider.addOrderAsync(failingOrder);
       },
-      /Order creation failed on backend/
+      (err: any) => err?.statusCode === 400 && /Data wajib belum lengkap/.test(err?.message || "")
     );
 
     // Verify anti-ghost row: failing order MUST be rolled back from activeOrders

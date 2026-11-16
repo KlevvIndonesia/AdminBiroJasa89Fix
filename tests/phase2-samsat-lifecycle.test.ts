@@ -583,8 +583,22 @@ test("PHASE 2: SAMSAT LIFECYCLE HARDENING SUITE", async (suite) => {
     assert.strictEqual(cycle1.samsatCompletedCycle, 1);
     assert.strictEqual(cycle1.taskAcceptance?.["Jemput Hasil Samsat"]?.cycle, 1);
 
+    // 1b. Attempting to advance Stage 4 -> 5 BEFORE Jemput Hasil Samsat is completed MUST fail
+    assert.throws(
+      () => orderService.advanceOrder(orderNo, "Verifikasi Ulang", {}, adminUser),
+      (err: any) => err instanceof ApiError && err.code === "PREREQUISITE_NOT_MET"
+    );
+
+    // 1c. Assign & complete Cycle 1 Jemput Hasil Samsat legitimately
+    dbOrderRepository.updateOrder(orderNo, {
+      samsatPickupMessengerId: courier1.employeeId,
+      samsatPickupMessengerName: courier1.nama,
+    });
+    orderService.acceptMessengerTask(orderNo, "Jemput Hasil Samsat", courier1);
+    orderService.completeSamsatPickupTask(orderNo, courier1, {});
+
     // 2. Advance to Stage 5 ("Verifikasi Ulang")
-    orderService.advanceOrder(orderNo, "Verifikasi Ulang", {}, courier1);
+    orderService.advanceOrder(orderNo, "Verifikasi Ulang", {}, adminUser);
 
     // 3. Rollback back to Stage 4 ("Proses Samsat") by Admin
     const rolledBack = orderService.rollbackOrder(orderNo, "Proses Samsat", {}, adminUser);

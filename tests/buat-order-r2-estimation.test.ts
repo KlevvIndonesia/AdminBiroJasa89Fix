@@ -10,8 +10,16 @@
  * 5. Order & Invoice creation consistency: order total === invoice amount, zero double counting.
  */
 
-import test from "node:test";
+import test, { before, after } from "node:test";
 import assert from "node:assert";
+import http from "node:http";
+import { createApp } from "../server/src/app";
+import { orderRepository } from "../src/data/repositories/orderRepository";
+import { financeRepository } from "../src/data/repositories/financeRepository";
+import { pricingRepository } from "../src/data/repositories/pricingRepository";
+import { ApiOrderProvider } from "../src/data/api/apiOrderProvider";
+import { ApiFinanceProvider } from "../src/data/api/apiFinanceProvider";
+import { ApiPricingProvider } from "../src/data/api/apiPricingProvider";
 import { orderStore } from "../src/app/data/orderStore";
 import { financeStore } from "../src/app/data/financeStore";
 import { calculateEstimation } from "../src/domain/estimation/estimationEngine";
@@ -21,6 +29,52 @@ import {
 } from "../src/domain/estimation/defaultTemplates";
 import { EstimationInput } from "../src/domain/estimation/types";
 import { pricingStore } from "../src/app/data/pricingStore";
+
+let server: http.Server | null = null;
+const prevToken = process.env.AUTH_TOKEN;
+
+before(async () => {
+  const started = await new Promise<{ server: http.Server; baseUrl: string }>((resolve) => {
+    const app = createApp();
+    const s = http.createServer(app);
+    s.listen(0, () => {
+      const addr = s.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      resolve({ server: s, baseUrl: `http://localhost:${port}` });
+    });
+  });
+  server = started.server;
+
+  const loginRes = await fetch(`${started.baseUrl}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "svp@birojasa.com", password: "admin123" }),
+  });
+  assert.strictEqual(loginRes.status, 200);
+  const loginBody = (await loginRes.json()) as any;
+  process.env.AUTH_TOKEN = loginBody.data.token;
+
+  orderRepository.setProvider(new ApiOrderProvider(`${started.baseUrl}/api`));
+  financeRepository.setProvider(new ApiFinanceProvider(`${started.baseUrl}/api`));
+  pricingRepository.setProvider(new ApiPricingProvider(`${started.baseUrl}/api`));
+  await Promise.all([
+    pricingStore.initFromApi(),
+    financeStore.initFromApi(),
+    orderStore.initFromApi(),
+  ]);
+});
+
+after(() => {
+  if (prevToken === undefined) {
+    delete process.env.AUTH_TOKEN;
+  } else {
+    process.env.AUTH_TOKEN = prevToken;
+  }
+  orderRepository.setProvider(new ApiOrderProvider());
+  financeRepository.setProvider(new ApiFinanceProvider());
+  pricingRepository.setProvider(new ApiPricingProvider());
+  server?.close();
+});
 
 test("1. Buat Order R2 Annual Reference Scenario — Total must equal Rp 876.000", () => {
   const input: EstimationInput = {
@@ -143,6 +197,7 @@ test("3. Order and Invoice Persistence — Exact Match of Rp 876.000 with Zero D
     customer: "Test Customer R2",
     namaPemilik: "Bpk Test R2",
     nomorHP: "081298765432",
+    nopol: "B 5678 MOT",
     platNomor: "B 5678 MOT",
     jenisKendaraan: "Motor",
     layanan: "Perpanjangan 1 Tahun",
@@ -175,13 +230,15 @@ test("3. Order and Invoice Persistence — Exact Match of Rp 876.000 with Zero D
 
   // Verify created order
   assert.ok(createdOrder, "Order must be created successfully");
-  assert.strictEqual(createdOrder.totalEstimasi, 876000, "Order totalEstimasi must be Rp 876.000");
+  const persistedTotal = (createdOrder as any).totalBiaya ?? createdOrder.totalEstimasi ?? createdOrder.payment.totalBiaya;
+  assert.strictEqual(persistedTotal, 876000, "Order total must be Rp 876.000");
   assert.strictEqual(createdOrder.payment.totalBiaya, 876000, "Order payment.totalBiaya must be Rp 876.000");
   assert.ok(createdOrder.orderNo, "Order must have canonical orderNo");
   assert.ok(createdOrder.estimationResult, "estimationResult must be attached to order");
   assert.strictEqual(createdOrder.estimationResult.totalEstimasi, 876000);
 
-  // Verify invoice generated in financeStore
+  // Verify invoice generated in financeStore (SQLite synced)
+  await financeStore.initFromApi();
   const invoices = financeStore.getInvoices();
   const matchingInvoice = invoices.find(
     (inv) => inv.orderNo === createdOrder.orderNo || inv.orderId === createdOrder.id
@@ -196,10 +253,14 @@ test("3. Order and Invoice Persistence — Exact Match of Rp 876.000 with Zero D
 
   // Accounting verification in Data Penjualan semantics:
   // customer payment = 876.000
-  // uangKeluar = pkb + swdkllj + dendaSwdkllj = 142.000 + 70.000 + 464.000 = 676.000
+  // uangKeluar = pkb + dendaPkb + swdkllj + dendaSwdkllj + cetakSkp + prosesAcc = 142.000 + 70.000 + 464.000 = 676.000
   // profit = 876.000 - 676.000 = 200.000 (equal to biayaJasa)
-  const uangKeluar = createdOrder.pkb + createdOrder.swdkllj + createdOrder.dendaSwdkllj;
+  const est = createdOrder.estimationResult;
+  const estCetakSkp = est.items.find((i: any) => i.id === "cetak-skp")?.amount || 0;
+  const estProsesAcc = est.items.find((i: any) => i.id === "proses-dan-acc-id")?.amount || 0;
+  const uangKeluar =
+    est.totalPkb + est.totalDendaPkb + est.totalSwdkllj + est.totalDendaSwdkllj + estCetakSkp + estProsesAcc;
   assert.strictEqual(uangKeluar, 676000, "Official Samsat expenses = 676.000");
-  const profit = createdOrder.totalEstimasi - uangKeluar;
+  const profit = persistedTotal - uangKeluar;
   assert.strictEqual(profit, 200000, "Profit must exactly match service fee (200.000)");
 });

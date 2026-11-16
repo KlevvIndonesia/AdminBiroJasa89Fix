@@ -17,7 +17,7 @@ function Checkbox({
         "peer bg-input-background data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground data-[state=checked]:border-primary",
         "focus-visible:border-ring focus-visible:ring-ring/30 focus-visible:ring-[2px]",
         "aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive",
-        "size-4 shrink-0 rounded-[4px] border border-border/80 shadow-xs transition-[color,box-shadow,border-color] outline-none disabled:cursor-not-allowed disabled:opacity-50",
+        "size-4 shrink-0 rounded-[4px] border border-input hover:border-muted-foreground/40 cursor-pointer shadow-xs transition-[color,box-shadow,border-color] outline-none disabled:cursor-not-allowed disabled:opacity-50",
         className,
       )}
       {...props}

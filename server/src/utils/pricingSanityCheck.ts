@@ -1,3 +1,5 @@
+import { resolveCanonicalSamsatCogs } from "../../../src/domain/finance/samsatCogs";
+
 /**
  * Server-Side Order Pricing Sanity & Anti-Tampering Validator
  * Admin SUN89 — Biro Jasa Management System
@@ -117,8 +119,8 @@ export function validateOrderPricingSanity(payload: OrderPricingPayload): Pricin
   }
 
   const rawSamsat = payload.biayaSamsat ?? payload.uangKeluar ?? payload.costSnapshot?.biayaSamsat ?? 0;
-  const biayaSamsat = Number(rawSamsat);
-  if (!Number.isFinite(biayaSamsat) || biayaSamsat < 0) {
+  const rawSamsatNum = Number(rawSamsat);
+  if (!Number.isFinite(rawSamsatNum) || rawSamsatNum < 0) {
     return {
       isValid: false,
       errorCode: "INVALID_PRICING",
@@ -129,6 +131,21 @@ export function validateOrderPricingSanity(payload: OrderPricingPayload): Pricin
       taxFloor: 0,
     };
   }
+
+  const cogsResolution = resolveCanonicalSamsatCogs({
+    biayaSamsat: payload.biayaSamsat ?? payload.uangKeluar ?? null,
+    biayaJasa,
+    biayaAntarJemput: Number(payload.biayaAntarJemput ?? payload.costSnapshot?.biayaAntarJemput ?? 0),
+    totalTagihan: totalBiaya,
+    pkb: Number(payload.pkb ?? payload.nominalPkbTerakhir ?? payload.costSnapshot?.pkb ?? 0),
+    dendaPkb: Number((payload as any).dendaPkb ?? payload.costSnapshot?.dendaPkb ?? 0),
+    swdkllj: Number(payload.swdkllj ?? payload.nominalSwdkllj ?? payload.costSnapshot?.swdkllj ?? 0),
+    dendaSwdkllj: Number(payload.dendaSwdkllj ?? payload.costSnapshot?.dendaSwdkllj ?? 0),
+    costSnapshot: payload.costSnapshot,
+    isExplicitZero: Boolean((payload as any).isExplicitZero),
+    isDraftEstimate: Boolean((payload as any).isDraftEstimate),
+  });
+  const biayaSamsat = cogsResolution.biayaSamsat;
 
   const rawAntarJemput = payload.biayaAntarJemput ?? 0;
   const biayaAntarJemput = Number(rawAntarJemput);

@@ -37,7 +37,7 @@ import {
 } from "../../../domain/messenger/types";
 import {
   startMessengerTask,
-  updateMessengerTaskStatus,
+  updateMessengerTaskStatusAction,
   completeMessengerDelivery,
   completeMessengerPickup,
   completeSamsatResultPickup,
@@ -269,12 +269,16 @@ export function MessengerMobileTaskDetail({
       } else {
         // Tetap Pegang Tugas Ini
         if (task.keteranganTugas === "Jemput Dokumen") {
-          orderStore.updateOrder(task.orderNo, {
+          const saved = await orderStore.updateOrderAsync(task.orderNo, {
             pickupChecklist: checkedDocs,
           });
+          if (!saved) {
+            toast.error("Gagal menyimpan progres penjemputan ke server.");
+            return;
+          }
           toast.success("Progres penjemputan berhasil disimpan!");
         } else if (task.keteranganTugas === "Pengantaran Dokumen") {
-          orderStore.updateOrder(task.orderNo, {
+          const saved = await orderStore.updateOrderAsync(task.orderNo, {
             deliveryHandover: {
               recipientName,
               relationship,
@@ -284,6 +288,10 @@ export function MessengerMobileTaskDetail({
               fileSize: deliveryFileSize,
             },
           });
+          if (!saved) {
+            toast.error("Gagal menyimpan progres pengantaran ke server.");
+            return;
+          }
           toast.success("Progres pengantaran berhasil disimpan!");
         }
         setIsSaveProgressOpen(false);
@@ -330,11 +338,11 @@ export function MessengerMobileTaskDetail({
     }
   };
 
-  const handleWaitingReasonSubmit = (reason: string) => {
-    const res = updateMessengerTaskStatus(
+  const handleWaitingReasonSubmit = async (reason: string) => {
+    const res = await updateMessengerTaskStatusAction(
       task.orderNo,
       "WAITING",
-      { waitingReason: reason },
+      { taskType: task.keteranganTugas, waitingReason: reason },
       currentUser
     );
     if (res.success) {

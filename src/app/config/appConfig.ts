@@ -28,6 +28,5 @@ export const APP_CONFIG = {
   dateFormat: "DD/MM/YYYY",
   companyName: "SUN89 Biro Jasa",
   supportContact: "support@sunbirojasa.com",
-  dataProvider: "api" as const,
   apiBaseUrl: resolveApiBaseUrl(),
 } as const;

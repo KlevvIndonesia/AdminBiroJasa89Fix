@@ -1,15 +1,12 @@
 import { test, expect } from "@playwright/test";
+import { loginAs } from "./helpers/authHelper";
 
 test.describe("Phase 8.2: Shared Table Vertical-Fill & Page Layout System", () => {
   const BASE_URL = "http://localhost:3000";
 
   test.beforeEach(async ({ page }) => {
     // Authenticate as SVP / Administrator (full access to all modules)
-    await page.goto(`${BASE_URL}/login`);
-    await page.fill("#email", "svp@birojasa.com");
-    await page.fill("#password", "admin123");
-    await page.click("button[type='submit']");
-    await page.waitForURL("**/dashboard", { timeout: 10000 });
+    await loginAs(page, "svp@birojasa.com", "admin123");
   });
 
   test("1. Finance Kas Kantor: Table card expands to fill vertical space and anchors summary at bottom", async ({ page }) => {
@@ -29,7 +26,7 @@ test.describe("Phase 8.2: Shared Table Vertical-Fill & Page Layout System", () =
     }
 
     // Check that summary cards below table exist and are rendered cleanly
-    const summaryCards = page.locator("text=Total penerimaan debit").first();
+    const summaryCards = page.locator("text=Total Penerimaan (Debit)").first();
     await expect(summaryCards).toBeVisible();
 
     // Ensure pagination is visible and anchored
@@ -58,11 +55,11 @@ test.describe("Phase 8.2: Shared Table Vertical-Fill & Page Layout System", () =
 
   test("3. Data Penjualan: Tabs content and table expand vertically", async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
-    await page.goto(`${BASE_URL}/finance/data-penjualan/mutasi-ld`);
-    await expect(page).toHaveURL(`${BASE_URL}/finance/data-penjualan/mutasi-ld`);
+    await page.goto(`${BASE_URL}/finance/data-penjualan/perpanjangan-1-tahun`);
+    await expect(page).toHaveURL(`${BASE_URL}/finance/data-penjualan/perpanjangan-1-tahun`);
 
-    const tableWrapper = page.locator(".rounded-lg.border.border-border.bg-card").first();
-    await expect(tableWrapper).toBeVisible();
+    const tableWrapper = page.locator("[data-slot='data-table-shell']").first();
+    await expect(tableWrapper).toBeVisible({ timeout: 10000 });
 
     const box = await tableWrapper.boundingBox();
     expect(box).not.toBeNull();
@@ -98,7 +95,7 @@ test.describe("Phase 8.2: Shared Table Vertical-Fill & Page Layout System", () =
     await page.goto(`${BASE_URL}/master-data/harga-dasar`);
     await expect(page).toHaveURL(`${BASE_URL}/master-data/harga-dasar`);
 
-    const tableWrapper = page.locator(".rounded-lg.border.border-border.bg-card").first();
+    const tableWrapper = page.locator("[data-slot='card'].overflow-hidden").first();
     await expect(tableWrapper).toBeVisible();
 
     const box = await tableWrapper.boundingBox();
@@ -124,18 +121,22 @@ test.describe("Phase 8.2: Shared Table Vertical-Fill & Page Layout System", () =
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(`${BASE_URL}/manajemen/riwayat-aktivitas`);
     await expect(page).toHaveURL(`${BASE_URL}/manajemen/riwayat-aktivitas`);
+    await page.waitForLoadState("domcontentloaded");
 
     // Type a nonexistent search query to trigger empty state
     const searchInput = page.locator("input[placeholder*='Cari pengguna']").first();
+    await expect(searchInput).toBeVisible({ timeout: 15000 });
     await searchInput.fill("NONEXISTENT_QUERY_12345");
 
-    const emptyCell = page.locator("text=Tidak ada data aktivitas").first();
-    await expect(emptyCell).toBeVisible();
+    const emptyText = page.locator("text=Tidak ada data aktivitas").first();
+    await expect(emptyText).toBeVisible();
 
-    const emptyBox = await emptyCell.boundingBox();
+    const emptyContainer = page.locator("[data-slot='empty-state']").first();
+    await expect(emptyContainer).toBeVisible();
+    const emptyBox = await emptyContainer.boundingBox();
     expect(emptyBox).not.toBeNull();
     if (emptyBox) {
-      // Empty state has min-h-[200px] py-12
+      // EmptyState container has min-h-[200px]
       expect(emptyBox.height).toBeGreaterThanOrEqual(100);
     }
   });

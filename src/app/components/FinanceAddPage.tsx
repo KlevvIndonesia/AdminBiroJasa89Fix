@@ -56,7 +56,6 @@ import { usePaymentMethods } from "../data/paymentMethodStore";
 import { pricingStore, usePricingStore } from "../data/pricingStore";
 import { WILAYAH_ADMINISTRATIF_LIST } from "../../domain/pricing/wilayahIndonesiaData";
 import { cn } from "./ui/utils";
-import { APP_CONFIG } from "../config/appConfig";
 import { classifyActionError } from "../utils/actionErrorClassifier";
 
 export interface FieldConfig {
@@ -858,11 +857,8 @@ export function FinanceAddPage({
               fileUrl = uploaded.fileUrl || fileUrl;
             }
           } catch (uploadErr) {
-            if (APP_CONFIG.dataProvider === "api") {
-              const classified = classifyActionError(uploadErr, { entityLabel: "Dokumen" });
-              throw new Error(`${file.name}: ${classified.message}`);
-            }
-            console.warn("[FinanceAddPage] Server upload fallback to local preview (mock mode):", uploadErr);
+            const classified = classifyActionError(uploadErr, { entityLabel: "Dokumen" });
+            throw new Error(`${file.name}: ${classified.message}`);
           }
         }
 
@@ -950,12 +946,9 @@ export function FinanceAddPage({
       try {
         await documentRepository.deleteDocument(docId);
       } catch (err) {
-        if (APP_CONFIG.dataProvider === "api") {
-          const classified = classifyActionError(err, { entityLabel: "Dokumen" });
-          toast.error(classified.message || "Gagal menghapus dokumen dari server.");
-          return;
-        }
-        console.warn("[FinanceAddPage] Server document delete non-fatal error (mock mode):", err);
+        const classified = classifyActionError(err, { entityLabel: "Dokumen" });
+        toast.error(classified.message || "Gagal menghapus dokumen dari server.");
+        return;
       }
     }
     const updated = currentList.filter((d: UploadedDocItem) => d.id !== docId);
@@ -1889,7 +1882,7 @@ export function FinanceAddPage({
                           <Wallet className="w-3.5 h-3.5 text-emerald-600" />
                           Penerimaan Uang (Kas Masuk Konsumen)
                         </span>
-                        <Badge variant="outline" className="text-[9px] bg-emerald-500/10 text-emerald-600 border-emerald-500/20">
+                        <Badge variant="outline" className="text-[11px] bg-emerald-500/10 text-emerald-600 border-emerald-500/20">
                           Kas Masuk
                         </Badge>
                       </div>
@@ -2038,7 +2031,7 @@ export function FinanceAddPage({
                           <Building2 className="w-3.5 h-3.5 text-amber-600" />
                           Pengeluaran Pokok Loket Samsat (Kas Keluar)
                         </span>
-                        <Badge variant="outline" className="text-[9px] bg-amber-500/10 text-amber-600 border-amber-500/20">
+                        <Badge variant="outline" className="text-[11px] bg-amber-500/10 text-amber-600 border-amber-500/20">
                           Kas Keluar
                         </Badge>
                       </div>
@@ -2189,11 +2182,11 @@ export function FinanceAddPage({
                           const currentSamsat = row["Samsat Asal"] || row["Samsat"];
                           const pricing = lookupBiayaLayanan(currentSrv, currentSamsat);
                           return pricing ? (
-                            <Badge variant="outline" className="text-[9px] bg-emerald-500/10 text-emerald-600 border-emerald-500/30">
+                            <Badge variant="outline" className="text-[11px] bg-emerald-500/10 text-emerald-600 border-emerald-500/30">
                               Master Biaya Layanan
                             </Badge>
                           ) : (
-                            <Badge variant="outline" className="text-[9px] bg-amber-500/10 text-amber-600 border-amber-500/30">
+                            <Badge variant="outline" className="text-[11px] bg-amber-500/10 text-amber-600 border-amber-500/30">
                               Manual
                             </Badge>
                           );
@@ -2255,7 +2248,7 @@ export function FinanceAddPage({
                         <div className="p-3 rounded-lg border border-border bg-card shadow-2xs space-y-1">
                           <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                             <span>Total Uang Masuk</span>
-                            <Badge variant="outline" className="text-[9px] h-4 bg-emerald-500/10 text-emerald-600 border-emerald-500/20">
+                            <Badge variant="outline" className="text-[11px] h-4 bg-emerald-500/10 text-emerald-600 border-emerald-500/20">
                               Masuk
                             </Badge>
                           </div>
@@ -2268,7 +2261,7 @@ export function FinanceAddPage({
                         <div className="p-3 rounded-lg border border-border bg-card shadow-2xs space-y-1">
                           <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                             <span>Total Tagihan</span>
-                            <Badge variant="outline" className="text-[9px] h-4">Tagihan</Badge>
+                            <Badge variant="outline" className="text-[11px] h-4">Tagihan</Badge>
                           </div>
                           <div className="text-sm sm:text-base font-bold font-mono text-foreground py-0.5">
                             {formatRupiah(Number(row["Total Tagihan Konsumen"]) || 0)}
@@ -2282,7 +2275,7 @@ export function FinanceAddPage({
                             <Badge
                               variant="outline"
                               className={cn(
-                                "text-[9px] h-4",
+                                "text-[11px] h-4",
                                 (Number(row["Sisa Tagihan"]) || 0) > 0
                                   ? "bg-amber-500/10 text-amber-600 border-amber-500/30"
                                   : "bg-emerald-500/10 text-emerald-600 border-emerald-500/30"
@@ -2300,7 +2293,7 @@ export function FinanceAddPage({
                         <div className="p-3 rounded-lg border border-border bg-card shadow-2xs space-y-1">
                           <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                             <span>Kelebihan Bayar</span>
-                            <Badge variant="outline" className="text-[9px] h-4 bg-indigo-500/10 text-indigo-600 border-indigo-500/20">
+                            <Badge variant="outline" className="text-[11px] h-4 bg-indigo-500/10 text-indigo-600 border-indigo-500/20">
                               {(Number(row["Jumlah Cashback"]) || 0) > 0 ? "Cashback" : "Nol"}
                             </Badge>
                           </div>
@@ -2316,7 +2309,7 @@ export function FinanceAddPage({
                         <div className="p-3 rounded-lg border border-border bg-card shadow-2xs space-y-1">
                           <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                             <span>Status Pembayaran</span>
-                            <Badge variant="outline" className="text-[9px] h-4">Otomatis</Badge>
+                            <Badge variant="outline" className="text-[11px] h-4">Otomatis</Badge>
                           </div>
                           <div className="py-0.5">
                             {(() => {
@@ -2352,7 +2345,7 @@ export function FinanceAddPage({
                           <div className="p-3 rounded-lg border border-border bg-card shadow-2xs space-y-1">
                             <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                               <span>Estimasi Profit</span>
-                              <Badge variant="outline" className="text-[9px] h-4 bg-emerald-500/10 text-emerald-600 border-emerald-500/25">
+                              <Badge variant="outline" className="text-[11px] h-4 bg-emerald-500/10 text-emerald-600 border-emerald-500/25">
                                 Profit Margin
                               </Badge>
                             </div>
@@ -2569,7 +2562,7 @@ export function FinanceAddPage({
                                     <p className="font-mono text-muted-foreground truncate max-w-[200px] text-[10px]">
                                       {doc.name}
                                     </p>
-                                    <div className="flex items-center gap-1.5 text-[9px] text-muted-foreground">
+                                    <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
                                       <span>{doc.formattedSize}</span>
                                       <span>•</span>
                                       <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
@@ -2602,31 +2595,33 @@ export function FinanceAddPage({
                                   </Button>
                                   <Button
                                     type="button"
-                                    size="sm"
+                                    size="icon-sm"
                                     variant="ghost"
                                     onClick={() => handleDownloadDoc(doc)}
-                                    className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground"
+                                    className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                                    aria-label={`Unduh ${doc.name}`}
                                     title="Unduh Berkas"
                                   >
-                                    <Download className="w-3 h-3" />
+                                    <Download className="w-3.5 h-3.5" />
                                   </Button>
                                   <Button
                                     type="button"
-                                    size="sm"
+                                    size="icon-sm"
                                     variant="ghost"
                                     onClick={() => handleRemoveDoc(rowIndex, "dokumenAwal", doc.id)}
-                                    className="h-6 w-6 p-0 text-destructive hover:bg-destructive/10"
+                                    className="h-7 w-7 text-destructive hover:bg-destructive/10"
+                                    aria-label={`Hapus ${doc.name}`}
                                     title="Hapus Berkas"
                                   >
-                                    <Trash2 className="w-3 h-3" />
+                                    <Trash2 className="w-3.5 h-3.5" />
                                   </Button>
                                 </div>
                               </div>
 
                               <div className="space-y-1 pt-1.5 border-t border-border/40">
-                                <Label className="text-[10px] font-semibold text-foreground/85 flex items-center justify-between">
+                                <Label className="text-[11px] font-semibold text-foreground/85 flex items-center justify-between">
                                   <span>Nama / Keterangan Dokumen</span>
-                                  <span className="text-[9px] text-muted-foreground font-normal">Contoh: KTP Pemilik, STNK Asli</span>
+                                  <span className="text-[11px] text-muted-foreground font-normal">Contoh: KTP Pemilik, STNK Asli</span>
                                 </Label>
                                 <Input
                                   type="text"
@@ -2735,7 +2730,7 @@ export function FinanceAddPage({
                                     <p className="font-mono text-muted-foreground truncate max-w-[200px] text-[10px]">
                                       {doc.name}
                                     </p>
-                                    <div className="flex items-center gap-1.5 text-[9px] text-muted-foreground">
+                                    <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
                                       <span>{doc.formattedSize}</span>
                                       <span>•</span>
                                       <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
@@ -2768,31 +2763,33 @@ export function FinanceAddPage({
                                   </Button>
                                   <Button
                                     type="button"
-                                    size="sm"
+                                    size="icon-sm"
                                     variant="ghost"
                                     onClick={() => handleDownloadDoc(doc)}
-                                    className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground"
+                                    className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                                    aria-label={`Unduh ${doc.name}`}
                                     title="Unduh Berkas"
                                   >
-                                    <Download className="w-3 h-3" />
+                                    <Download className="w-3.5 h-3.5" />
                                   </Button>
                                   <Button
                                     type="button"
-                                    size="sm"
+                                    size="icon-sm"
                                     variant="ghost"
                                     onClick={() => handleRemoveDoc(rowIndex, "dokumenAkhir", doc.id)}
-                                    className="h-6 w-6 p-0 text-destructive hover:bg-destructive/10"
+                                    className="h-7 w-7 text-destructive hover:bg-destructive/10"
+                                    aria-label={`Hapus ${doc.name}`}
                                     title="Hapus Berkas"
                                   >
-                                    <Trash2 className="w-3 h-3" />
+                                    <Trash2 className="w-3.5 h-3.5" />
                                   </Button>
                                 </div>
                               </div>
 
                               <div className="space-y-1 pt-1.5 border-t border-border/40">
-                                <Label className="text-[10px] font-semibold text-foreground/85 flex items-center justify-between">
+                                <Label className="text-[11px] font-semibold text-foreground/85 flex items-center justify-between">
                                   <span>Nama / Keterangan Dokumen</span>
-                                  <span className="text-[9px] text-muted-foreground font-normal">Contoh: STNK Baru, SKKP 2026</span>
+                                  <span className="text-[11px] text-muted-foreground font-normal">Contoh: STNK Baru, SKKP 2026</span>
                                 </Label>
                                 <Input
                                   type="text"

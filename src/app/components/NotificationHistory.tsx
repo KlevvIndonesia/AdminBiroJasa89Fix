@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 import { TablePagination } from "./ui/TablePagination";
-import { EmptyState } from "./ui/empty-state";
+import { DataTableShell, DataTableEmptyRow } from "./ui/data-table";
 import {
   Bell,
   Mail,
@@ -246,9 +246,8 @@ export function NotificationHistory() {
                 {isInAppFilterDirty && (
                   <Button
                     variant="outline"
-                    size="sm"
                     onClick={handleResetInAppFilters}
-                    className="h-9 px-2 text-xs text-muted-foreground hover:text-foreground shrink-0"
+                    className="px-2.5 text-xs text-muted-foreground hover:text-foreground shrink-0"
                     title="Reset Filter"
                   >
                     <RotateCcw className="w-3.5 h-3.5 mr-1" />
@@ -264,7 +263,21 @@ export function NotificationHistory() {
             </div>
 
             {/* Table Container */}
-            <div className="rounded-lg border border-border bg-card overflow-hidden shadow-2xs flex-1 flex flex-col min-h-0">
+            <DataTableShell
+              footer={
+                <TablePagination
+                  currentPage={inAppPage}
+                  totalItems={filteredInApp.length}
+                  itemsPerPage={inAppItemsPerPage}
+                  onPageChange={setInAppPage}
+                  onItemsPerPageChange={(val) => {
+                    setInAppItemsPerPage(val);
+                    setInAppPage(1);
+                  }}
+                  pageSizeOptions={[10, 25, 50]}
+                />
+              }
+            >
               <Table 
                 containerClassName="overflow-y-auto overflow-x-auto max-h-[calc(100vh-320px)] sm:max-h-[calc(100vh-340px)] min-h-[160px]"
                 className={cn("w-full min-w-[800px]", filteredInApp.length === 0 && "h-full")}
@@ -318,7 +331,7 @@ export function NotificationHistory() {
                                     ? "warning"
                                     : "info"
                                 }
-                                className="text-[10px] px-1.5 py-0"
+                                className="text-[11px] px-1.5 py-0"
                               >
                                 {item.priority === "high"
                                   ? "Urgent"
@@ -328,7 +341,7 @@ export function NotificationHistory() {
                               </Badge>
                               <Badge
                                 variant="outline"
-                                className="text-[10px] px-1.5 py-0 border-border/80 text-muted-foreground"
+                                className="text-[11px] px-1.5 py-0 border-border/80 text-muted-foreground"
                               >
                                 {item.type === "tagihan" ? "Tagihan" : "Operasional"}
                               </Badge>
@@ -445,36 +458,19 @@ export function NotificationHistory() {
                       );
                     })
                   ) : (
-                    <TableRow className="h-full hover:bg-transparent">
-                      <TableCell colSpan={7} className="text-center p-0 align-middle">
-                        <EmptyState
-                          title="Tidak ada notifikasi"
-                          description={
-                            isInAppFilterDirty
-                              ? "Tidak ditemukan notifikasi yang cocok dengan filter atau kata kunci pencarian Anda."
-                              : "Semua pengingat tagihan dan operasional telah tertangani."
-                          }
-                        />
-                      </TableCell>
-                    </TableRow>
+                    <DataTableEmptyRow
+                      colSpan={7}
+                      title="Tidak ada notifikasi"
+                      description={
+                        isInAppFilterDirty
+                          ? "Tidak ditemukan notifikasi yang cocok dengan filter atau kata kunci pencarian Anda."
+                          : "Semua pengingat tagihan dan operasional telah tertangani."
+                      }
+                    />
                   )}
                 </TableBody>
               </Table>
-
-              <div className="border-t border-border/80 p-3 bg-card shrink-0 mt-auto">
-                <TablePagination
-                  currentPage={inAppPage}
-                  totalItems={filteredInApp.length}
-                  itemsPerPage={inAppItemsPerPage}
-                  onPageChange={setInAppPage}
-                  onItemsPerPageChange={(val) => {
-                    setInAppItemsPerPage(val);
-                    setInAppPage(1);
-                  }}
-                  pageSizeOptions={[10, 25, 50]}
-                />
-              </div>
-            </div>
+            </DataTableShell>
           </Card>
         </TabsContent>
 
@@ -522,9 +518,8 @@ export function NotificationHistory() {
                 {isEmailFilterDirty && (
                   <Button
                     variant="outline"
-                    size="sm"
                     onClick={handleResetEmailFilters}
-                    className="h-9 px-2 text-xs text-muted-foreground hover:text-foreground shrink-0"
+                    className="px-2.5 text-xs text-muted-foreground hover:text-foreground shrink-0"
                     title="Reset Filter"
                   >
                     <RotateCcw className="w-3.5 h-3.5 mr-1" />
@@ -554,7 +549,22 @@ export function NotificationHistory() {
             </div>
 
             {/* Table Container */}
-            <div className="rounded-lg border border-border bg-card overflow-hidden shadow-2xs flex-1 flex flex-col min-h-0">
+            <DataTableShell
+              footerClassName="px-3.5 pb-3 bg-card shrink-0 mt-auto"
+              footer={
+                <TablePagination
+                  currentPage={emailPage}
+                  totalItems={filteredEmailLogs.length}
+                  itemsPerPage={emailItemsPerPage}
+                  onPageChange={setEmailPage}
+                  onItemsPerPageChange={(val) => {
+                    setEmailItemsPerPage(val);
+                    setEmailPage(1);
+                  }}
+                  pageSizeOptions={[10, 25, 50]}
+                />
+              }
+            >
               <Table 
                 containerClassName="overflow-y-auto overflow-x-auto max-h-[calc(100vh-320px)] sm:max-h-[calc(100vh-340px)] min-h-[160px]"
                 className={cn("w-full min-w-[800px]", filteredEmailLogs.length === 0 && "h-full")}
@@ -629,36 +639,19 @@ export function NotificationHistory() {
                       );
                     })
                   ) : (
-                    <TableRow className="h-full hover:bg-transparent">
-                      <TableCell colSpan={6} className="text-center p-0 align-middle">
-                        <EmptyState
-                          title="Belum ada riwayat pengiriman email"
-                          description={
-                            isEmailFilterDirty
-                              ? "Tidak ada log pengiriman yang cocok dengan filter atau kata kunci pencarian Anda."
-                              : "Log pengiriman email notifikasi otomatis akan tercatat di sini saat SMTP aktif."
-                          }
-                        />
-                      </TableCell>
-                    </TableRow>
+                    <DataTableEmptyRow
+                      colSpan={6}
+                      title="Belum ada riwayat pengiriman email"
+                      description={
+                        isEmailFilterDirty
+                          ? "Tidak ada log pengiriman yang cocok dengan filter atau kata kunci pencarian Anda."
+                          : "Log pengiriman email notifikasi otomatis akan tercatat di sini saat SMTP aktif."
+                      }
+                    />
                   )}
                 </TableBody>
               </Table>
-
-              <div className="border-t border-border/80 p-3 bg-card shrink-0 mt-auto">
-                <TablePagination
-                  currentPage={emailPage}
-                  totalItems={filteredEmailLogs.length}
-                  itemsPerPage={emailItemsPerPage}
-                  onPageChange={setEmailPage}
-                  onItemsPerPageChange={(val) => {
-                    setEmailItemsPerPage(val);
-                    setEmailPage(1);
-                  }}
-                  pageSizeOptions={[10, 25, 50]}
-                />
-              </div>
-            </div>
+            </DataTableShell>
           </Card>
         </TabsContent>
       </Tabs>

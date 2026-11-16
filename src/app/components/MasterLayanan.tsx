@@ -292,14 +292,17 @@ export function MasterLayanan() {
                       >
                         <FileText className="w-3.5 h-3.5 text-primary shrink-0 mt-0.5" />
                         <span className="break-words">{req}</span>
-                        <button
+                        <Button
                           type="button"
+                          variant="ghost"
+                          size="icon-sm"
                           onClick={() => handleRemoveRequirement(idx)}
-                          className="w-4 h-4 rounded-full flex items-center justify-center text-muted-foreground hover:text-rose-600 hover:bg-rose-100 dark:hover:bg-rose-950 transition-colors ml-0.5 shrink-0 mt-0.5"
+                          className="size-6 rounded-full text-muted-foreground hover:text-destructive hover:bg-destructive/10 ml-0.5 shrink-0"
+                          aria-label={`Hapus poin dokumen ${req}`}
                           title="Hapus dokumen ini"
                         >
                           <X className="w-3 h-3" />
-                        </button>
+                        </Button>
                       </div>
                     ))}
                   </div>
@@ -365,19 +368,17 @@ export function MasterLayanan() {
             <Button
               type="button"
               variant="outline"
-              size="sm"
               disabled={isSaving}
               onClick={() => setEditingService(null)}
-              className="h-9 text-xs px-4"
+              className="text-xs px-4"
             >
               Batal
             </Button>
             <Button
               type="button"
-              size="sm"
               disabled={isSaving}
               onClick={handleSave}
-              className="h-9 text-xs px-4 font-semibold bg-primary text-primary-foreground hover:bg-primary/90 gap-1.5"
+              className="text-xs px-4 font-semibold gap-1.5"
             >
               {isSaving ? (
                 <>

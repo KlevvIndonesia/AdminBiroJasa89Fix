@@ -38,10 +38,11 @@ import {
   DEFAULT_R4_MUTASI_LD_TEMPLATE,
   DEFAULT_R2_MUTASI_LD_TEMPLATE,
 } from "../../../src/domain/estimation/defaultTemplates";
-import { sanitizeEstimationTemplate } from "../../../src/app/data/estimationStore";
+import { sanitizeEstimationTemplate } from "../../../src/domain/estimation/templateSanitizer";
 import { WILAYAH_ADMINISTRATIF_LIST, SAMSAT_OFFICES_514 } from "./wilayahData";
 import { CANONICAL_PERMISSIONS } from "../config/defaultPermissions";
 import { CANONICAL_SERVICES } from "./schema";
+import { runAdminStage4ParityRbacMigration } from "./migrations/2026-11-14-001-admin-stage4-parity-rbac";
 
 export function seedDatabase(): void {
   // 1. Seed Users if table is empty
@@ -339,6 +340,11 @@ export function seedDatabase(): void {
         insertPerm.run(roleKey, JSON.stringify(CANONICAL_PERMISSIONS[roleKey]));
       }
     }
+  } else {
+    // Non-destructive, idempotent, versioned migration:
+    // Upgrades existing Admin Order & Stage 4 permissions (regardless of updated_by/version)
+    // while preserving custom permissions on other modules, audit history, and Stage 6 SVP-only lock.
+    runAdminStage4ParityRbacMigration(db);
   }
 
   // 8. Seed default payment_methods if empty

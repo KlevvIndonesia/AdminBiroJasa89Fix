@@ -1,0 +1,4781 @@
+openapi: 3.0.3
+info:
+  title: Admin SUN89 / SUNBiroJasa REST API
+  version: 1.0.0
+  description: >
+    Complete OpenAPI 3.0.3 specification for the Admin SUN89 / SUNBiroJasa backend.
+    Includes all 148 canonical endpoints across 18 modules backed by SQLite 3 (WAL mode, 42 tables, 517 columns).
+servers:
+  - url: http://localhost:3001
+    description: Local Development Backend Server
+  - url: http://localhost:3000
+    description: Vite Dev Server Proxy (/api)
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    publicApiKey:
+      type: apiKey
+      in: header
+      name: X-Public-Api-Key
+  schemas:
+    StandardSuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          nullable: true
+    StandardErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: string
+          example: "Request validation or authorization failed"
+paths:
+  /api/health:
+    get:
+      tags:
+        - "Health & Readiness"
+      summary: "Comprehensive health check probe (verifies SQLite read/write readiness & server status)."
+      description: "Auth: Public (No Token) | Roles: All / Unauthenticated | Permissions: None | Main Table: schema_migrations | Related Tables: users"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+  /api/health/live:
+    get:
+      tags:
+        - "Health & Readiness"
+      summary: "Kubernetes/Process liveness probe (confirms Node.js event loop is responsive)."
+      description: "Auth: Public (No Token) | Roles: All / Unauthenticated | Permissions: None | Main Table: NONE (Process Memory) | Related Tables: -"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+  /api/health/ready:
+    get:
+      tags:
+        - "Health & Readiness"
+      summary: "Readiness probe verifying SQLite WAL connection and schema initialization completion."
+      description: "Auth: Public (No Token) | Roles: All / Unauthenticated | Permissions: None | Main Table: schema_migrations | Related Tables: -"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+  /api/auth/login:
+    post:
+      tags:
+        - "Authentication"
+      summary: "Authenticates user by email/username/employeeId and password; issues signed JWT and updates last_login."
+      description: "Auth: Public (Rate-Limited: 20 req / 15m) | Roles: Public (Returns JWT for Admin, SVP, Finance, Messenger) | Permissions: None (Entrypoint) | Main Table: users | Related Tables: employees, messengers, role_permissions, audit_logs, security_audit_logs"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"email\"?: string, \"username\"?: string, \"identifier\"?: string, \"password\": string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+  /api/auth/me:
+    get:
+      tags:
+        - "Authentication"
+      summary: "Returns currently authenticated user profile, employee link, messenger ID (if Messenger), and active role."
+      description: "Auth: Bearer JWT (authenticateToken) | Roles: Admin, SVP, Finance, Messenger | Permissions: Authenticated Session | Main Table: users | Related Tables: employees, messengers"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/auth/change-password:
+    post:
+      tags:
+        - "Authentication"
+      summary: "Changes password for the authenticated user, increments token_version to invalidate old sessions."
+      description: "Auth: Bearer JWT (authenticateToken) | Roles: Admin, SVP, Finance, Messenger | Permissions: Authenticated Session (Self) | Main Table: users | Related Tables: audit_logs, security_audit_logs"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"currentPassword\": string, \"newPassword\": string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders:
+    get:
+      tags:
+        - "Orders"
+      summary: "Lists active (non-archived) orders with filtering, search, status, date range, and pagination. Messenger role is automatically scoped to assigned orders."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger (Scoped) | Permissions: manajemenOrder.view | dashboard.view | tugasLapangan.view | finance.profit.view | finance.penjualan1Thn.view | finance.belumBayar.view | finance.cashback.view | finance.labaRugi.view | Main Table: orders | Related Tables: customers, vehicles, services, samsat_offices, messengers, finance_invoices, order_timeline_processes, messenger_tasks"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    post:
+      tags:
+        - "Orders"
+      summary: "Creates a new order, upserts customer & vehicle, auto-generates 1:1 finance_invoice, initializes status history & timeline, and records initial DP payment if provided."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC + Idempotency | Roles: Admin, SVP | Permissions: manajemenOrder.create | kalkulator.createOrder | Main Table: orders | Related Tables: customers, vehicles, finance_invoices, invoice_payments, kas_kantor, order_status_history, order_timeline_processes, messenger_tasks, audit_logs, idempotency_keys"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"customerName\": string, \"customerPhone\": string, \"nopol\": string, \"serviceId\": string, \"samsatId\": string, \"biayaPajak\": number, \"biayaJasa\": number, \"uangMuka\"?: number, \"paymentMethodId\"?: string, \"isCostVerified\"?: boolean, ... }"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/stats:
+    get:
+      tags:
+        - "Orders"
+      summary: "Returns aggregated order counts by status, payment status, revenue, profit, and completion metrics."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger | Permissions: dashboard.view | manajemenOrder.view | tugasLapangan.view | finance.profit.view | finance.labaRugi.view | Main Table: orders | Related Tables: finance_invoices"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/archived:
+    get:
+      tags:
+        - "Orders"
+      summary: "Lists soft-archived orders (is_archived = 1)."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP | Permissions: arsip.view | manajemenOrder.view | Main Table: orders | Related Tables: customers, vehicles, services, samsat_offices"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/archive:
+    get:
+      tags:
+        - "Orders"
+      summary: "Alias endpoint for GET /api/orders/archived (lists archived orders)."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP | Permissions: arsip.view | manajemenOrder.view | Main Table: orders | Related Tables: customers, vehicles, services, samsat_offices"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/archive/clear-all:
+    delete:
+      tags:
+        - "Orders"
+      summary: "Permanently deletes or clears all archived orders that have no protected financial ledger dependencies."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: arsip.clearAll | Main Table: orders | Related Tables: order_status_history, order_timeline_processes, order_documents, messenger_tasks, finance_invoices, audit_logs"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/archived/clear-all:
+    delete:
+      tags:
+        - "Orders"
+      summary: "Alias for DELETE /api/orders/archive/clear-all."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: arsip.clearAll | Main Table: orders | Related Tables: order_status_history, order_timeline_processes, order_documents, messenger_tasks, finance_invoices, audit_logs"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/vehicle-lookup/{nopol}:
+    get:
+      tags:
+        - "Orders"
+      summary: "Looks up existing vehicle & owner details by license plate (nopol) using normalized nopol index."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: manajemenOrder.create | manajemenOrder.edit | manajemenOrder.view | kalkulator.view | Main Table: vehicles | Related Tables: customers, orders"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: nopol
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/customers/lookup:
+    get:
+      tags:
+        - "Orders"
+      summary: "Searches existing customers by name, phone/WA, or NIK for order autocomplete."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: manajemenOrder.create | manajemenOrder.edit | manajemenOrder.view | kalkulator.view | Main Table: customers | Related Tables: vehicles"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/check-duplicate:
+    post:
+      tags:
+        - "Orders"
+      summary: "Checks whether an active order with the same vehicle nopol and service already exists."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP | Permissions: manajemenOrder.create | manajemenOrder.edit | kalkulator.createOrder | Main Table: orders | Related Tables: vehicles, services"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"nopol\": string, \"serviceId\"?: string, \"excludeOrderNo\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/{orderNo}:
+    get:
+      tags:
+        - "Orders"
+      summary: "Retrieves full order details by orderNo, including customer, vehicle, invoice, payments, timeline, tasks, and documents."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger (Scoped to assigned) | Permissions: manajemenOrder.view | tugasLapangan.view | arsip.view | finance.profit.view | finance.penjualan1Thn.view | finance.belumBayar.view | finance.cashback.view | finance.labaRugi.view | Main Table: orders | Related Tables: customers, vehicles, services, samsat_offices, messengers, finance_invoices, invoice_payments, order_status_history, order_timeline_processes, messenger_tasks, documents"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    put:
+      tags:
+        - "Orders"
+      summary: "Updates order details, vehicle/customer attributes, and synchronizes linked invoice amounts and cost verification status."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: manajemenOrder.edit | Main Table: orders | Related Tables: customers, vehicles, finance_invoices, order_status_history, laba_rugi_snapshots, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "Partial order update payload (customer, vehicle, service, samsat, cost breakdown, notes)."
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    delete:
+      tags:
+        - "Orders"
+      summary: "Deletes a draft/archived order if and only if no verified financial transactions exist."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: manajemenOrder.delete | arsip.delete | Main Table: orders | Related Tables: finance_invoices, order_status_history, order_timeline_processes, order_documents, messenger_tasks, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/{orderNo}/history:
+    get:
+      tags:
+        - "Orders"
+      summary: "Retrieves chronological status history entries for an order."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger | Permissions: manajemenOrder.view | tugasLapangan.view | arsip.view | Main Table: order_status_history | Related Tables: orders, users"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/{orderNo}/status:
+    patch:
+      tags:
+        - "Orders"
+      summary: "Transitions order lifecycle status (e.g., Draft -> Diproses -> Selesai / Dibatalkan) with state machine guards."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger (Scoped) | Permissions: manajemenOrder.changeStatus | tugasLapangan.updateStatus | Main Table: orders | Related Tables: order_status_history, finance_invoices, laba_rugi_snapshots, notification_logs, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"status\": string, \"notes\"?: string, \"cancellationReason\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/{orderNo}/payment:
+    patch:
+      tags:
+        - "Orders"
+      summary: "Updates order payment status / down payment and synchronizes with finance_invoices and invoice_payments."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: manajemenOrder.edit | finance.belumBayar.pay | Main Table: orders | Related Tables: finance_invoices, invoice_payments, kas_kantor, payment_methods, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"uangMuka\"?: number, \"paymentStatus\"?: string, \"paymentMethodId\"?: string, \"proofDocId\"?: string, \"notes\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/{orderNo}/assign-messenger:
+    patch:
+      tags:
+        - "Orders"
+      summary: "Assigns or reassigns a field Messenger to an order and creates/updates messenger_tasks."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: manajemenOrder.assignMessenger | Main Table: orders | Related Tables: messengers, employees, messenger_tasks, order_status_history, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"messengerId\": string, \"taskType\"?: string, \"notes\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/{orderNo}/tasks/{taskType}/status:
+    post:
+      tags:
+        - "Orders"
+      summary: "Updates the execution status of a specific messenger field task on an order."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Messenger (Assigned) | Permissions: tugasLapangan.updateStatus | manajemenOrder.edit | Main Table: messenger_tasks | Related Tables: orders, order_timeline_processes, messengers, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: taskType
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"status\": \"PENDING\" | \"IN_PROGRESS\" | \"COMPLETED\" | \"CANCELLED\", \"notes\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    patch:
+      tags:
+        - "Orders"
+      summary: "PATCH alias for updating a specific messenger task status on an order."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Messenger (Assigned) | Permissions: tugasLapangan.updateStatus | manajemenOrder.edit | Main Table: messenger_tasks | Related Tables: orders, order_timeline_processes, messengers, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: taskType
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"status\": string, \"notes\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/{orderNo}/costs:
+    patch:
+      tags:
+        - "Orders"
+      summary: "Updates order cost components (PKB, SWDKLLJ, BBNKB, PNBP, Denda, Jasa, Lainnya) and recalculates verification & invoice totals."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: manajemenOrder.edit | finance.belumBayar.editCost | Main Table: orders | Related Tables: finance_invoices, laba_rugi_snapshots, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"biayaPajak\"?: number, \"biayaSwdkllj\"?: number, \"biayaBbnkb\"?: number, \"biayaPnbp\"?: number, \"biayaDenda\"?: number, \"biayaJasa\"?: number, \"biayaLainnya\"?: number, \"isCostVerified\"?: boolean }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/{orderNo}/verify-costs:
+    post:
+      tags:
+        - "Orders"
+      summary: "Marks order and its linked invoice as cost-verified (VERIFIED) once actual Samsat notice/costs are confirmed."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: manajemenOrder.verifyCost | manajemenOrder.edit | finance.belumBayar.verify | Main Table: orders | Related Tables: finance_invoices, order_status_history, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"biayaPajak\"?: number, \"biayaSwdkllj\"?: number, \"biayaJasa\"?: number, \"notes\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/{orderNo}/finalize-estimate:
+    post:
+      tags:
+        - "Orders"
+      summary: "Converts a PARTIAL_ESTIMATE / draft-estimate order into a finalized cost structure."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: manajemenOrder.edit | manajemenOrder.verifyCost | Main Table: orders | Related Tables: finance_invoices, order_status_history, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"biayaPajak\": number, \"biayaSwdkllj\"?: number, \"biayaBbnkb\"?: number, \"biayaPnbp\"?: number, \"biayaDenda\"?: number, \"biayaJasa\": number }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/{orderNo}/cashback:
+    patch:
+      tags:
+        - "Orders"
+      summary: "Updates cashback amount or status on an order and synchronizes with finance_invoices."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: manajemenOrder.edit | finance.cashback.manage | Main Table: orders | Related Tables: finance_invoices, laba_rugi_snapshots, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"cashback\": number, \"cashbackStatus\"?: \"NONE\" | \"PENDING\" | \"PAID\", \"notes\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/{orderNo}/archive:
+    post:
+      tags:
+        - "Orders"
+      summary: "Soft-archives an order (sets is_archived = 1, archived_at, archived_by)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: manajemenOrder.archive | arsip.manage | Main Table: orders | Related Tables: audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"reason\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/{orderNo}/restore:
+    post:
+      tags:
+        - "Orders"
+      summary: "Restores a soft-archived order back to active orders list (sets is_archived = 0)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: arsip.restore | manajemenOrder.archive | Main Table: orders | Related Tables: audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/{orderNo}/unarchive:
+    post:
+      tags:
+        - "Orders"
+      summary: "Alias for POST /api/orders/:orderNo/restore."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: arsip.restore | manajemenOrder.archive | Main Table: orders | Related Tables: audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/bulk-archive:
+    post:
+      tags:
+        - "Orders"
+      summary: "Soft-archives multiple orders in a single atomic transaction."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: manajemenOrder.archive | arsip.manage | Main Table: orders | Related Tables: audit_logs"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"orderNos\": string[], \"reason\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/bulk-status:
+    post:
+      tags:
+        - "Orders"
+      summary: "Updates status for multiple orders in batch with per-order validation."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: manajemenOrder.changeStatus | Main Table: orders | Related Tables: order_status_history, finance_invoices, audit_logs"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"orderNos\": string[], \"status\": string, \"notes\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/{orderNo}/corrections:
+    post:
+      tags:
+        - "Orders"
+      summary: "Submits a formal order data/cost correction request for SVP/Admin review."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: manajemenOrder.requestCorrection | manajemenOrder.edit | koreksiOrder.create | Main Table: order_corrections | Related Tables: orders, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"correctionType\": string, \"reason\": string, \"proposedChanges\": object, \"linkedDuplicateOrderNo\"?: string }"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    get:
+      tags:
+        - "Orders"
+      summary: "Lists all correction requests associated with a specific order."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: manajemenOrder.view | koreksiOrder.view | Main Table: order_corrections | Related Tables: orders"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/orders/{orderNo}/cancel-with-refund:
+    post:
+      tags:
+        - "Orders"
+      summary: "Cancels an order that already has verified customer payments and records refund settlement or refund liability."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: manajemenOrder.changeStatus | finance.belumBayar.refund | Main Table: orders | Related Tables: finance_invoices, invoice_payments, pengeluaran, kas_kantor, order_status_history, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"reason\": string, \"refundAmount\"?: number, \"paymentMethodId\"?: string, \"proofDocId\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/order-corrections:
+    get:
+      tags:
+        - "Order Corrections"
+      summary: "Lists all order correction requests across all orders with optional status filter."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: koreksiOrder.view | manajemenOrder.view | Main Table: order_corrections | Related Tables: orders, customers, vehicles"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/order-corrections/{id}:
+    get:
+      tags:
+        - "Order Corrections"
+      summary: "Retrieves a single order correction request by its ID."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: koreksiOrder.view | manajemenOrder.view | Main Table: order_corrections | Related Tables: orders"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/order-corrections/{id}/review:
+    post:
+      tags:
+        - "Order Corrections"
+      summary: "Approves or rejects a pending order correction request; if APPROVED, applies proposed changes to the order & invoice atomically."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: koreksiOrder.approve | koreksiOrder.reject | manajemenOrder.edit | Main Table: order_corrections | Related Tables: orders, finance_invoices, order_status_history, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"action\": \"APPROVE\" | \"REJECT\", \"reviewNotes\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/finance/summary:
+    get:
+      tags:
+        - "Finance"
+      summary: "Returns consolidated financial summary (total revenue, profit, unpaid receivables, pending cashback, Kas Kantor balance, Kas Messenger balance, expenses)."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: finance.profit.view | finance.kasKantor.view | finance.kasMessenger.view | finance.penjualan1Thn.view | finance.belumBayar.view | finance.cashback.view | finance.labaRugi.view | dashboard.view | Main Table: finance_invoices | Related Tables: orders, invoice_payments, kas_kantor, kas_messenger, pengeluaran, messenger_reimbursements, laba_rugi_snapshots"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/finance/laba-rugi:
+    get:
+      tags:
+        - "Finance"
+      summary: "Generates Profit & Loss (Laba Rugi) statement with revenue breakdown, operational expenses, messenger reimbursements, cashback deductions, and net profit."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: finance.labaRugi.view | finance.profit.view | Main Table: laba_rugi_snapshots | Related Tables: orders, finance_invoices, pengeluaran, messenger_reimbursements, kas_kantor"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/finance/pnl:
+    get:
+      tags:
+        - "Finance"
+      summary: "Alias for GET /api/finance/laba-rugi."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: finance.labaRugi.view | finance.profit.view | Main Table: laba_rugi_snapshots | Related Tables: orders, finance_invoices, pengeluaran, messenger_reimbursements"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/finance/invoices:
+    get:
+      tags:
+        - "Finance"
+      summary: "Lists finance invoices with customer, order, cost verification, payment history, and receivable status."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: finance.belumBayar.view | finance.profit.view | finance.penjualan1Thn.view | finance.cashback.view | finance.labaRugi.view | Main Table: finance_invoices | Related Tables: orders, customers, vehicles, services, samsat_offices, invoice_payments, payment_methods"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    post:
+      tags:
+        - "Finance"
+      summary: "Creates or upserts a finance invoice for an existing order (enforces 1:1 unique order_no constraint)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC + Idempotency | Roles: Admin, SVP, Finance | Permissions: finance.belumBayar.create | finance.belumBayar.edit | manajemenOrder.create | Main Table: finance_invoices | Related Tables: orders, customers, payment_methods, audit_logs, idempotency_keys"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"orderNo\": string, \"customerId\"?: string, \"biayaPajak\"?: number, \"biayaJasa\"?: number, \"ppnAmount\"?: number, \"pph23Amount\"?: number, \"cashbackAmount\"?: number, ... }"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/finance/invoices/{id}:
+    get:
+      tags:
+        - "Finance"
+      summary: "Retrieves a single invoice by numeric ID, invoice_no, or order_no with full payment history and documents."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: finance.belumBayar.view | finance.profit.view | finance.penjualan1Thn.view | finance.cashback.view | Main Table: finance_invoices | Related Tables: orders, customers, vehicles, invoice_payments, documents, payment_methods"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    put:
+      tags:
+        - "Finance"
+      summary: "Updates invoice line items, taxes (PPN, PPh23), discounts/cashback, or status (with terminal CANCELLED guard)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: finance.belumBayar.edit | finance.cashback.manage | Main Table: finance_invoices | Related Tables: orders, laba_rugi_snapshots, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "Partial invoice fields (biayaPajak, biayaJasa, ppnAmount, pph23Amount, cashbackAmount, notes, status)."
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/finance/invoices/{id}/payments:
+    post:
+      tags:
+        - "Finance"
+      summary: "Records a new customer payment (DP, installment, or full settlement) against an invoice and optionally posts to Kas Kantor / Kas Messenger."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC + Idempotency | Roles: Admin, SVP, Finance | Permissions: finance.belumBayar.pay | finance.kasKantor.create | Main Table: invoice_payments | Related Tables: finance_invoices, orders, kas_kantor, kas_messenger, payment_methods, documents, laba_rugi_snapshots, audit_logs, idempotency_keys"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"amount\": number, \"paymentMethodId\": string, \"paymentDate\"?: string, \"targetLedger\"?: \"KAS_KANTOR\" | \"KAS_MESSENGER\", \"proofDocId\"?: string, \"notes\"?: string, \"autoVerify\"?: boolean }"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/finance/invoices/{id}/payments/{paymentId}/verify:
+    post:
+      tags:
+        - "Finance"
+      summary: "Verifies or rejects a pending invoice payment and posts verified inflow to the designated cash ledger."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: finance.belumBayar.verify | finance.kasKantor.verify | Main Table: invoice_payments | Related Tables: finance_invoices, orders, kas_kantor, kas_messenger, laba_rugi_snapshots, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: paymentId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"status\"?: \"VERIFIED\" | \"REJECTED\", \"paymentMethodId\"?: string, \"notes\"?: string, \"rejectionReason\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/finance/invoices/{id}/verify-payment:
+    post:
+      tags:
+        - "Finance"
+      summary: "Alias endpoint to verify a payment on an invoice (accepts paymentId in body or verifies latest pending payment)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: finance.belumBayar.verify | finance.kasKantor.verify | Main Table: invoice_payments | Related Tables: finance_invoices, orders, kas_kantor, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"paymentId\"?: number, \"status\"?: \"VERIFIED\" | \"REJECTED\", \"notes\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/finance/invoices/{id}/cashback/pay:
+    post:
+      tags:
+        - "Finance"
+      summary: "Disburses pending customer cashback for an invoice/order and records the outflow in Pengeluaran & Kas Kantor."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC + Idempotency | Roles: Admin, SVP, Finance | Permissions: finance.cashback.pay | finance.cashback.manage | Main Table: finance_invoices | Related Tables: orders, pengeluaran, kas_kantor, documents, payment_methods, laba_rugi_snapshots, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"paymentMethodId\": string, \"amount\"?: number, \"proofDocId\"?: string, \"notes\"?: string, \"paidDate\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/finance/invoices/{id}/refund:
+    post:
+      tags:
+        - "Finance"
+      summary: "Processes a customer refund for an overpaid or cancelled invoice and posts outflow to Kas Kantor & Pengeluaran."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC + Idempotency | Roles: Admin, SVP, Finance | Permissions: finance.belumBayar.refund | finance.kasKantor.create | Main Table: finance_invoices | Related Tables: orders, invoice_payments, pengeluaran, kas_kantor, payment_methods, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"amount\": number, \"paymentMethodId\": string, \"reason\": string, \"proofDocId\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/finance/kas-kantor:
+    get:
+      tags:
+        - "Finance"
+      summary: "Lists Kas Kantor (Office Cash/Bank Ledger) transactions with running balances and filter by payment method or date."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: finance.kasKantor.view | finance.labaRugi.view | Main Table: kas_kantor | Related Tables: payment_methods, documents, orders, finance_invoices"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    post:
+      tags:
+        - "Finance"
+      summary: "Creates a manual Kas Kantor ledger transaction (MASUK or KELUAR)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC + Idempotency | Roles: Admin, SVP, Finance | Permissions: finance.kasKantor.create | Main Table: kas_kantor | Related Tables: payment_methods, pengeluaran, documents, audit_logs, idempotency_keys"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"tanggal\": string, \"tipeTransaksi\": \"MASUK\" | \"KELUAR\", \"kategori\": string, \"nominal\": number, \"paymentMethodId\": string, \"keterangan\"?: string, \"buktiDokumenId\"?: string, \"orderNo\"?: string }"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/finance/kas-kantor/{id}:
+    put:
+      tags:
+        - "Finance"
+      summary: "Updates an existing Kas Kantor ledger entry."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: finance.kasKantor.edit | Main Table: kas_kantor | Related Tables: payment_methods, documents, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"tanggal\"?: string, \"kategori\"?: string, \"nominal\"?: number, \"paymentMethodId\"?: string, \"keterangan\"?: string, \"buktiDokumenId\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    delete:
+      tags:
+        - "Finance"
+      summary: "Deletes a manual Kas Kantor entry (blocks deletion if locked by verified invoice payment or internal transfer)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: finance.kasKantor.delete | Main Table: kas_kantor | Related Tables: invoice_payments, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/finance/kas-messenger:
+    get:
+      tags:
+        - "Finance"
+      summary: "Lists Kas Messenger (Field Petty Cash / Advance Ledger) transactions and per-messenger balances."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger (Scoped) | Permissions: finance.kasMessenger.view | tugasLapangan.view | reimbursement.view | Main Table: kas_messenger | Related Tables: messengers, employees, documents, orders, messenger_reimbursements"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    post:
+      tags:
+        - "Finance"
+      summary: "Records a new Kas Messenger transaction (cash advance top-up MASUK or field expense settlement KELUAR)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC + Idempotency | Roles: Admin, SVP, Finance | Permissions: finance.kasMessenger.create | Main Table: kas_messenger | Related Tables: messengers, kas_kantor, pengeluaran, documents, audit_logs, idempotency_keys"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"messengerId\": string, \"tanggal\": string, \"tipeTransaksi\": \"MASUK\" | \"KELUAR\", \"kategori\": string, \"nominal\": number, \"paymentMethodId\"?: string, \"keterangan\"?: string, \"buktiDokumenId\"?: string, \"orderNo\"?: string }"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/finance/kas-messenger/{id}:
+    put:
+      tags:
+        - "Finance"
+      summary: "Updates an existing Kas Messenger transaction."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: finance.kasMessenger.edit | Main Table: kas_messenger | Related Tables: messengers, documents, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"tanggal\"?: string, \"kategori\"?: string, \"nominal\"?: number, \"keterangan\"?: string, \"buktiDokumenId\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    delete:
+      tags:
+        - "Finance"
+      summary: "Deletes a Kas Messenger entry if not locked by a paid reimbursement or invoice payment."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: finance.kasMessenger.delete | Main Table: kas_messenger | Related Tables: messenger_reimbursements, invoice_payments, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/finance/pengeluaran:
+    get:
+      tags:
+        - "Finance"
+      summary: "Lists operational & order-related expense entries (pengeluaran)."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: finance.kasKantor.view | finance.labaRugi.view | finance.profit.view | Main Table: pengeluaran | Related Tables: payment_methods, messengers, documents, orders, finance_invoices"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    post:
+      tags:
+        - "Finance"
+      summary: "Creates a new expense record (pengeluaran) and automatically posts the corresponding KELUAR entry in Kas Kantor."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC + Idempotency | Roles: Admin, SVP, Finance | Permissions: finance.kasKantor.create | finance.labaRugi.createExpense | Main Table: pengeluaran | Related Tables: kas_kantor, payment_methods, messengers, documents, audit_logs, idempotency_keys"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"tanggal\": string, \"kategori\": string, \"nominal\": number, \"paymentMethodId\": string, \"keterangan\"?: string, \"messengerId\"?: string, \"buktiDokumenId\"?: string, \"orderNo\"?: string }"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/finance/pengeluaran/{id}:
+    put:
+      tags:
+        - "Finance"
+      summary: "Updates an expense entry (pengeluaran) and syncs linked Kas Kantor entry."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: finance.kasKantor.edit | Main Table: pengeluaran | Related Tables: kas_kantor, payment_methods, documents, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"tanggal\"?: string, \"kategori\"?: string, \"nominal\"?: number, \"paymentMethodId\"?: string, \"keterangan\"?: string, \"buktiDokumenId\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    delete:
+      tags:
+        - "Finance"
+      summary: "Deletes an expense record if not locked by a paid reimbursement or verified invoice settlement."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: finance.kasKantor.delete | Main Table: pengeluaran | Related Tables: kas_kantor, messenger_reimbursements, invoice_payments, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/finance/internal-transfers:
+    get:
+      tags:
+        - "Finance"
+      summary: "Lists internal treasury transfers between payment methods/accounts."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: finance.kasKantor.view | Main Table: internal_transfers | Related Tables: payment_methods, documents, kas_kantor"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    post:
+      tags:
+        - "Finance"
+      summary: "Executes an atomic internal fund transfer between two distinct active payment methods, creating paired KELUAR and MASUK entries in Kas Kantor."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC + Idempotency | Roles: Admin, SVP, Finance | Permissions: finance.kasKantor.transfer | finance.kasKantor.create | Main Table: internal_transfers | Related Tables: kas_kantor, pengeluaran, payment_methods, documents, audit_logs, idempotency_keys"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"fromPaymentMethodId\": string, \"toPaymentMethodId\": string, \"amount\": number, \"adminFee\"?: number, \"transferDate\"?: string, \"notes\"?: string, \"proofDocId\"?: string }"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/finance/internal-transfers/{id}/reverse:
+    post:
+      tags:
+        - "Finance"
+      summary: "Reverses a completed internal transfer by creating a compensating reversal transfer and offsetting Kas Kantor entries."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC + Idempotency | Roles: Admin, SVP, Finance | Permissions: finance.kasKantor.transfer | finance.kasKantor.edit | Main Table: internal_transfers | Related Tables: kas_kantor, payment_methods, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"reason\": string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/messenger/my-tasks:
+    get:
+      tags:
+        - "Messenger"
+      summary: "Returns active field tasks and assigned orders for the logged-in Messenger (or all tasks for Admin/SVP)."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Messenger, Admin, SVP | Permissions: tugasLapangan.view | Main Table: messenger_tasks | Related Tables: orders, customers, vehicles, services, samsat_offices, messengers"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/messenger/messengers:
+    get:
+      tags:
+        - "Messenger"
+      summary: "Lists all field Messengers with employee profile, active status, and workload task counts."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger | Permissions: tugasLapangan.view | manajemenOrder.view | manajemenOrder.assignMessenger | finance.kasMessenger.view | reimbursement.view | Main Table: messengers | Related Tables: employees, users, messenger_tasks, orders"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/messenger/history:
+    get:
+      tags:
+        - "Messenger"
+      summary: "Lists completed historical field tasks for the Messenger (or filtered by messengerId for Admin/SVP)."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Messenger (Scoped) | Permissions: tugasLapangan.view | riwayatTugas.view | Main Table: messenger_tasks | Related Tables: orders, vehicles, samsat_offices, messengers"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/messenger/tasks/{orderNo}:
+    get:
+      tags:
+        - "Messenger"
+      summary: "Retrieves all messenger tasks and timeline stages for a specific order."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Messenger (Assigned) | Permissions: tugasLapangan.view | manajemenOrder.view | Main Table: messenger_tasks | Related Tables: orders, order_timeline_processes, messengers"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/messenger/reimbursements:
+    get:
+      tags:
+        - "Messenger"
+      summary: "Lists field reimbursement claims with approval/payment status and proof document metadata."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger (Scoped) | Permissions: reimbursement.view | finance.kasMessenger.view | tugasLapangan.view | Main Table: messenger_reimbursements | Related Tables: messengers, employees, orders, documents, pengeluaran, kas_messenger"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    post:
+      tags:
+        - "Messenger"
+      summary: "Submits a new field expense reimbursement claim (parkir, tol, fotokopi, biaya lapangan) with optional receipt document."
+      description: "Auth: Bearer JWT + Dynamic RBAC + Idempotency | Roles: Messenger, Admin, SVP | Permissions: reimbursement.create | tugasLapangan.reimbursement | Main Table: messenger_reimbursements | Related Tables: messengers, employees, orders, documents, audit_logs, idempotency_keys"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"messengerId\"?: string, \"orderNo\"?: string, \"category\": string, \"amount\": number, \"description\": string, \"expenseDate\"?: string, \"proofDocId\"?: string }"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/messenger/reimbursements/{id}/review:
+    patch:
+      tags:
+        - "Messenger"
+      summary: "Reviews (approves or rejects) a pending Messenger reimbursement claim, with optional approved_amount adjustment."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: reimbursement.approve | reimbursement.reject | finance.kasMessenger.verify | Main Table: messenger_reimbursements | Related Tables: messengers, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"status\": \"APPROVED\" | \"REJECTED\", \"approvedAmount\"?: number, \"rejectionReason\"?: string, \"notes\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/messenger/reimbursements/{id}/pay:
+    post:
+      tags:
+        - "Messenger"
+      summary: "Disburses payment for an APPROVED reimbursement claim, creating linked entries in kas_messenger, pengeluaran, and kas_kantor."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC + Idempotency | Roles: Admin, SVP, Finance | Permissions: reimbursement.pay | finance.kasMessenger.pay | finance.kasMessenger.create | Main Table: messenger_reimbursements | Related Tables: kas_messenger, pengeluaran, kas_kantor, payment_methods, documents, audit_logs, idempotency_keys"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"paymentMethodId\": string, \"paymentProofDocId\"?: string, \"notes\"?: string, \"paidDate\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/messenger/reimbursements/{id}/void:
+    post:
+      tags:
+        - "Messenger"
+      summary: "Voids an approved or paid reimbursement claim and reverses linked Kas Messenger / Pengeluaran entries."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: reimbursement.void | finance.kasMessenger.delete | Main Table: messenger_reimbursements | Related Tables: kas_messenger, pengeluaran, kas_kantor, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"reason\": string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/messenger/reimbursements/{id}:
+    delete:
+      tags:
+        - "Messenger"
+      summary: "Deletes a PENDING/REJECTED reimbursement claim (blocks deletion if already PAID)."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Messenger (Own PENDING only) | Permissions: reimbursement.delete | tugasLapangan.reimbursement | Main Table: messenger_reimbursements | Related Tables: documents, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/documents/upload:
+    post:
+      tags:
+        - "Documents"
+      summary: "Uploads a document/image file (PDF, JPG, PNG, WEBP up to 10MB) to isolated storage and creates a metadata row in documents."
+      description: "Auth: Bearer JWT + Dynamic RBAC (Multipart Upload) | Roles: Admin, SVP, Finance, Messenger | Permissions: Authenticated Session (Used across Order, Finance, Messenger proofs) | Main Table: documents | Related Tables: orders, finance_invoices, users, audit_logs"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              description: "multipart/form-data: file (binary), category?, orderNo?, invoiceId?, description?"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/documents/order/{orderNo}:
+    get:
+      tags:
+        - "Documents"
+      summary: "Lists all uploaded documents linked to a specific orderNo."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger (Assigned) | Permissions: manajemenOrder.view | tugasLapangan.view | arsip.view | Main Table: documents | Related Tables: orders, order_documents"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/documents/invoice/{invoiceId}:
+    get:
+      tags:
+        - "Documents"
+      summary: "Lists all uploaded documents linked to a specific finance invoice."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: finance.belumBayar.view | finance.kasKantor.view | finance.cashback.view | Main Table: documents | Related Tables: finance_invoices"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: invoiceId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/documents/{id}/ticket:
+    post:
+      tags:
+        - "Documents"
+      summary: "Issues a short-lived, single-use or time-bounded ticket_code in document_tickets for secure browser preview/download."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger (Scoped) | Permissions: Authenticated Session + Resource Ownership/Order Access | Main Table: document_tickets | Related Tables: documents, users, orders"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"purpose\"?: \"PREVIEW\" | \"DOWNLOAD\" }"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/documents/{id}/preview:
+    get:
+      tags:
+        - "Documents"
+      summary: "Streams the binary file inline (Content-Disposition: inline) for browser preview."
+      description: "Auth: Bearer JWT OR Query Ticket (?ticket=...) | Roles: Admin, SVP, Finance, Messenger | Permissions: Valid JWT or valid unexpired document_tickets.ticket_code | Main Table: documents | Related Tables: document_tickets, orders"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/documents/{id}/download:
+    get:
+      tags:
+        - "Documents"
+      summary: "Streams the binary file as an attachment download (Content-Disposition: attachment)."
+      description: "Auth: Bearer JWT OR Query Ticket (?ticket=...) | Roles: Admin, SVP, Finance, Messenger | Permissions: Valid JWT or valid unexpired document_tickets.ticket_code | Main Table: documents | Related Tables: document_tickets"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/documents/{id}:
+    get:
+      tags:
+        - "Documents"
+      summary: "Retrieves metadata JSON for a single document by ID."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger (Scoped) | Permissions: Authenticated Session + Resource Access | Main Table: documents | Related Tables: orders, finance_invoices"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    delete:
+      tags:
+        - "Documents"
+      summary: "Soft-deletes a document (is_deleted = 1) and schedules physical file cleanup via file_deletion_jobs if unreferenced."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: manajemenOrder.edit | finance.kasKantor.delete | Main Table: documents | Related Tables: file_deletion_jobs, document_tickets, invoice_payments, messenger_reimbursements, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/documents/{id}/link-order:
+    patch:
+      tags:
+        - "Documents"
+      summary: "Links an already-uploaded document to an order_no and/or invoice_id."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger | Permissions: manajemenOrder.edit | manajemenOrder.create | tugasLapangan.updateStatus | Main Table: documents | Related Tables: orders, finance_invoices, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"orderNo\"?: string, \"invoiceId\"?: number, \"category\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/services:
+    get:
+      tags:
+        - "Services"
+      summary: "Lists all biro jasa services (Perpanjangan STNK, Balik Nama, Mutasi, etc.) with active status and base fees."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger | Permissions: masterLayanan.view | manajemenOrder.view | manajemenOrder.create | kalkulator.view | biayaLayanan.view | Main Table: services | Related Tables: service_pricing_configs"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/services/{id}:
+    get:
+      tags:
+        - "Services"
+      summary: "Retrieves a single service definition by ID or kode_layanan."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger | Permissions: masterLayanan.view | manajemenOrder.view | kalkulator.view | Main Table: services | Related Tables: service_pricing_configs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    put:
+      tags:
+        - "Services"
+      summary: "Updates a service definition (name, description, required documents, base fee, or active status)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: masterLayanan.edit | biayaLayanan.edit | Main Table: services | Related Tables: audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"namaLayanan\"?: string, \"kategori\"?: string, \"biayaJasaDefault\"?: number, \"estimasiHari\"?: number, \"syaratDokumen\"?: string[], \"status\"?: \"Aktif\" | \"Nonaktif\" }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    delete:
+      tags:
+        - "Services"
+      summary: "Deletes or deactivates a service if not referenced by existing orders."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: masterLayanan.delete | Main Table: services | Related Tables: orders, service_pricing_configs, samsat_operational_tariffs, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/pricing/effective:
+    get:
+      tags:
+        - "Pricing"
+      summary: "Computes the effective combined pricing (service fee + Samsat operational tariffs + base Samsat items) for a given serviceId, samsatId, and vehicle type."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger | Permissions: biayaLayanan.view | hargaSamsat.view | kalkulator.view | manajemenOrder.create | manajemenOrder.view | Main Table: service_pricing_configs | Related Tables: services, samsat_offices, samsat_pricing, samsat_operational_tariffs"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/pricing/samsat:
+    get:
+      tags:
+        - "Pricing"
+      summary: "Lists all master Samsat pricing components (samsat_pricing)."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger | Permissions: hargaSamsat.view | biayaLayanan.view | kalkulator.view | manajemenOrder.view | Main Table: samsat_pricing | Related Tables: samsat_operational_tariffs"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/pricing/samsat/{id}:
+    get:
+      tags:
+        - "Pricing"
+      summary: "Retrieves a single Samsat pricing component by ID."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: hargaSamsat.view | biayaLayanan.view | kalkulator.view | Main Table: samsat_pricing | Related Tables: -"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    put:
+      tags:
+        - "Pricing"
+      summary: "Updates a master Samsat pricing component."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: hargaSamsat.edit | Main Table: samsat_pricing | Related Tables: audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"namaKomponen\"?: string, \"hargaMotor\"?: number, \"hargaMobil\"?: number, \"status\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/pricing/services:
+    get:
+      tags:
+        - "Pricing"
+      summary: "Lists all Service × Samsat pricing configurations (service_pricing_configs)."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger | Permissions: biayaLayanan.view | kalkulator.view | manajemenOrder.create | manajemenOrder.view | Main Table: service_pricing_configs | Related Tables: services, samsat_offices"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    post:
+      tags:
+        - "Pricing"
+      summary: "Creates or upserts a Service × Samsat pricing configuration in service_pricing_configs."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: biayaLayanan.create | biayaLayanan.edit | Main Table: service_pricing_configs | Related Tables: services, samsat_offices, audit_logs"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"serviceId\": string, \"samsatId\": string, \"biayaJasaMotor\": number, \"biayaJasaMobil\": number, \"biayaTambahan\"?: number, \"keterangan\"?: string }"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/pricing/services/batch-replicate:
+    post:
+      tags:
+        - "Pricing"
+      summary: "Replicates service pricing configurations from one source Samsat office across multiple target Samsat offices in batch."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: biayaLayanan.edit | biayaLayanan.create | Main Table: service_pricing_configs | Related Tables: services, samsat_offices, audit_logs"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"sourceSamsatId\": string, \"targetSamsatIds\": string[], \"serviceIds\"?: string[], \"overwrite\"?: boolean }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/pricing/services/{id}:
+    put:
+      tags:
+        - "Pricing"
+      summary: "Updates a specific Service × Samsat pricing configuration by ID."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: biayaLayanan.edit | Main Table: service_pricing_configs | Related Tables: audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"biayaJasaMotor\"?: number, \"biayaJasaMobil\"?: number, \"biayaTambahan\"?: number, \"status\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    delete:
+      tags:
+        - "Pricing"
+      summary: "Deletes a Service × Samsat pricing configuration by ID."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: biayaLayanan.delete | biayaLayanan.edit | Main Table: service_pricing_configs | Related Tables: audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/pricing/samsat-tariffs:
+    get:
+      tags:
+        - "Pricing"
+      summary: "Lists Samsat operational tariff overrides (samsat_operational_tariffs) filtered by samsatId or serviceId."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger | Permissions: hargaSamsat.view | biayaLayanan.view | kalkulator.view | Main Table: samsat_operational_tariffs | Related Tables: samsat_offices, samsat_pricing, services, wilayah_administratif"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    put:
+      tags:
+        - "Pricing"
+      summary: "Upserts one or more Samsat operational tariff overrides in samsat_operational_tariffs."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: hargaSamsat.edit | biayaLayanan.edit | Main Table: samsat_operational_tariffs | Related Tables: samsat_offices, samsat_pricing, services, wilayah_administratif, audit_logs"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"samsatId\": string, \"pricingItemId\": string, \"serviceId\"?: string, \"tarifMotor\": number, \"tarifMobil\": number } (or array of items)"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    post:
+      tags:
+        - "Pricing"
+      summary: "POST alias to create/upsert Samsat operational tariff overrides."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: hargaSamsat.edit | biayaLayanan.edit | Main Table: samsat_operational_tariffs | Related Tables: samsat_offices, samsat_pricing, audit_logs"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"samsatId\": string, \"pricingItemId\": string, \"tarifMotor\": number, \"tarifMobil\": number }"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    delete:
+      tags:
+        - "Pricing"
+      summary: "Deletes Samsat operational tariff overrides by composite query/body filter (samsatId + pricingItemId)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: hargaSamsat.edit | biayaLayanan.delete | Main Table: samsat_operational_tariffs | Related Tables: audit_logs"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/pricing/samsat-tariffs/{id}:
+    delete:
+      tags:
+        - "Pricing"
+      summary: "Deletes a specific Samsat operational tariff override by primary key ID."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: hargaSamsat.edit | biayaLayanan.delete | Main Table: samsat_operational_tariffs | Related Tables: audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/estimation/templates:
+    get:
+      tags:
+        - "Estimation"
+      summary: "Lists all SLA estimation templates (estimation_templates)."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger | Permissions: aturanEstimasi.view | kalkulator.view | manajemenOrder.view | manajemenOrder.create | Main Table: estimation_templates | Related Tables: -"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/estimation/templates/{id}:
+    get:
+      tags:
+        - "Estimation"
+      summary: "Retrieves a single estimation template by ID."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger | Permissions: aturanEstimasi.view | kalkulator.view | manajemenOrder.view | Main Table: estimation_templates | Related Tables: -"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    put:
+      tags:
+        - "Estimation"
+      summary: "Updates an SLA estimation template (duration days, process steps, notes)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: aturanEstimasi.edit | Main Table: estimation_templates | Related Tables: audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"minDays\"?: number, \"maxDays\"?: number, \"processSteps\"?: string[], \"notes\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/estimation/templates/{id}/reset:
+    post:
+      tags:
+        - "Estimation"
+      summary: "Resets a single estimation template back to factory default SLA parameters."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: aturanEstimasi.edit | aturanEstimasi.reset | Main Table: estimation_templates | Related Tables: audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/estimation/reset-all:
+    post:
+      tags:
+        - "Estimation"
+      summary: "Resets all estimation templates in estimation_templates back to factory defaults."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: aturanEstimasi.edit | aturanEstimasi.reset | Main Table: estimation_templates | Related Tables: audit_logs"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/wilayah:
+    get:
+      tags:
+        - "Wilayah & Samsat"
+      summary: "Lists administrative regions (Kabupaten/Kota & Provinsi) in wilayah_administratif."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger | Permissions: wilayahSamsat.view | hargaSamsat.view | biayaLayanan.view | manajemenOrder.view | manajemenOrder.create | kalkulator.view | Main Table: wilayah_administratif | Related Tables: samsat_offices"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/wilayah/provinces:
+    get:
+      tags:
+        - "Wilayah & Samsat"
+      summary: "Lists distinct provinces from wilayah_administratif."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger | Permissions: wilayahSamsat.view | manajemenOrder.view | kalkulator.view | Main Table: wilayah_administratif | Related Tables: -"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/wilayah/{kode}:
+    get:
+      tags:
+        - "Wilayah & Samsat"
+      summary: "Retrieves a single administrative region by kode_kabupaten_kota along with its Samsat offices."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger | Permissions: wilayahSamsat.view | manajemenOrder.view | kalkulator.view | Main Table: wilayah_administratif | Related Tables: samsat_offices"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: kode
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/samsat/offices:
+    get:
+      tags:
+        - "Wilayah & Samsat"
+      summary: "Lists all Samsat offices (samsat_offices) with administrative region details."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger | Permissions: wilayahSamsat.view | hargaSamsat.view | biayaLayanan.view | manajemenOrder.view | manajemenOrder.create | kalkulator.view | tugasLapangan.view | Main Table: samsat_offices | Related Tables: wilayah_administratif"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    post:
+      tags:
+        - "Wilayah & Samsat"
+      summary: "Creates a new Samsat office in samsat_offices (auto-ensuring parent wilayah_administratif exists)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: wilayahSamsat.create | wilayahSamsat.edit | Main Table: samsat_offices | Related Tables: wilayah_administratif, service_pricing_configs, audit_logs"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"namaSamsat\": string, \"kodeGerai\"?: string, \"kodeKabupatenKota\": string, \"alamat\"?: string, \"status\"?: \"Aktif\" | \"Nonaktif\" }"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/samsat/offices/{id}:
+    put:
+      tags:
+        - "Wilayah & Samsat"
+      summary: "Updates an existing Samsat office in samsat_offices."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: wilayahSamsat.edit | Main Table: samsat_offices | Related Tables: wilayah_administratif, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"namaSamsat\"?: string, \"kodeGerai\"?: string, \"kodeKabupatenKota\"?: string, \"alamat\"?: string, \"status\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    delete:
+      tags:
+        - "Wilayah & Samsat"
+      summary: "Deletes a Samsat office if not referenced by existing orders."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: wilayahSamsat.delete | Main Table: samsat_offices | Related Tables: orders, samsat_operational_tariffs, service_pricing_configs, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/payment-methods:
+    get:
+      tags:
+        - "Payment Methods"
+      summary: "Lists configured payment methods/accounts (Bank Transfer, Cash, E-Wallet, QRIS)."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger | Permissions: metodePembayaran.view | manajemenOrder.view | manajemenOrder.create | finance.kasKantor.view | finance.kasMessenger.view | finance.belumBayar.view | finance.cashback.view | reimbursement.view | Main Table: payment_methods | Related Tables: -"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    post:
+      tags:
+        - "Payment Methods"
+      summary: "Creates a new payment method/account (enforces unique bank+account number and unique cash method name)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: metodePembayaran.create | Main Table: payment_methods | Related Tables: audit_logs"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"namaMetode\": string, \"tipe\": \"Transfer Bank\" | \"Tunai\" | \"E-Wallet\" | \"QRIS\", \"nomorRekening\"?: string, \"atasNama\"?: string, \"status\"?: \"Aktif\" | \"Nonaktif\" }"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/payment-methods/{id}:
+    get:
+      tags:
+        - "Payment Methods"
+      summary: "Retrieves a single payment method by ID."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance, Messenger | Permissions: metodePembayaran.view | finance.kasKantor.view | manajemenOrder.view | Main Table: payment_methods | Related Tables: -"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    put:
+      tags:
+        - "Payment Methods"
+      summary: "Updates an existing payment method."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: metodePembayaran.edit | Main Table: payment_methods | Related Tables: audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"namaMetode\"?: string, \"tipe\"?: string, \"nomorRekening\"?: string, \"atasNama\"?: string, \"status\"?: \"Aktif\" | \"Nonaktif\" }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    delete:
+      tags:
+        - "Payment Methods"
+      summary: "Deletes a payment method if not referenced by any financial transactions (invoices, payments, kas_kantor, pengeluaran, transfers)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: metodePembayaran.delete | Main Table: payment_methods | Related Tables: finance_invoices, invoice_payments, kas_kantor, pengeluaran, internal_transfers, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/payment-methods/{id}/status:
+    patch:
+      tags:
+        - "Payment Methods"
+      summary: "Toggles or sets the active status (Aktif / Nonaktif) of a payment method."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: metodePembayaran.edit | Main Table: payment_methods | Related Tables: audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"status\": \"Aktif\" | \"Nonaktif\" }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/users:
+    get:
+      tags:
+        - "Users"
+      summary: "Lists all internal user accounts joined with their employee profile."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: manajemenUser.view | Main Table: users | Related Tables: employees, messengers"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    post:
+      tags:
+        - "Users"
+      summary: "Creates a new user account linked to an employee (and auto-provisions a messengers row if role is Messenger)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: manajemenUser.create | Main Table: users | Related Tables: employees, messengers, audit_logs, security_audit_logs"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"employeeId\": string, \"name\": string, \"email\": string, \"password\": string, \"role\": \"Admin\" | \"SVP\" | \"Finance\" | \"Messenger\", \"status\"?: \"Aktif\" | \"Nonaktif\" }"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/users/{id}:
+    get:
+      tags:
+        - "Users"
+      summary: "Retrieves a single user account by numeric ID or employee_id."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: manajemenUser.view | Main Table: users | Related Tables: employees, messengers"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    put:
+      tags:
+        - "Users"
+      summary: "Updates user role, email, status, or profile; increments token_version on role/status change to enforce immediate session re-evaluation."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: manajemenUser.edit | Main Table: users | Related Tables: employees, messengers, audit_logs, security_audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"name\"?: string, \"email\"?: string, \"role\"?: string, \"status\"?: \"Aktif\" | \"Nonaktif\" }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    delete:
+      tags:
+        - "Users"
+      summary: "Deactivates or deletes a user account (prevents self-deletion and deletion of the last active Admin)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: manajemenUser.delete | Main Table: users | Related Tables: employees, messengers, document_tickets, audit_logs, security_audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/users/{id}/reset-password:
+    post:
+      tags:
+        - "Users"
+      summary: "Administratively resets a user password and increments token_version to revoke active sessions."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: manajemenUser.resetPassword | manajemenUser.edit | Main Table: users | Related Tables: audit_logs, security_audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"newPassword\": string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/users/{id}/permanent-erasure-preflight:
+    get:
+      tags:
+        - "Users"
+      summary: "Runs a preflight impact analysis before permanently erasing a user/employee (checks orders, tasks, reimbursements, and ledger references)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin | Permissions: manajemenUser.delete | Main Table: users | Related Tables: employees, messengers, orders, messenger_tasks, messenger_reimbursements, documents, document_tickets"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/users/{id}/permanent-erasure:
+    post:
+      tags:
+        - "Users"
+      summary: "Executes irreversible GDPR/permanent erasure of an eligible user account, anonymizing historical references and scheduling file deletion jobs."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin | Permissions: manajemenUser.delete | Main Table: users | Related Tables: employees, messengers, document_tickets, file_deletion_jobs, security_audit_logs, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"confirmText\": string, \"reason\": string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/users/file-deletion-jobs/{jobId}/retry:
+    post:
+      tags:
+        - "Users"
+      summary: "Retries a failed asynchronous physical file deletion job in file_deletion_jobs."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin | Permissions: manajemenUser.delete | Main Table: file_deletion_jobs | Related Tables: security_audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/employees:
+    get:
+      tags:
+        - "Employees"
+      summary: "Lists all employee master records (employees) with linked user account status and messenger profile."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: dataPegawai.view | manajemenUser.view | tugasLapangan.view | Main Table: employees | Related Tables: users, messengers"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    post:
+      tags:
+        - "Employees"
+      summary: "Creates a new employee record in employees (and syncs messengers if jabatan/divisi is Messenger)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: dataPegawai.create | Main Table: employees | Related Tables: messengers, users, audit_logs"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"id\"?: string, \"nama\": string, \"email\"?: string, \"noHp\"?: string, \"jabatan\": string, \"divisi\": string, \"tanggalMasuk\"?: string, \"status\"?: \"Aktif\" | \"Nonaktif\" }"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/employees/next-id:
+    get:
+      tags:
+        - "Employees"
+      summary: "Generates the next sequential employee ID (e.g. EMP-009)."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP | Permissions: dataPegawai.create | manajemenUser.create | Main Table: employees | Related Tables: -"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/employees/{id}:
+    get:
+      tags:
+        - "Employees"
+      summary: "Retrieves a single employee record by ID."
+      description: "Auth: Bearer JWT + Dynamic RBAC | Roles: Admin, SVP, Finance | Permissions: dataPegawai.view | manajemenUser.view | Main Table: employees | Related Tables: users, messengers"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    put:
+      tags:
+        - "Employees"
+      summary: "Updates an employee record and synchronizes name/status with linked users and messengers rows."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: dataPegawai.edit | Main Table: employees | Related Tables: users, messengers, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"nama\"?: string, \"email\"?: string, \"noHp\"?: string, \"jabatan\"?: string, \"divisi\"?: string, \"status\"?: \"Aktif\" | \"Nonaktif\" }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    delete:
+      tags:
+        - "Employees"
+      summary: "Deletes an employee record if not constrained by active orders/tasks/reimbursements."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: dataPegawai.delete | Main Table: employees | Related Tables: users, messengers, orders, messenger_reimbursements, audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/permissions:
+    get:
+      tags:
+        - "Permissions (RBAC)"
+      summary: "Returns the authoritative dynamic RBAC permission matrix for all roles from role_permissions."
+      description: "Auth: Bearer JWT (authenticateToken) | Roles: Admin, SVP, Finance, Messenger | Permissions: Authenticated Session (Required by frontend permissionStore hydration) | Main Table: role_permissions | Related Tables: -"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/permissions/{role}:
+    put:
+      tags:
+        - "Permissions (RBAC)"
+      summary: "Updates the granular RBAC permission tree for a specific role (SVP, Finance, Messenger, or Admin) and invalidates server permission cache."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: hakAkses.edit | Main Table: role_permissions | Related Tables: audit_logs, security_audit_logs"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: role
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"permissions\": object }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/permissions/reset:
+    post:
+      tags:
+        - "Permissions (RBAC)"
+      summary: "Resets role_permissions for one or all roles back to factory defaultPermissions.ts matrix."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: hakAkses.edit | hakAkses.reset | Main Table: role_permissions | Related Tables: audit_logs, security_audit_logs"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"role\"?: \"Admin\" | \"SVP\" | \"Finance\" | \"Messenger\" }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/notifications/settings:
+    get:
+      tags:
+        - "Notifications"
+      summary: "Retrieves global email/WhatsApp notification settings (notification_settings)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: pengaturanNotifikasi.view | Main Table: notification_settings | Related Tables: -"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    put:
+      tags:
+        - "Notifications"
+      summary: "Updates global notification settings (SMTP credentials, triggers, sender email)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: pengaturanNotifikasi.edit | Main Table: notification_settings | Related Tables: audit_logs"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"emailEnabled\"?: boolean, \"smtpHost\"?: string, \"smtpPort\"?: number, \"smtpUser\"?: string, \"smtpPass\"?: string, \"senderEmail\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/notifications/test-email:
+    post:
+      tags:
+        - "Notifications"
+      summary: "Sends a test email using the configured notification_settings and logs the attempt in notification_logs."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: pengaturanNotifikasi.edit | pengaturanNotifikasi.test | Main Table: notification_logs | Related Tables: notification_settings, audit_logs"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"recipientEmail\": string, \"subject\"?: string, \"message\"?: string }"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/notifications/logs:
+    get:
+      tags:
+        - "Notifications"
+      summary: "Lists outbound notification delivery logs (notification_logs)."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: pengaturanNotifikasi.view | logAudit.view | Main Table: notification_logs | Related Tables: -"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/audit-logs:
+    get:
+      tags:
+        - "Audit Logs"
+      summary: "Lists immutable system & business audit trail entries (audit_logs) with filtering by module, action, user, or date range."
+      description: "Auth: Bearer JWT + Role + Dynamic RBAC | Roles: Admin, SVP | Permissions: logAudit.view | Main Table: audit_logs | Related Tables: users"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    post:
+      tags:
+        - "Audit Logs"
+      summary: "Appends a new audit log entry (used for explicit client/action audit recording; identity is bound from server JWT)."
+      description: "Auth: Bearer JWT (authenticateToken) | Roles: Admin, SVP, Finance, Messenger | Permissions: Authenticated Session | Main Table: audit_logs | Related Tables: users"
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"action\": string, \"module\": string, \"details\"?: string | object, \"entityId\"?: string }"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    delete:
+      tags:
+        - "Audit Logs"
+      summary: "Intentionally rejects audit log deletion with HTTP 405 Method Not Allowed to guarantee audit trail immutability."
+      description: "Auth: Bearer JWT (Immutable Guard) | Roles: None (Blocked by Design) | Permissions: Immutable Audit Trail Policy | Main Table: audit_logs | Related Tables: security_audit_logs"
+      security:
+        - bearerAuth: []
+      responses:
+        '405':
+          description: Method Not Allowed (Immutable Audit Trail)
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/audit-logs/clear:
+    post:
+      tags:
+        - "Audit Logs"
+      summary: "Intentionally rejects clearing audit logs with HTTP 405 Method Not Allowed."
+      description: "Auth: Bearer JWT (Immutable Guard) | Roles: None (Blocked by Design) | Permissions: Immutable Audit Trail Policy | Main Table: audit_logs | Related Tables: -"
+      security:
+        - bearerAuth: []
+      responses:
+        '405':
+          description: Method Not Allowed (Immutable Audit Trail)
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+    delete:
+      tags:
+        - "Audit Logs"
+      summary: "Intentionally rejects clearing audit logs via DELETE with HTTP 405 Method Not Allowed."
+      description: "Auth: Bearer JWT (Immutable Guard) | Roles: None (Blocked by Design) | Permissions: Immutable Audit Trail Policy | Main Table: audit_logs | Related Tables: -"
+      security:
+        - bearerAuth: []
+      responses:
+        '405':
+          description: Method Not Allowed (Immutable Audit Trail)
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (RBAC Policy)
+  /api/v1/public/services:
+    get:
+      tags:
+        - "Public Customer API"
+      summary: "Lists active services available for public customer order submission and price estimation."
+      description: "Auth: Public API Security (Rate-Limited 60/min + Optional X-Public-Api-Key) | Roles: External Customer / Public Portal | Permissions: Public Read | Main Table: services | Related Tables: -"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+  /api/v1/public/samsat:
+    get:
+      tags:
+        - "Public Customer API"
+      summary: "Lists active Samsat offices and regions for public customer selection."
+      description: "Auth: Public API Security (Rate-Limited 60/min) | Roles: External Customer / Public Portal | Permissions: Public Read | Main Table: samsat_offices | Related Tables: wilayah_administratif"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+  /api/v1/public/pricing:
+    get:
+      tags:
+        - "Public Customer API"
+      summary: "Calculates estimated service fee and Samsat tariff for public calculator."
+      description: "Auth: Public API Security (Rate-Limited 60/min) | Roles: External Customer / Public Portal | Permissions: Public Read | Main Table: service_pricing_configs | Related Tables: services, samsat_offices, samsat_pricing, samsat_operational_tariffs, estimation_templates"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+  /api/v1/public/orders:
+    post:
+      tags:
+        - "Public Customer API"
+      summary: "Submits a new customer order from the public portal/mobile app as a Draft / Partial Estimate order."
+      description: "Auth: Public API Security (Strict Rate-Limited 10/15m) | Roles: External Customer / Public Portal | Permissions: Public Order Submission | Main Table: orders | Related Tables: customers, vehicles, finance_invoices, order_status_history, order_timeline_processes"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "{ \"customerName\": string, \"customerPhone\": string, \"nopol\": string, \"serviceId\": string, \"samsatId\": string, \"jenisKendaraan\": \"Motor\" | \"Mobil\", \"catatan\"?: string }"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+  /api/v1/public/orders/tracking:
+    get:
+      tags:
+        - "Public Customer API"
+      summary: "Tracks order progress by query parameters (orderNo and customer phone/nopol verification) returning sanitized public status & timeline."
+      description: "Auth: Public API Security (Rate-Limited 30/5m) | Roles: External Customer / Public Portal | Permissions: Public Tracking (Requires matching orderNo + phone/nopol verification) | Main Table: orders | Related Tables: vehicles, services, samsat_offices, order_status_history, order_timeline_processes"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+  /api/v1/public/orders/{orderNo}/tracking:
+    get:
+      tags:
+        - "Public Customer API"
+      summary: "Tracks order progress by path parameter :orderNo (with phone/nopol query verification)."
+      description: "Auth: Public API Security (Rate-Limited 30/5m) | Roles: External Customer / Public Portal | Permissions: Public Tracking | Main Table: orders | Related Tables: vehicles, services, samsat_offices, order_status_history, order_timeline_processes"
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '400':
+          description: Bad Request / Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'

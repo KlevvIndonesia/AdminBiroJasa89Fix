@@ -17,9 +17,9 @@ const testAdmin: any = {
 };
 
 const testSupervisor: any = {
-  userId: "1",
+  userId: "usr-1",
   nama: "Admin Super (SVP)",
-  role: "supervisor",
+  role: "administrator",
   jabatan: "SVP",
   email: "spv@test.local",
 };
@@ -326,6 +326,9 @@ test("CANONICAL P&L INTEGRATION & REGRESSION RECONCILIATION TEST SUITE", async (
   });
 
   await suite.test("2.2: OPEX Kas Messenger (Classified as courier operational expense)", () => {
+    const activePm = db.prepare("SELECT id FROM payment_methods WHERE LOWER(TRIM(status)) = 'aktif' LIMIT 1").get() as { id: string } | undefined;
+    assert.ok(activePm?.id, "Active payment method fixture must exist for messenger top-up");
+
     // Top up messenger float first to satisfy cash balance protection guard
     financeService.addKasMessenger({
       tanggal: new Date().toISOString().split("T")[0],
@@ -335,6 +338,7 @@ test("CANONICAL P&L INTEGRATION & REGRESSION RECONCILIATION TEST SUITE", async (
       in: 100000,
       out: 0,
       kategori: "Uang Jalan",
+      payment_method_id: activePm.id,
     }, testAdmin);
 
     // Direct courier field operational expense
@@ -382,7 +386,7 @@ test("CANONICAL P&L INTEGRATION & REGRESSION RECONCILIATION TEST SUITE", async (
   let disbursedReimbId: string;
   let preDisbursementOpex: number;
 
-  await suite.test("2.4: Paid Reimbursement (Posts to Kas Kantor and recognized in OPEX exactly ONCE)", () => {
+  await suite.test("2.4: Paid Reimbursement (Posts Kredit to Kas Messenger, leaves Kas Kantor untouched, recognized in OPEX once)", () => {
     const reimb = messengerService.createReimbursement({
       kategori: "Tol",
       nominal: 45000,
@@ -394,24 +398,24 @@ test("CANONICAL P&L INTEGRATION & REGRESSION RECONCILIATION TEST SUITE", async (
 
     messengerService.reviewReimbursement(reimb.id, "Disetujui", testSupervisor, "Disetujui untuk dibayar");
 
+    const officeCountBefore = (db.prepare("SELECT COUNT(*) as count FROM kas_kantor").get() as any).count;
     const pnlBefore = dbFinanceRepository.getCanonicalLabaRugiSummary();
     preDisbursementOpex = pnlBefore.totalBebanOperasional;
 
     // Disburse reimbursement through canonical payReimbursement
-    const paid = messengerService.payReimbursement(reimb.id, testAdmin, { paymentMethod: "Cash" });
+    const paid = messengerService.payReimbursement(reimb.id, testAdmin, { paymentMethod: "Kas Messenger" });
 
     disbursedReimbId = reimb.id;
     assert.strictEqual(paid.status, "Dibayar");
 
-    // Verify Kas Kantor has Kredit entry
-    const kasKantorRow = db.prepare("SELECT * FROM kas_kantor WHERE keterangan LIKE ? ORDER BY id DESC LIMIT 1")
-      .get(`%Reimbursement Kurir%${reimb.id}%`) as any;
-    assert.ok(kasKantorRow, "Kas Kantor entry must exist");
-    assert.strictEqual(Number(kasKantorRow.kredit), 45000);
+    // Verify Kas Messenger has Kredit entry linked to reimbursement
+    const kmRows = db.prepare("SELECT * FROM kas_messenger WHERE reimbursement_id = ?").all(reimb.id) as any[];
+    assert.strictEqual(kmRows.length, 1, "Reimbursement payout must create exactly 1 entry in Kas Messenger");
+    assert.strictEqual(Number(kmRows[0].kredit), 45000);
 
-    // Verify Kas Messenger has ZERO entries
-    const kmRows = db.prepare("SELECT * FROM kas_messenger WHERE reimbursement_id = ?").all(reimb.id);
-    assert.strictEqual(kmRows.length, 0, "Reimbursement payout must create ZERO entries in Kas Messenger");
+    // Verify Kas Kantor count is untouched
+    const officeCountAfter = (db.prepare("SELECT COUNT(*) as count FROM kas_kantor").get() as any).count;
+    assert.strictEqual(officeCountAfter, officeCountBefore, "Reimbursement payout must leave Kas Kantor untouched");
 
     // Verify OPEX increased by exactly 45,000 (no double count)
     const pnlAfter = dbFinanceRepository.getCanonicalLabaRugiSummary();
@@ -422,18 +426,23 @@ test("CANONICAL P&L INTEGRATION & REGRESSION RECONCILIATION TEST SUITE", async (
     );
   });
 
-  await suite.test("2.5: Voided Reimbursement (Reversal brings net expense back to Rp 0)", () => {
+  await suite.test("2.5: Voided Reimbursement (Compensating reversal in Kas Messenger brings net expense back to Rp 0)", () => {
+    const officeCountBefore = (db.prepare("SELECT COUNT(*) as count FROM kas_kantor").get() as any).count;
+
     // Void the previously disbursed reimbursement
     const voidResult = messengerService.voidReimbursement(disbursedReimbId, testSupervisor, "Salah input nominal oleh kurir");
 
     assert.strictEqual(voidResult.status, "Disetujui");
 
-    // Verify compensating entry created in Kas Kantor
-    const voidKantor = db.prepare("SELECT * FROM kas_kantor WHERE keterangan LIKE ? ORDER BY id DESC LIMIT 1")
-      .get(`%[VOID/BATAL]%${disbursedReimbId}%`) as any;
-    assert.ok(voidKantor, "Compensating void entry must exist in Kas Kantor");
-    assert.strictEqual(Number(voidKantor.debit), 45000);
-    assert.ok(voidKantor.keterangan.includes("[VOID/BATAL]"));
+    // Verify compensating Debit entry created in Kas Messenger (NOT Kas Kantor)
+    const voidKm = db.prepare("SELECT * FROM kas_messenger WHERE reimbursement_id = ? AND debit > 0 ORDER BY id DESC LIMIT 1")
+      .get(disbursedReimbId) as any;
+    assert.ok(voidKm, "Compensating void entry must exist in Kas Messenger");
+    assert.strictEqual(Number(voidKm.debit), 45000);
+    assert.ok(voidKm.keterangan.includes("[VOID/BATAL]"));
+
+    const officeCountAfter = (db.prepare("SELECT COUNT(*) as count FROM kas_kantor").get() as any).count;
+    assert.strictEqual(officeCountAfter, officeCountBefore, "Void reimbursement must NOT touch Kas Kantor");
 
     // Verify canonical laba rugi summary: net OPEX returns to pre-disbursement level!
     const pnlAfterVoid = dbFinanceRepository.getCanonicalLabaRugiSummary();
@@ -444,77 +453,65 @@ test("CANONICAL P&L INTEGRATION & REGRESSION RECONCILIATION TEST SUITE", async (
     );
   });
 
-  await suite.test("2.6: Internal Transfer Office -> Messenger (Net zero P&L impact, zero cash change)", () => {
-    // Ensure sufficient office balance
-    db.prepare(`
-      INSERT INTO kas_kantor (tanggal, keterangan, status, debit, kredit, saldo, penanggung_jawab)
-      VALUES (?, 'Topup Kantor for Transfer Test', 'Debit', 2000000, 0, 2000000, 'Finance')
-    `).run(new Date().toISOString().split("T")[0]);
-
+  await suite.test("2.6: Internal Transfer Office -> Messenger disabled (HTTP 410) & Internal Transfer classification yields zero P&L impact", () => {
     const pnlBefore = dbFinanceRepository.getCanonicalLabaRugiSummary();
 
-    const transferRes = financeService.transferOfficeToMessenger({
-      amount: 500000,
-      messengerId: "MSG-0001",
-      messengerName: "Budi Santoso",
-      notes: "Dropping dana operasional lapangan kurir",
-      idempotencyKey: `idem-off-to-msg-${Date.now()}`,
-    }, testAdmin);
+    assert.throws(() => {
+      financeService.transferOfficeToMessenger({
+        amount: 500000,
+        messengerId: "MSG-0001",
+        messengerName: "Budi Santoso",
+        notes: "Dropping dana operasional lapangan kurir",
+      }, testAdmin);
+    }, (err: any) => err.statusCode === 410 && err.code === "TRANSFERS_DISABLED");
 
-    assert.ok(transferRes.kasKantorId);
-    assert.ok(transferRes.kasMessengerId);
+    const syntheticKantor = {
+      id: 90001,
+      tanggal: new Date().toISOString().split("T")[0],
+      keterangan: "Transfer antar kas ke messenger",
+      status: "Kredit" as const,
+      debit: 0,
+      kredit: 500000,
+      total: 0,
+      kategori: "INTERNAL_TRANSFER",
+    };
+    assert.strictEqual(classifyFinancialTransaction(syntheticKantor), "INTERNAL_TRANSFER");
 
-    // Verify classifications via domain classifier
-    const kkEntry = db.prepare("SELECT * FROM kas_kantor WHERE id = ?").get(transferRes.kasKantorId) as any;
-    const kmEntry = db.prepare("SELECT * FROM kas_messenger WHERE id = ?").get(transferRes.kasMessengerId) as any;
-    assert.strictEqual(classifyFinancialTransaction(kkEntry), "INTERNAL_TRANSFER");
-    assert.strictEqual(classifyFinancialTransaction(kmEntry), "INTERNAL_TRANSFER");
-
-    // Verify zero P&L impact
+    const syntheticPnl = computeCanonicalLabaRugi([], [], [], "monthly", undefined, undefined, undefined, [syntheticKantor]);
+    assert.strictEqual(syntheticPnl.totalBebanOperasional, 0, "INTERNAL_TRANSFER classification must have ZERO OPEX impact");
     const pnlAfter = dbFinanceRepository.getCanonicalLabaRugiSummary();
-    assert.strictEqual(
-      pnlAfter.totalBebanOperasional,
-      pnlBefore.totalBebanOperasional,
-      "Office -> Messenger internal transfer must have ZERO P&L OPEX impact"
-    );
-    assert.strictEqual(
-      pnlAfter.netProfit,
-      pnlBefore.netProfit,
-      "Office -> Messenger internal transfer must have ZERO Net Profit impact"
-    );
+    assert.strictEqual(pnlAfter.totalBebanOperasional, pnlBefore.totalBebanOperasional);
   });
 
-  await suite.test("2.7: Internal Transfer Messenger -> Office (Net zero P&L impact, zero cash change)", () => {
+  await suite.test("2.7: Internal Transfer Messenger -> Office disabled (HTTP 410) & Internal Transfer classification yields zero P&L impact", () => {
     const pnlBefore = dbFinanceRepository.getCanonicalLabaRugiSummary();
 
-    const transferRes = financeService.transferMessengerToOffice({
-      amount: 150000,
-      messengerId: "MSG-0001",
-      messengerName: "Budi Santoso",
-      notes: "Setor sisa dana operasional lapangan ke kas kantor",
-      idempotencyKey: `idem-msg-to-off-${Date.now()}`,
-    }, testAdmin);
+    assert.throws(() => {
+      financeService.transferMessengerToOffice({
+        amount: 150000,
+        messengerId: "MSG-0001",
+        messengerName: "Budi Santoso",
+        notes: "Setor sisa dana operasional lapangan ke kas kantor",
+      }, testAdmin);
+    }, (err: any) => err.statusCode === 410 && err.code === "TRANSFERS_DISABLED");
 
-    assert.ok(transferRes.kasKantorId);
-    assert.ok(transferRes.kasMessengerId);
+    const syntheticKm = {
+      id: 90002,
+      tanggal: new Date().toISOString().split("T")[0],
+      jenis: "Setoran",
+      messenger: "Budi Santoso",
+      keterangan: "Setor sisa dana operasional ke kas kantor",
+      in: 0,
+      out: 150000,
+      total: 0,
+      kategori: "INTERNAL_TRANSFER",
+    };
+    assert.strictEqual(classifyFinancialTransaction(syntheticKm), "INTERNAL_TRANSFER");
 
-    const kkEntry = db.prepare("SELECT * FROM kas_kantor WHERE id = ?").get(transferRes.kasKantorId) as any;
-    const kmEntry = db.prepare("SELECT * FROM kas_messenger WHERE id = ?").get(transferRes.kasMessengerId) as any;
-    assert.strictEqual(classifyFinancialTransaction(kkEntry), "INTERNAL_TRANSFER");
-    assert.strictEqual(classifyFinancialTransaction(kmEntry), "INTERNAL_TRANSFER");
-
-    // Verify zero P&L impact
+    const syntheticPnl = computeCanonicalLabaRugi([], [], [syntheticKm], "monthly");
+    assert.strictEqual(syntheticPnl.totalBebanOperasional, 0, "INTERNAL_TRANSFER classification on Kas Messenger must have ZERO OPEX impact");
     const pnlAfter = dbFinanceRepository.getCanonicalLabaRugiSummary();
-    assert.strictEqual(
-      pnlAfter.totalBebanOperasional,
-      pnlBefore.totalBebanOperasional,
-      "Messenger -> Office internal transfer must have ZERO P&L OPEX impact"
-    );
-    assert.strictEqual(
-      pnlAfter.netProfit,
-      pnlBefore.netProfit,
-      "Messenger -> Office internal transfer must have ZERO Net Profit impact"
-    );
+    assert.strictEqual(pnlAfter.totalBebanOperasional, pnlBefore.totalBebanOperasional);
   });
 
   // ═══════════════════════════════════════════════════════════════════════════════

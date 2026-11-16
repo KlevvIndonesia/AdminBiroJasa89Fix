@@ -1,25 +1,12 @@
 import { test, expect } from "@playwright/test";
+import { loginAs } from "./helpers/authHelper";
 
 test.describe("Phase 4: Comprehensive End-to-End Browser Audit", () => {
   test.setTimeout(90000);
 
-  test.beforeEach(async ({ page }) => {
-    // Start at base URL and clear storage
-    await page.goto("http://localhost:3000", { waitUntil: "domcontentloaded" });
-    await page.evaluate(() => window.localStorage.clear());
-    await page.reload({ waitUntil: "domcontentloaded" });
-  });
-
   test("1. Admin / SVP End-to-End Navigation & Operational Modules Audit", async ({ page }) => {
     // Login as SVP
-    await page.fill("#email", "svp@birojasa.com");
-    await page.fill("#password", "admin123");
-
-    const loginResponsePromise = page.waitForResponse(
-      (response) => response.url().includes("/api/auth/login") && response.status() === 200
-    );
-    await page.click("button[type='submit']");
-    await loginResponsePromise;
+    await loginAs(page, "svp@birojasa.com", "admin123");
 
     // 1.1 Dashboard is rendered
     await expect(page.getByRole("button", { name: "Dashboard" }).first()).toBeVisible({ timeout: 15000 });
@@ -98,26 +85,16 @@ test.describe("Phase 4: Comprehensive End-to-End Browser Audit", () => {
       await page.waitForTimeout(500);
       await expect(page.locator("text=Riwayat Aktivitas").first()).toBeVisible({ timeout: 10000 });
 
-      // Verify Permanent Clear History button is visible for SVP
-      const clearBtn = page.locator("button", { hasText: "Clear Riwayat" });
-      await expect(clearBtn).toBeVisible({ timeout: 10000 });
-      await clearBtn.click();
-      await expect(page.locator("text=Hapus Permanen Riwayat Aktivitas")).toBeVisible({ timeout: 5000 });
-      await page.getByRole("button", { name: "Batal" }).click();
-      await page.waitForTimeout(300);
+      // Verify Immutable Audit Trail badge and export controls are visible for SVP
+      await expect(page.locator("text=Audit Trail Imutabel")).toBeVisible({ timeout: 10000 });
+      await expect(page.getByRole("button", { name: "CSV" })).toBeVisible({ timeout: 5000 });
+      await expect(page.getByRole("button", { name: "PDF" })).toBeVisible({ timeout: 5000 });
     }
   });
 
   test("2. Messenger Mobile / Field Workspace Audit", async ({ page }) => {
     // Login as Messenger (Budi)
-    await page.fill("#email", "budi.messenger@birojasa.com");
-    await page.fill("#password", "messenger123");
-
-    const loginResponsePromise = page.waitForResponse(
-      (response) => response.url().includes("/api/auth/login") && response.status() === 200
-    );
-    await page.click("button[type='submit']");
-    await loginResponsePromise;
+    await loginAs(page, "budi.messenger@birojasa.com", "messenger123");
 
     // Verify messenger dashboard or workspace renders
     await page.waitForTimeout(1000);

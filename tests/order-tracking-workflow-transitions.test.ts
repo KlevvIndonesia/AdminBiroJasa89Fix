@@ -11,6 +11,9 @@ import assert from "node:assert";
 import http from "node:http";
 import { createApp } from "../server/src/app";
 import { db } from "../server/src/database/db";
+import { dbPermissionRepository } from "../server/src/repositories/dbPermissionRepository";
+import { CANONICAL_PERMISSIONS } from "../server/src/config/defaultPermissions";
+import { normalizeToWibCalendarDate } from "../server/src/utils/dateNormalizer";
 
 function startTestServer(): Promise<{ server: http.Server; baseUrl: string }> {
   return new Promise((resolve) => {
@@ -41,9 +44,12 @@ test("Order Tracking Workflow - Comprehensive 8 Stages & RBAC Security Verificat
   const { server, baseUrl } = await startTestServer();
 
   try {
-    // 0. Authenticate test users (Admin and Supervisor / SVP)
+    // 0. Sync canonical sandbox permissions & authenticate test users (Admin, SVP, Messenger)
+    dbPermissionRepository.saveRole("admin", JSON.parse(JSON.stringify(CANONICAL_PERMISSIONS.admin)));
+    dbPermissionRepository.saveRole("finance", JSON.parse(JSON.stringify(CANONICAL_PERMISSIONS.finance)));
     const adminToken = await loginUser(baseUrl, "admin@birojasa.com", "admin123");
     const svpToken = await loginUser(baseUrl, "svp@birojasa.com", "admin123");
+    const courierToken = await loginUser(baseUrl, "budi.messenger@birojasa.com", "messenger123");
 
     // 1. Create a pristine test order starting at Stage 1 (Verifikasi)
     const orderNo = `ORD-TEST-${Date.now()}`;
@@ -102,6 +108,30 @@ test("Order Tracking Workflow - Comprehensive 8 Stages & RBAC Security Verificat
       "Generic PUT must reject protected fields (isVerified, currentStep, finalCost)"
     );
 
+    // Generic PUT MUST ALSO reject operational completion / forged status fields
+    const forgedPutCases: Array<[string, Record<string, any>]> = [
+      ["pickupCompleted: true", { pickupCompleted: true }],
+      ["messengerTaskStatus: Dokumen Sudah Tersedia", { messengerTaskStatus: "Dokumen Sudah Tersedia" }],
+      ["isScheduled: true without scheduling payload", { isScheduled: true }],
+      ["samsatStatus: Selesai", { samsatStatus: "Selesai" }],
+      ["samsatPickupStatus: Dokumen Samsat Diterima di Kantor", { samsatPickupStatus: "Dokumen Samsat Diterima di Kantor" }],
+      ["deliveryStatus: Dokumen Diserahkan", { deliveryStatus: "Dokumen Diserahkan" }],
+      ["isReceived: true", { isReceived: true }],
+    ];
+    for (const [label, bodyPayload] of forgedPutCases) {
+      const forgedRes = await fetch(`${baseUrl}/api/orders/${actualOrderNo}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify(bodyPayload),
+      });
+      assert.strictEqual(forgedRes.status, 403, `Generic PUT must reject ${label} with 403 PROTECTED_FIELD_VIOLATION`);
+      const forgedData = (await forgedRes.json()) as any;
+      assert.strictEqual(forgedData.error?.code, "PROTECTED_FIELD_VIOLATION");
+    }
+
     // =========================================================================
     // SECURITY GUARD: Illegal forward jump (Step 1 -> Step 4 or Step 6) must fail
     // =========================================================================
@@ -144,7 +174,7 @@ test("Order Tracking Workflow - Comprehensive 8 Stages & RBAC Security Verificat
     assert.strictEqual(forgedLifecycleRes.status, 403, "Client forged currentStep/isCancelled must be rejected");
 
     // =========================================================================
-    // TRANSITION 1 -> 2: Verifikasi -> Penjadwalan
+    // TRANSITION 1 -> 2: Verifikasi -> Penjadwalan (Assign real Courier EMP-0004)
     // =========================================================================
     const step1to2Res = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/advance`, {
       method: "POST",
@@ -157,7 +187,9 @@ test("Order Tracking Workflow - Comprehensive 8 Stages & RBAC Security Verificat
         updates: {
           isVerified: true,
           tanggalJemput: "2026-11-10",
-          messenger: "Bambang Courier",
+          messenger: "Budi Santoso",
+          assignedMessengerName: "Budi Santoso",
+          assignedMessengerId: "EMP-0004",
           catatanPenjadwalan: "Jemput di kantor customer jam 10",
         },
       }),
@@ -167,13 +199,61 @@ test("Order Tracking Workflow - Comprehensive 8 Stages & RBAC Security Verificat
     assert.strictEqual(step1to2Data.data.currentStep, 2);
     assert.strictEqual(step1to2Data.data.currentStageName, "Penjadwalan");
     assert.strictEqual(step1to2Data.data.isVerified, true);
-    assert.strictEqual(step1to2Data.data.messenger, "Bambang Courier");
+    assert.strictEqual(step1to2Data.data.messenger, "Budi Santoso");
+
+    // Legitimate Admin PUT scheduling update (with date & messenger) MUST remain allowed
+    const legitPutScheduleRes = await fetch(`${baseUrl}/api/orders/${actualOrderNo}`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({
+        isScheduled: true,
+        messengerTaskStatus: "Terjadwal Jemput",
+        tanggalJemput: "2026-11-10",
+        assignedMessengerId: "EMP-0004",
+        assignedMessengerName: "Budi Santoso",
+      }),
+    });
+    assert.strictEqual(legitPutScheduleRes.status, 200, "Legitimate Admin PUT scheduling must remain allowed");
 
     // =========================================================================
     // TRANSITION 2 -> 3: Penjadwalan -> Verifikasi Dokumen
-    // Prerequisite: pickupCompleted required!
+    // Prerequisite: DB pickupCompleted required; client forged updates.pickupCompleted MUST NOT bypass!
     // =========================================================================
-    const step2to3NoPickupRes = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/advance`, {
+    const step2to3ForgedRes = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/advance`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({
+        targetStage: "Verifikasi Dokumen",
+        updates: { pickupCompleted: true, messengerTaskStatus: "Dokumen Sudah Tersedia" },
+      }),
+    });
+    assert.strictEqual(step2to3ForgedRes.status, 400, "Step 2 -> 3 with forged client pickupCompleted without DB completion must be rejected");
+    const step2to3ForgedData = (await step2to3ForgedRes.json()) as any;
+    assert.strictEqual(step2to3ForgedData.error.code, "PREREQUISITE_NOT_MET");
+
+    // Execute real courier pickup flow: start -> complete
+    const pickupStartRes = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/pickup/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${courierToken}` },
+      body: JSON.stringify({}),
+    });
+    assert.strictEqual(pickupStartRes.status, 200, "Courier start pickup must succeed");
+
+    const pickupCompleteRes = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/pickup/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${courierToken}` },
+      body: JSON.stringify({ pickupChecklist: { stnkAsli: true, bpkbAsli: true, ktpAsli: true } }),
+    });
+    assert.strictEqual(pickupCompleteRes.status, 200, "Courier complete pickup must succeed");
+
+    // Advance Step 2 -> 3 now that DB confirms pickupCompleted
+    const step2to3Res = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/advance`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -184,26 +264,7 @@ test("Order Tracking Workflow - Comprehensive 8 Stages & RBAC Security Verificat
         updates: {},
       }),
     });
-    assert.strictEqual(step2to3NoPickupRes.status, 400, "Step 2 -> 3 without pickup must be rejected");
-    const step2to3NoPickupData = (await step2to3NoPickupRes.json()) as any;
-    assert.strictEqual(step2to3NoPickupData.error.code, "PREREQUISITE_NOT_MET");
-
-    // Advance Step 2 -> 3 with pickupCompleted: true
-    const step2to3Res = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/advance`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${adminToken}`,
-      },
-      body: JSON.stringify({
-        targetStage: "Verifikasi Dokumen",
-        updates: {
-          pickupCompleted: true,
-          messengerTaskStatus: "Dokumen Sudah Tersedia",
-        },
-      }),
-    });
-    assert.strictEqual(step2to3Res.status, 200, "Advance Step 2 -> 3 with pickup completed must succeed");
+    assert.strictEqual(step2to3Res.status, 200, "Advance Step 2 -> 3 after real DB pickup completion must succeed");
     const step2to3Data = (await step2to3Res.json()) as any;
     assert.strictEqual(step2to3Data.data.currentStep, 3);
     assert.strictEqual(step2to3Data.data.currentStageName, "Verifikasi Dokumen");
@@ -235,7 +296,12 @@ test("Order Tracking Workflow - Comprehensive 8 Stages & RBAC Security Verificat
         targetStage: "Proses Samsat",
         updates: {
           documentsVerified: true,
-          samsatStatus: "Belum Terjadwal",
+          samsatMessengerId: "EMP-0004",
+          samsatMessengerName: "Budi Santoso",
+          samsatProcesses: [
+            { id: "comp-1", name: "Pendaftaran Samsat", status: "COMPLETED" },
+            { id: "comp-2", name: "Kasir Pembayaran", status: "COMPLETED" },
+          ],
         },
       }),
     });
@@ -246,8 +312,9 @@ test("Order Tracking Workflow - Comprehensive 8 Stages & RBAC Security Verificat
 
     // =========================================================================
     // TRANSITION 4 -> 5: Proses Samsat -> Verifikasi Ulang
+    // Must enforce DB Samsat completion + Jemput Hasil Samsat (reject forged flags!)
     // =========================================================================
-    const step4to5Res = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/advance`, {
+    const step4to5ForgedRes = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/advance`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -261,7 +328,62 @@ test("Order Tracking Workflow - Comprehensive 8 Stages & RBAC Security Verificat
         },
       }),
     });
-    assert.strictEqual(step4to5Res.status, 200, "Advance Step 4 -> 5 must succeed");
+    assert.strictEqual(step4to5ForgedRes.status, 400, "Forged client samsatStatus/samsatPickupStatus without DB completion must be rejected (400)");
+
+    // Complete Samsat + Schedule & Complete Jemput Hasil Samsat via real endpoints
+    const samsatCompRes = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/samsat/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${courierToken}` },
+      body: JSON.stringify({
+        components: [
+          { id: "comp-1", name: "Pendaftaran Samsat", status: "COMPLETED", isCompleted: true },
+          { id: "comp-2", name: "Kasir Pembayaran", status: "COMPLETED", isCompleted: true },
+        ],
+      }),
+    });
+    assert.strictEqual(samsatCompRes.status, 200, "Samsat complete must succeed");
+
+    // Still cannot advance Stage 4 -> 5 BEFORE Jemput Hasil Samsat finishes!
+    const step4to5BeforePickupRes = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/advance`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ targetStage: "Verifikasi Ulang", updates: {} }),
+    });
+    assert.strictEqual(step4to5BeforePickupRes.status, 400, "Stage 4 -> 5 must require Jemput Hasil Samsat completion in DB");
+
+    // Schedule, accept & complete Jemput Hasil Samsat
+    const schedJemputRes = await fetch(`${baseUrl}/api/orders/${actualOrderNo}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({
+        samsatPickupStatus: "Terjadwal Jemput Samsat",
+        samsatPickupDate: "2026-11-11",
+        samsatPickupMessenger: "Budi Santoso",
+        samsatPickupMessengerId: "EMP-0004",
+      }),
+    });
+    assert.strictEqual(schedJemputRes.status, 200);
+
+    const accJemputRes = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/tasks/${encodeURIComponent("Jemput Hasil Samsat")}/accept`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${courierToken}` },
+      body: JSON.stringify({}),
+    });
+    assert.strictEqual(accJemputRes.status, 200);
+
+    const compJemputRes = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/samsat-pickup/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${courierToken}` },
+      body: JSON.stringify({}),
+    });
+    assert.strictEqual(compJemputRes.status, 200);
+
+    const step4to5Res = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/advance`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ targetStage: "Verifikasi Ulang", updates: {} }),
+    });
+    assert.strictEqual(step4to5Res.status, 200, "Advance Step 4 -> 5 after real DB Samsat + pickup must succeed");
     const step4to5Data = (await step4to5Res.json()) as any;
     assert.strictEqual(step4to5Data.data.currentStep, 5);
     assert.strictEqual(step4to5Data.data.currentStageName, "Verifikasi Ulang");
@@ -269,7 +391,6 @@ test("Order Tracking Workflow - Comprehensive 8 Stages & RBAC Security Verificat
     // =========================================================================
     // TRANSITION 5 -> 6: Verifikasi Ulang -> Supervisi
     // Prerequisite: documentApproval.stage5Verified or documentsVerified
-    // Also tests financial reconciliation sync to finance_invoices!
     // =========================================================================
     const step5to6Res = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/advance`, {
       method: "POST",
@@ -300,26 +421,22 @@ test("Order Tracking Workflow - Comprehensive 8 Stages & RBAC Security Verificat
 
     // =========================================================================
     // TRANSITION 6 -> 7: Supervisi -> Pengantaran
-    // RBAC Security Guard: Standard Admin MUST be rejected with HTTP 403 FORBIDDEN!
+    // Final Policy: Stage 6 (Supervisi) is STRICTLY SVP-ONLY!
+    // Admin MUST receive 403 FORBIDDEN on Stage 6; SVP succeeds with 200.
     // =========================================================================
-    const step6to7AdminRes = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/advance`, {
+    const adminStage6Res = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/advance`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${adminToken}`,
       },
-      body: JSON.stringify({
-        targetStage: "Pengantaran",
-        updates: {
-          approvedBySpv: true,
-        },
-      }),
+      body: JSON.stringify({ targetStage: "Pengantaran", updates: { approvedBySpv: true } }),
     });
-    assert.strictEqual(step6to7AdminRes.status, 403, "Non-supervisor user must be rejected at Stage 6");
-    const step6to7AdminData = (await step6to7AdminRes.json()) as any;
-    assert.strictEqual(step6to7AdminData.error.code, "FORBIDDEN");
+    assert.strictEqual(adminStage6Res.status, 403, "Admin must receive 403 at Stage 6 Supervisi (SVP-only)");
+    const adminStage6Data = (await adminStage6Res.json()) as any;
+    assert.strictEqual(adminStage6Data.error.code, "FORBIDDEN");
 
-    // Supervisor / SVP advancing Stage 6 -> Stage 7 succeeds!
+    // SVP approves Stage 6 Supervisi & advances Stage 6 -> Stage 7
     const step6to7SvpRes = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/advance`, {
       method: "POST",
       headers: {
@@ -331,21 +448,24 @@ test("Order Tracking Workflow - Comprehensive 8 Stages & RBAC Security Verificat
         updates: {
           approvedBySpv: true,
           tanggalPengantaran: "2026-11-12",
-          messengerPengantar: "Agus Kurir",
+          messengerPengantar: "Budi Santoso",
+          deliveryMessengerId: "EMP-0004",
+          deliveryMessengerName: "Budi Santoso",
         },
       }),
     });
-    assert.strictEqual(step6to7SvpRes.status, 200, "Supervisor advancing Step 6 -> 7 must succeed");
-    const step6to7SvpData = (await step6to7SvpRes.json()) as any;
-    assert.strictEqual(step6to7SvpData.data.currentStep, 7);
-    assert.strictEqual(step6to7SvpData.data.currentStageName, "Pengantaran");
-    assert.strictEqual(step6to7SvpData.data.approvedBySpv, true);
-    assert.ok(step6to7SvpData.data.spvApprovedAt, "spvApprovedAt must be populated by server");
+    assert.strictEqual(step6to7SvpRes.status, 200, "SVP advancing Step 6 -> 7 must succeed");
+    const step6to7Data = (await step6to7SvpRes.json()) as any;
+    assert.strictEqual(step6to7Data.data.currentStep, 7);
+    assert.strictEqual(step6to7Data.data.currentStageName, "Pengantaran");
+    assert.strictEqual(step6to7Data.data.approvedBySpv, true);
+    assert.ok(step6to7Data.data.spvApprovedAt, "spvApprovedAt must be populated by server");
 
     // =========================================================================
     // TRANSITION 7 -> 8: Pengantaran -> Dokumen Telah Diterima
+    // Forged updates.isReceived without DB delivery completion MUST fail with 400!
     // =========================================================================
-    const step7to8Res = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/advance`, {
+    const step7to8ForgedRes = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/advance`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -354,17 +474,46 @@ test("Order Tracking Workflow - Comprehensive 8 Stages & RBAC Security Verificat
       body: JSON.stringify({
         targetStage: "Dokumen Telah Diterima",
         updates: {
-          tanggalDiterima: "2026-11-12",
           isReceived: true,
+          deliveryStatus: "Dokumen Diserahkan",
           receiverName: "Budi Customer",
         },
       }),
     });
-    assert.strictEqual(step7to8Res.status, 200, "Advance Step 7 -> 8 must succeed");
+    assert.strictEqual(step7to8ForgedRes.status, 400, "Forged updates.isReceived without DB delivery completion must fail (400)");
+
+    // Complete delivery via real /delivery/complete endpoint (Admin/Courier/SVP supported)
+    const completeDeliveryRes = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/delivery/complete`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({
+        receiverName: "Budi Customer",
+      }),
+    });
+    assert.strictEqual(completeDeliveryRes.status, 200, "Completing delivery via /delivery/complete must succeed");
+
+    const step7to8Res = await fetch(`${baseUrl}/api/orders/${actualOrderNo}/advance`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({
+        targetStage: "Dokumen Telah Diterima",
+        updates: {},
+      }),
+    });
+    assert.strictEqual(step7to8Res.status, 200, "Advance Step 7 -> 8 after DB delivery completion must succeed");
     const step7to8Data = (await step7to8Res.json()) as any;
     assert.strictEqual(step7to8Data.data.currentStep, 8);
     assert.strictEqual(step7to8Data.data.currentStageName, "Dokumen Telah Diterima");
     assert.strictEqual(step7to8Data.data.isReceived, true);
+
+    // WIB date consistency assertion: utc-midnight edge normalizes cleanly to Asia/Jakarta calendar date
+    assert.strictEqual(normalizeToWibCalendarDate("2026-11-10T20:30:00.000Z"), "2026-11-11", "Late UTC converts to next WIB date");
 
     // =========================================================================
     // FINAL ARCHIVING: Stage 8 -> Arsip via POST /orders/:orderNo/archive
@@ -440,7 +589,8 @@ test("Order Tracking Workflow - Comprehensive 8 Stages & RBAC Security Verificat
     const switchOrderNo = switchOrderData.data.orderNo;
     assert.strictEqual(switchOrderData.data.currentStep, 1);
 
-    const switchAdvanceRes = await fetch(`${baseUrl}/api/orders/${switchOrderNo}/advance`, {
+    // Forging updates.metodeLayanan = 'Datang Langsung' during /advance on an 'Antar Jemput' DB order MUST be rejected (400)
+    const forgedSwitchRes = await fetch(`${baseUrl}/api/orders/${switchOrderNo}/advance`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -455,7 +605,33 @@ test("Order Tracking Workflow - Comprehensive 8 Stages & RBAC Security Verificat
         },
       }),
     });
-    assert.strictEqual(switchAdvanceRes.status, 200, "Switching to Datang Langsung advancing 1 -> 3 must succeed");
+    assert.strictEqual(forgedSwitchRes.status, 400, "Client forged updates.metodeLayanan in /advance must NOT bypass Stage 2");
+
+    // Legitimately update metodeLayanan in DB via PUT, then Stage 1 -> 3 succeeds
+    const putSwitchRes = await fetch(`${baseUrl}/api/orders/${switchOrderNo}`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({ metodeLayanan: "Datang Langsung" }),
+    });
+    assert.strictEqual(putSwitchRes.status, 200);
+
+    const switchAdvanceRes = await fetch(`${baseUrl}/api/orders/${switchOrderNo}/advance`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({
+        targetStage: "Verifikasi Dokumen",
+        updates: {
+          isVerified: true,
+        },
+      }),
+    });
+    assert.strictEqual(switchAdvanceRes.status, 200, "Advancing 1 -> 3 after DB record confirms Datang Langsung must succeed");
     const switchData = (await switchAdvanceRes.json()) as any;
     assert.strictEqual(switchData.data.currentStep, 3);
     assert.strictEqual(switchData.data.currentStageName, "Verifikasi Dokumen");

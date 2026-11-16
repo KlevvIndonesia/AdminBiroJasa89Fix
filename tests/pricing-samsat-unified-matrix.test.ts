@@ -1,12 +1,51 @@
 import test from "node:test";
 import assert from "node:assert";
+import http from "node:http";
 import { DatabaseSync } from "node:sqlite";
+import { createApp } from "../server/src/app";
+import { getDb } from "../server/src/database/db";
 import { initializeSchema, cleanupLegacyStandardPricingItems } from "../server/src/database/schema";
 import { pricingStore, MASTER_PRICING_ITEMS } from "../src/app/data/pricingStore";
+import { pricingRepository } from "../src/data/repositories/pricingRepository";
+import { ApiPricingProvider } from "../src/data/api/apiPricingProvider";
+
+function startTestServer(): Promise<{ server: http.Server; baseUrl: string }> {
+  return new Promise((resolve) => {
+    const app = createApp();
+    const server = http.createServer(app);
+    server.listen(0, () => {
+      const addr = server.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      resolve({ server, baseUrl: `http://localhost:${port}` });
+    });
+  });
+}
+
+async function loginAsSvp(baseUrl: string): Promise<string> {
+  const res = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "svp@birojasa.com", password: "admin123" }),
+  });
+  assert.strictEqual(res.status, 200);
+  const body = (await res.json()) as any;
+  return body.data.token;
+}
 
 test("Unified Matrix & Standard Cleanup Test Suite", async (t) => {
   const memDb = new DatabaseSync(":memory:");
   memDb.exec("PRAGMA foreign_keys = ON;");
+
+  const { server, baseUrl } = await startTestServer();
+  const prevToken = process.env.AUTH_TOKEN;
+  const isoDb = getDb();
+
+  try {
+    process.env.AUTH_TOKEN = await loginAsSvp(baseUrl);
+    const apiPricing = new ApiPricingProvider(`${baseUrl}/api`);
+    await apiPricing.initFromApi();
+    pricingRepository.setProvider(apiPricing);
+    await pricingStore.initFromApi();
 
   await t.test("1. Schema Initialization & Cleanup of 5 Legacy Standard Items", () => {
     initializeSchema(memDb);
@@ -61,16 +100,22 @@ test("Unified Matrix & Standard Cleanup Test Suite", async (t) => {
   });
 
   await t.test("2. Setting Override on Single Samsat Fixes Legacy Bug (No Master Mutation)", async () => {
-    // Insert mock samsat offices
+    // Insert mock samsat offices in both in-memory test DB and isolated SQLite DB (for FK compliance)
     memDb.prepare(`
       INSERT OR IGNORE INTO samsat_offices (id, name, wilayah, is_verified, status_aktif)
       VALUES 
         ('samsat-jaktim', 'Samsat Jakarta Timur', 'Jakarta Timur', 1, 1),
         ('samsat-jakbar', 'Samsat Jakarta Barat', 'Jakarta Barat', 1, 1)
     `).run();
+    isoDb.prepare(`
+      INSERT OR IGNORE INTO samsat_offices (id, name, wilayah, is_verified, status_aktif)
+      VALUES 
+        ('samsat-jaktim', 'Samsat Jakarta Timur', 'Jakarta Timur', 1, 1),
+        ('samsat-jakbar', 'Samsat Jakarta Barat', 'Jakarta Barat', 1, 1)
+    `).run();
 
-    // Get national default price for mutasi-legalisir
-    const defaultItem = memDb.prepare("SELECT biaya_dasar FROM samsat_pricing WHERE id = 'mutasi-legalisir'").get() as { biaya_dasar: number };
+    // Get national default price for mutasi-legalisir from seeded isolated SQLite DB
+    const defaultItem = isoDb.prepare("SELECT biaya_dasar FROM samsat_pricing WHERE id = 'mutasi-legalisir'").get() as { biaya_dasar: number };
     const defaultPrice = defaultItem.biaya_dasar;
     assert.ok(defaultPrice > 0, "Default price should be > 0");
 
@@ -146,4 +191,9 @@ test("Unified Matrix & Standard Cleanup Test Suite", async (t) => {
     // Jakarta Barat updates to 65000
     assert.strictEqual(pricingStore.getSamsatPrice("samsat-jakbar", "mutasi-bantuan"), 65000, "Default office updates to 65000");
   });
+  } finally {
+    process.env.AUTH_TOKEN = prevToken;
+    pricingRepository.setProvider(new ApiPricingProvider());
+    server.close();
+  }
 });

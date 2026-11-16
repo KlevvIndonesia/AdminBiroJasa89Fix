@@ -25,7 +25,6 @@ import assert from "node:assert";
 import http from "node:http";
 import { createApp } from "../server/src/app";
 import { ApiOrderProvider } from "../src/data/api/apiOrderProvider";
-import { MockOrderProvider } from "./fixtures/mock/mockOrderProvider";
 import { orderRepository } from "../src/data/repositories/orderRepository";
 import { orderStore } from "../src/app/data/orderStore";
 import { financeStore } from "../src/app/data/financeStore";
@@ -64,7 +63,6 @@ test("Phase 9.4 Integration — 1. Real API Persistence & Canonical Identity Rec
     await apiProvider.initFromApi();
 
     orderRepository.setProvider(apiProvider);
-    financeStore.setApiMode(true);
 
     const uniqueTag = Date.now();
     const createdOrder = await orderStore.addOrderAsync({
@@ -126,7 +124,6 @@ test("Phase 9.4 Integration — 2. Anti-Ghost Row Protection on API Creation Fai
     await apiProvider.initFromApi();
 
     orderRepository.setProvider(apiProvider);
-    financeStore.setApiMode(true);
 
     const preActiveCount = apiProvider.getAllFlat().length;
     const preInvoiceCount = financeStore.getInvoices().length;
@@ -166,7 +163,6 @@ test("Phase 9.4 Integration — 3. Concurrent Request Isolation & Unique Canonic
     await apiProvider.initFromApi();
 
     orderRepository.setProvider(apiProvider);
-    financeStore.setApiMode(true);
 
     const ts = Date.now();
     // Fire two different orders concurrently
@@ -220,7 +216,6 @@ test("Phase 9.4 Integration — 4. Idempotency & Retry Safety After Timeout", as
     await apiProvider.initFromApi();
 
     orderRepository.setProvider(apiProvider);
-    financeStore.setApiMode(true);
 
     const clientRequestId = `REQ-IDEMPOTENT-${Date.now()}`;
     const orderPayload = {
@@ -269,35 +264,51 @@ test("Phase 9.4 Integration — 4. Idempotency & Retry Safety After Timeout", as
   }
 });
 
-test("Phase 9.4 Integration — 5. Provider Routing Integrity (Buat Order, +Tambah Data, and Mock)", async (t) => {
-  // Test A: In Mock mode, newly added order uses MockOrderProvider
-  const mockProvider = new MockOrderProvider();
-  orderRepository.setProvider(mockProvider);
-  financeStore.setApiMode(false);
+test("Phase 9.4 Integration — 5. Provider Routing Integrity (Buat Order and +Tambah Data via SQLite API)", async (t) => {
+  const { server, baseUrl } = await createServerInstance();
+  const prevToken = process.env.AUTH_TOKEN;
+  try {
+    const token = await getAdminToken(baseUrl);
+    process.env.AUTH_TOKEN = token;
+    const apiProvider = new ApiOrderProvider(`${baseUrl}/api`);
+    (apiProvider as any).getAuthHeader = () => ({ Authorization: `Bearer ${token}` });
+    await apiProvider.initFromApi();
+    orderRepository.setProvider(apiProvider);
 
-  const mockOrder = orderStore.addOrder({
-    customer: "Mock Route Customer",
-    namaPemilik: "Mock Owner",
-    nomorHP: "081200001111",
-    layanan: "Balik Nama (BBN)",
-    nopol: "B 9999 MCK",
-  });
-  assert.ok(mockOrder.orderNo);
-  const foundInMock = mockProvider.getOrderByNo(mockOrder.orderNo);
-  assert.ok(foundInMock, "In Mock mode, order must be handled strictly by MockOrderProvider");
+    // Test A: Buat Order routes through SQLite ApiOrderProvider
+    const createdOrder = await orderStore.addOrderAsync({
+      customer: "SQLite Route Customer",
+      namaPemilik: "SQLite Owner",
+      nomorHP: "081200001111",
+      layanan: "Balik Nama (BBN)",
+      nopol: "B 9999 SQL",
+      totalEstimasi: 800000,
+    });
+    assert.ok(createdOrder.orderNo);
+    const foundInRepo = orderRepository.getByOrderNo(createdOrder.orderNo);
+    assert.ok(foundInRepo, "Order must be present in ApiOrderProvider cache");
+    assert.ok(dbOrderRepository.getByOrderNo(createdOrder.orderNo), "Order must persist in SQLite");
 
-  // Test B: +Tambah Data routing
-  const contractAdded = financeStore.addContractData("bbn", [
-    {
-      "Nama Customer": "Contract Add Customer",
-      "Nomor HP": "081234567890",
-      "Plat No": "B 8888 CTD",
-      "Jenis Pengurusan": "Balik Nama",
-      "Uang Masuk dari Konsumen": 700000,
-    },
-  ]);
-  assert.ok(contractAdded, "+Tambah Data must successfully invoke canonical order creator");
-  const bbnRows = financeStore.getContractData("bbn");
-  const foundContractOrder = bbnRows.find((r) => r["Plat No"] === "B 8888 CTD");
-  assert.ok(foundContractOrder, "+Tambah Data row must appear in BBN category");
+    // Test B: +Tambah Data async routing through canonical order creator to SQLite
+    const contractResult = await financeStore.addContractDataAsync("bbn", [
+      {
+        "Nama Customer": "Contract Add Customer",
+        "Nomor HP": "081234567890",
+        "Plat No": "B 8888 CTD",
+        "Jenis Pengurusan": "Balik Nama",
+        "Uang Masuk dari Konsumen": 700000,
+      },
+    ]);
+    assert.strictEqual(contractResult.success, true, "+Tambah Data must succeed through canonical API creator");
+    const bbnRows = financeStore.getContractData("bbn");
+    const foundContractOrder = bbnRows.find((r) => r["Plat No"] === "B 8888 CTD");
+    assert.ok(foundContractOrder, "+Tambah Data row must appear in BBN category");
+    assert.ok(
+      dbOrderRepository.getAllFlat(false).some((o) => o.nopol === "B 8888 CTD"),
+      "+Tambah Data row must persist as canonical order in SQLite"
+    );
+  } finally {
+    process.env.AUTH_TOKEN = prevToken;
+    server.close();
+  }
 });

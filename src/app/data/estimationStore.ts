@@ -1,9 +1,9 @@
 /**
  * Estimation Template Store & Persistence
  * Admin SUN89 — Biro Jasa Management System
- * 
+ *
  * Provides reactive state management, persistent SQLite/Express API synchronization,
- * and localStorage fallback for estimation templates and component configurations.
+ * awaited HTTP persistence with rollback on failure, and atomic per-template updates.
  */
 
 import { useState, useEffect } from "react";
@@ -26,124 +26,27 @@ import {
   DEFAULT_R2_MUTASI_LD_TEMPLATE,
 } from "../../domain/estimation/defaultTemplates";
 import { calculateEstimation, defaultRuleRegistry } from "../../domain/estimation/estimationEngine";
-import { getStandardJasa } from "../../domain/pricing/pricingResolver";
+import {
+  resolveTemplateIdByService,
+  sanitizeComponentDescription,
+  sanitizeEstimationTemplate,
+} from "../../domain/estimation/templateSanitizer";
 import { auditLog } from "../utils/auditLog";
 import { APP_CONFIG } from "../config/appConfig";
+import { permissionStore } from "./permissionStore";
 
-const STORAGE_KEY = "sun89_estimation_templates_v5";
-const LEGACY_STORAGE_KEYS = [
-  "sun89_estimation_templates_v4",
-  "sun89_estimation_templates_v3",
-  "sun89_estimation_templates_v2",
-  "sun89_estimation_templates",
-];
+export {
+  resolveTemplateIdByService,
+  sanitizeComponentDescription,
+  sanitizeEstimationTemplate,
+};
 
-/**
- * Clean sanitization for formula & component descriptions.
- * Eliminates all Excel cell references (e.g. Cell C15, (Cell F15)), Sheet names,
- * and converts raw ROUNDUP expressions into clean, professional Indonesian descriptions.
- */
-export function sanitizeComponentDescription(desc: string | undefined): string {
-  if (!desc) return "";
-  let s = desc;
-
-  // 1. Remove Excel cell references and sheet references
-  // e.g., (Cell C15), (Cell F15), (Sheet 5), Cell C15, Sheet 5, etc.
-  s = s.replace(/\s*\((?:Cell|Sheet)\s*[^)]+\)/gi, "");
-  s = s.replace(/\b(?:Cell|Sheet)\s+[A-Z0-9/]+/gi, "");
-  s = s.replace(/\s*\(\s*\)/g, ""); // Remove empty parentheses if left
-
-  // 2. Transform raw ROUNDUP formulas into friendly Indonesian text
-  // e.g. ROUNDUP(PKB Tertunggak × Koefisien Denda, -3)
-  // e.g. ROUNDUP(PKB Dasar × Koefisien Denda / 12 × Bulan Tunggakan, -3)
-  s = s.replace(/ROUNDUP\s*\(([^,;]+)[,;]\s*-?3?\s*\)/gi, "$1, dibulatkan ke kelipatan Rp 1.000");
-
-  // 3. Fix division symbol / with ÷ for consistent formatting
-  s = s.replace(/\s*\/\s*12\s*[\*×]/g, " ÷ 12 × ");
-
-  // 4. Transform specific technical formula descriptions into standard friendly text
-  const trimmed = s.trim();
-
-  if (/PKB Tertunggak\s*[×x*]\s*Koefisien Denda/i.test(trimmed)) {
-    return "PKB Tertunggak × Koefisien Denda, dibulatkan ke kelipatan Rp 1.000";
-  }
-  if (/PKB Dasar\s*[×x*]\s*Koefisien Denda.*Bulan Tunggakan/i.test(trimmed)) {
-    return "PKB Dasar × Koefisien Denda ÷ 12 × Bulan Tunggakan, dibulatkan ke kelipatan Rp 1.000";
-  }
-  if (/^PKB Dasar$/i.test(trimmed) || /^PKB Dasar\s*\(1 Tahun Berjalan\)$/i.test(trimmed)) {
-    return "PKB Dasar";
-  }
-  if (/^PKB Dasar\s*[×x*]\s*Tahun Tunggakan$/i.test(trimmed)) {
-    return "PKB Dasar × Tahun Tunggakan";
-  }
-  if (/^SWDKLLJ Pokok Tahunan.*$/i.test(trimmed)) {
-    return "SWDKLLJ Pokok Tahunan";
-  }
-  if (/^SWDKLLJ Pokok.*[×x*]\s*Tahun Tunggakan/i.test(trimmed)) {
-    return "SWDKLLJ Pokok × Tahun Tunggakan";
-  }
-  if (/^(?:Rp\s*[\d.]+\s*[×x*]\s*Tahun Tunggakan|Denda SWDKLLJ.*Tahun Tunggakan)/i.test(trimmed)) {
-    return "Denda SWDKLLJ berdasarkan Tahun Tunggakan";
-  }
-  if (/^(?:Rp\s*[\d.]+\s*jika Bulan Tunggakan|Denda SWDKLLJ.*Bulan Tunggakan)/i.test(trimmed)) {
-    return "Denda SWDKLLJ berdasarkan Bulan Tunggakan";
-  }
-  if (/^Rp\s*[\d.]+\s*jika terdapat keterlambatan/i.test(trimmed) || /^Biaya cetak SKP jika terdapat keterlambatan/i.test(trimmed)) {
-    return "Biaya cetak SKP jika terdapat keterlambatan";
-  }
-
-  return trimmed;
-}
-
-/**
- * Recursively sanitizes an EstimationTemplateConfig to ensure all component descriptions,
- * formula conditions, and human formulas are free from Excel cell references and synchronized
- * with the canonical pricing Single Source of Truth (Biaya Layanan).
- */
-export function sanitizeEstimationTemplate(tpl: EstimationTemplateConfig): EstimationTemplateConfig {
-  if (!tpl) return tpl;
-  const canonicalService = tpl.serviceType === "Mutasi Luar Daerah"
-    ? "Mutasi Luar Daerah"
-    : tpl.serviceType === "Mutasi Antar Samsat"
-    ? "Mutasi Antar Samsat"
-    : tpl.serviceType === "Balik Nama"
-    ? "Balik Nama"
-    : tpl.serviceType === "Tahunan"
-    ? "Perpanjangan 1 Tahun"
-    : tpl.serviceType === "5 Tahunan"
-    ? "Perpanjangan 5 Tahun"
-    : tpl.serviceType;
-
-  const vehicle: "Mobil" | "Motor" = tpl.vehicleType === "Motor" ? "Motor" : "Mobil";
-  const standardJasa = getStandardJasa(canonicalService, vehicle);
-
-  let effectiveBiayaJasa = tpl.biayaJasa;
-  if (tpl.serviceType === "Mutasi Luar Daerah") {
-    effectiveBiayaJasa = vehicle === "Mobil" ? 1500000 : 500000;
-  }
-
-  return {
-    ...tpl,
-    biayaJasa: effectiveBiayaJasa,
-    components: (tpl.components || []).map((comp) => {
-      const isJasaComp = comp.category === "JASA" || comp.ruleId === "PROSES_DAN_JASA_MUTASI" || comp.ruleId === "JASA" || comp.code === "FEE-01" || comp.id === "proses-dan-jasa";
-      if (isJasaComp && tpl.serviceType === "Mutasi Luar Daerah") {
-        return {
-          ...comp,
-          defaultValue: vehicle === "Mobil" ? 1500000 : 500000,
-          description: `Biaya Proses dan Jasa Mutasi LD ${vehicle === "Mobil" ? "Mobil Rp 1.500.000" : "Motor Rp 500.000"}`,
-          formulaCondition: comp.formulaCondition ? sanitizeComponentDescription(comp.formulaCondition) : undefined,
-          humanFormula: comp.humanFormula ? sanitizeComponentDescription(comp.humanFormula) : undefined,
-        };
-      }
-      return {
-        ...comp,
-        description: sanitizeComponentDescription(comp.description),
-        formulaCondition: comp.formulaCondition ? sanitizeComponentDescription(comp.formulaCondition) : undefined,
-        humanFormula: comp.humanFormula ? sanitizeComponentDescription(comp.humanFormula) : undefined,
-      };
-    }),
-  };
+export interface EstimationSaveResult {
+  success: boolean;
+  template?: EstimationTemplateConfig;
+  templates?: EstimationTemplateConfig[];
+  error?: string;
+  statusCode?: number;
 }
 
 export const ALL_DEFAULT_TEMPLATES: EstimationTemplateConfig[] = [
@@ -159,24 +62,72 @@ export const ALL_DEFAULT_TEMPLATES: EstimationTemplateConfig[] = [
   DEFAULT_R2_MUTASI_LD_TEMPLATE,
 ].map(sanitizeEstimationTemplate);
 
+function cloneTemplate(tpl: EstimationTemplateConfig): EstimationTemplateConfig {
+  return {
+    ...tpl,
+    components: Array.isArray(tpl.components) ? tpl.components.map((c) => ({ ...c })) : [],
+    accIdRates: tpl.accIdRates ? { ...tpl.accIdRates } : {},
+  };
+}
+
 class EstimationStore {
   private templates: Map<string, EstimationTemplateConfig> = new Map();
   private listeners: Set<() => void> = new Set();
-  private isLoadedFromStorage = false;
+  private isLoadingState = false;
+  private isSavingState = false;
+  private lastError: string | null = null;
+  private isDataStale = false;
   private baseUrl: string;
+  private hasSyncedBackend = false;
+  private lastFetchedAuthKey: string | null = null;
+  private activeFetchPromise: Promise<void> | null = null;
+  private writeQueues: Map<string, Promise<void>> = new Map();
+  private pendingWriteCount = 0;
+  private writeSeq: Map<string, number> = new Map();
+  private permissionUnsubscribe: (() => void) | null = null;
 
   constructor(baseUrl = APP_CONFIG.apiBaseUrl) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
-    for (const tpl of ALL_DEFAULT_TEMPLATES) {
-      const sanitized = sanitizeEstimationTemplate(tpl);
-      this.templates.set(sanitized.id, {
-        ...sanitized,
-        components: sanitized.components.map((c) => ({ ...c })),
-        accIdRates: { ...sanitized.accIdRates },
-      });
+    this.seedDefaultsInMemory();
+
+    this.permissionUnsubscribe = permissionStore.subscribe(() => {
+      const authStatus = permissionStore.getSessionAuthStatus();
+      if (authStatus === "unauthenticated" || authStatus === "forbidden") {
+        this.hasSyncedBackend = false;
+        this.lastFetchedAuthKey = null;
+        return;
+      }
+      if (authStatus === "authenticated" && typeof window !== "undefined" && this.canFetchFromApi()) {
+        const key = `${this.getAuthHeader().Authorization || ""}::${permissionStore.getSessionRole() || ""}`;
+        if (!this.hasSyncedBackend || this.lastFetchedAuthKey !== key) {
+          void this.initFromBackend();
+        }
+      }
+    });
+    if (typeof window !== "undefined" && this.canFetchFromApi()) {
+      void this.initFromBackend();
     }
-    this.loadFromStorage();
-    this.initFromBackend();
+  }
+
+  private seedDefaultsInMemory(): void {
+    this.templates.clear();
+    for (const tpl of ALL_DEFAULT_TEMPLATES) {
+      const sanitized = sanitizeEstimationTemplate(cloneTemplate(tpl));
+      this.templates.set(sanitized.id, sanitized);
+    }
+  }
+
+  public setBaseUrl(url: string): void {
+    this.baseUrl = (url || APP_CONFIG.apiBaseUrl).replace(/\/$/, "");
+  }
+
+  public resetLocalToCanonicalDefaultsForTest(): void {
+    this.seedDefaultsInMemory();
+    this.hasSyncedBackend = false;
+    this.lastFetchedAuthKey = null;
+    this.lastError = null;
+    this.isDataStale = false;
+    this.notify();
   }
 
   private getAuthHeader(): Record<string, string> {
@@ -196,104 +147,248 @@ class EstimationStore {
     return {};
   }
 
-  public async initFromBackend(): Promise<void> {
-    if (typeof window === "undefined" && typeof fetch === "undefined") return;
-    try {
-      const res = await fetch(`${this.baseUrl}/estimation/templates`, {
-        headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
-      });
-      if (res.ok) {
+  private hasAuthToken(): boolean {
+    return Boolean(this.getAuthHeader().Authorization);
+  }
+
+  private canPersistRemote(): boolean {
+    return typeof fetch !== "undefined" && (typeof window !== "undefined" || this.hasAuthToken());
+  }
+
+  public isLoading(): boolean {
+    return this.isLoadingState;
+  }
+
+  public isSaving(): boolean {
+    return this.isSavingState;
+  }
+
+  public getError(): string | null {
+    return this.lastError;
+  }
+
+  public isStale(): boolean {
+    return this.isDataStale;
+  }
+
+  public clearError(): void {
+    this.lastError = null;
+    this.notify();
+  }
+
+  private canFetchFromApi(): boolean {
+    if (!this.hasAuthToken()) return false;
+    return permissionStore.getSessionAuthStatus() === "authenticated";
+  }
+
+  public async initFromBackend(options?: { force?: boolean }): Promise<void> {
+    if (typeof fetch === "undefined") return;
+    if (!options?.force && !this.canFetchFromApi()) return;
+    if (options?.force && !this.hasAuthToken() && typeof window === "undefined") return;
+    if (this.activeFetchPromise) return this.activeFetchPromise;
+
+    const capturedKey = `${this.getAuthHeader().Authorization || ""}::${permissionStore.getSessionRole() || ""}`;
+    this.isLoadingState = true;
+    this.lastError = null;
+    this.notify();
+
+    this.activeFetchPromise = (async () => {
+      try {
+        const res = await fetch(`${this.baseUrl}/estimation/templates`, {
+          headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
+        });
+        if (!options?.force && !this.canFetchFromApi()) return;
+        if (!res.ok) {
+          const errPayload = await res.json().catch(() => ({}));
+          throw new Error(
+            errPayload?.error?.message ||
+              errPayload?.message ||
+              `Gagal memuat template estimasi (HTTP ${res.status})`
+          );
+        }
         const payload = await res.json();
+        if (!options?.force && !this.canFetchFromApi()) return;
         if (payload?.success && Array.isArray(payload.data) && payload.data.length > 0) {
           for (const item of payload.data) {
             if (item && item.id) {
-              const sanitized = sanitizeEstimationTemplate(item);
+              const sanitized = sanitizeEstimationTemplate(cloneTemplate(item));
               this.templates.set(sanitized.id, sanitized);
             }
           }
-          this.persist();
-          this.notify();
+          this.hasSyncedBackend = true;
+          this.lastFetchedAuthKey = capturedKey;
+          this.isDataStale = false;
+          this.lastError = null;
         }
+      } catch (err: any) {
+        this.lastError = err?.message || "Gagal memuat template estimasi dari server.";
+        this.isDataStale = true;
+      } finally {
+        this.isLoadingState = false;
+        this.activeFetchPromise = null;
+        this.notify();
       }
+    })();
+
+    return this.activeFetchPromise;
+  }
+
+  private nextWriteSequence(templateId: string): number {
+    const next = (this.writeSeq.get(templateId) || 0) + 1;
+    this.writeSeq.set(templateId, next);
+    return next;
+  }
+
+  private recordAuditSuccess(details: string, metadata: Record<string, any>): void {
+    try {
+      auditLog.log({
+        userId: "usr-admin",
+        userName: "Admin Estimasi",
+        userRole: "admin",
+        action: "UPDATE",
+        module: "Estimasi",
+        details,
+        metadata,
+      });
     } catch {
-      // Fallback silently to localStorage and defaults
+      // safe fallback
     }
   }
 
-  private loadFromStorage(): void {
-    if (typeof window === "undefined" || !window.localStorage) return;
-    try {
-      let raw = window.localStorage.getItem(STORAGE_KEY);
-      let loadedFromLegacy = false;
+  private enqueueTemplateWrite<T>(
+    templateId: string,
+    task: () => Promise<T>
+  ): Promise<T> {
+    const prevTail = this.writeQueues.get(templateId) || Promise.resolve();
+    this.pendingWriteCount++;
+    this.isSavingState = true;
+    this.notify();
 
-      // Migrate from legacy v2 or v1 storage keys if v3 not present yet
-      if (!raw) {
-        for (const legacyKey of LEGACY_STORAGE_KEYS) {
-          const legacyRaw = window.localStorage.getItem(legacyKey);
-          if (legacyRaw) {
-            raw = legacyRaw;
-            loadedFromLegacy = true;
-            break;
-          }
+    let tailGuard: Promise<void>;
+    const runPromise = prevTail
+      .catch(() => undefined)
+      .then(() => task())
+      .finally(() => {
+        this.pendingWriteCount = Math.max(0, this.pendingWriteCount - 1);
+        this.isSavingState = this.pendingWriteCount > 0;
+        if (this.writeQueues.get(templateId) === tailGuard) {
+          this.writeQueues.delete(templateId);
         }
+        this.notify();
+      });
+
+    tailGuard = runPromise.then(
+      () => undefined,
+      () => undefined
+    );
+    this.writeQueues.set(templateId, tailGuard);
+    return runPromise;
+  }
+
+  private async performTemplatePut(
+    template: EstimationTemplateConfig,
+    opts?: {
+      rollbackSnapshot?: EstimationTemplateConfig | null;
+      expectedSeq?: number;
+      auditDetails?: string;
+    }
+  ): Promise<EstimationSaveResult> {
+    const cleanTemplate = sanitizeEstimationTemplate(cloneTemplate(template));
+    const templateId = cleanTemplate.id;
+
+    if (!this.canPersistRemote()) {
+      this.templates.set(templateId, cleanTemplate);
+      this.lastError = null;
+      this.isDataStale = false;
+      this.notify();
+      this.recordAuditSuccess(
+        opts?.auditDetails || `Template ${cleanTemplate.name} diperbarui`,
+        { templateId }
+      );
+      return { success: true, template: cloneTemplate(cleanTemplate) };
+    }
+
+    try {
+      const res = await fetch(
+        `${this.baseUrl}/estimation/templates/${encodeURIComponent(templateId)}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
+          body: JSON.stringify(cleanTemplate),
+        }
+      );
+
+      const bodyPayload = await res.json().catch(() => ({}));
+      if (!res.ok || bodyPayload?.success === false) {
+        const message =
+          bodyPayload?.error?.message ||
+          bodyPayload?.message ||
+          `Gagal menyinkronkan template estimasi ke server (HTTP ${res.status})`;
+        const err = new Error(message) as Error & { statusCode?: number };
+        err.statusCode = res.status;
+        throw err;
       }
 
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          for (const item of parsed) {
-            if (item && item.id) {
-              if (item.id === "template-mutasi-ld-r4" && item.biayaJasa === 750000) {
-                item.biayaJasa = 1500000;
-                const jasaComp = item.components?.find((c: any) => c.id === "proses-dan-jasa" || c.code === "FEE-01");
-                if (jasaComp && jasaComp.defaultValue === 750000) {
-                  jasaComp.defaultValue = 1500000;
-                  jasaComp.description = "Biaya Proses dan Jasa Mutasi LD Mobil Rp 1.500.000";
-                }
-              }
-              const sanitized = sanitizeEstimationTemplate(item);
-              this.templates.set(sanitized.id, sanitized);
-            }
-          }
-          this.isLoadedFromStorage = true;
-          // Persist cleanly to modern v3 key and clean up legacy storage keys
-          this.persist();
-          if (loadedFromLegacy) {
-            for (const legacyKey of LEGACY_STORAGE_KEYS) {
-              try {
-                window.localStorage.removeItem(legacyKey);
-              } catch {
-                // ignore
-              }
-            }
-          }
-        }
+      const serverTemplate = bodyPayload?.data
+        ? sanitizeEstimationTemplate(cloneTemplate(bodyPayload.data))
+        : cleanTemplate;
+
+      this.templates.set(templateId, serverTemplate);
+      this.lastError = null;
+      this.isDataStale = false;
+      this.notify();
+
+      this.recordAuditSuccess(
+        opts?.auditDetails || `Template ${serverTemplate.name} diperbarui`,
+        { templateId }
+      );
+      return {
+        success: true,
+        template: cloneTemplate(serverTemplate),
+        statusCode: res.status,
+      };
+    } catch (err: any) {
+      const errMessage =
+        err?.message || "Gagal menyinkronkan template estimasi ke server.";
+      const shouldRollback =
+        opts?.rollbackSnapshot !== undefined &&
+        (opts.expectedSeq === undefined || this.writeSeq.get(templateId) === opts.expectedSeq);
+      if (shouldRollback && opts?.rollbackSnapshot) {
+        this.templates.set(templateId, cloneTemplate(opts.rollbackSnapshot));
       }
-    } catch (err) {
-      console.warn("[EstimationStore] Failed to load templates from localStorage:", err);
+      this.lastError = errMessage;
+      this.isDataStale = true;
+      this.notify();
+      console.warn("[EstimationStore] Backend sync failed:", err);
+      return {
+        success: false,
+        error: errMessage,
+        statusCode: err?.statusCode,
+      };
     }
   }
 
-  private persist(): void {
-    if (typeof window === "undefined" || !window.localStorage) return;
-    try {
-      const arr = Array.from(this.templates.values()).map(sanitizeEstimationTemplate);
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
-    } catch (err) {
-      console.warn("[EstimationStore] Failed to persist templates to localStorage:", err);
+  /**
+   * Awaited HTTP PUT synchronization with strict per-template queue serialization,
+   * response.ok verification, and non-clobbering rollback on failure.
+   */
+  public async syncToBackend(
+    template: EstimationTemplateConfig,
+    previousTemplate?: EstimationTemplateConfig | null,
+    auditDetails?: string
+  ): Promise<EstimationSaveResult> {
+    if (!template || !template.id) {
+      return { success: false, error: "Template tidak valid (ID wajib diisi)." };
     }
-  }
-
-  private syncToBackend(template: EstimationTemplateConfig): void {
-    if (typeof window === "undefined" && typeof fetch === "undefined") return;
-    const cleanTemplate = sanitizeEstimationTemplate(template);
-    fetch(`${this.baseUrl}/estimation/templates/${encodeURIComponent(cleanTemplate.id)}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
-      body: JSON.stringify(cleanTemplate),
-    }).catch((err) => {
-      console.warn("[EstimationStore] Background backend sync failed (offline fallback active):", err);
-    });
+    const cleanTemplate = sanitizeEstimationTemplate(cloneTemplate(template));
+    const seq = this.nextWriteSequence(cleanTemplate.id);
+    return this.enqueueTemplateWrite(cleanTemplate.id, () =>
+      this.performTemplatePut(cleanTemplate, {
+        rollbackSnapshot: previousTemplate,
+        expectedSeq: seq,
+        auditDetails,
+      })
+    );
   }
 
   public subscribe(listener: () => void): () => void {
@@ -315,38 +410,376 @@ class EstimationStore {
     const tpl = this.templates.get(id);
     if (!tpl) {
       const def = ALL_DEFAULT_TEMPLATES.find((t) => t.id === id);
-      if (def) return sanitizeEstimationTemplate(def);
-      return sanitizeEstimationTemplate(DEFAULT_R4_ANNUAL_TEMPLATE);
+      if (def) return sanitizeEstimationTemplate(cloneTemplate(def));
+      return sanitizeEstimationTemplate(cloneTemplate(DEFAULT_R4_ANNUAL_TEMPLATE));
     }
-    return sanitizeEstimationTemplate(tpl);
+    return sanitizeEstimationTemplate(cloneTemplate(tpl));
   }
 
   public getAllTemplates(): EstimationTemplateConfig[] {
-    return Array.from(this.templates.values()).map(sanitizeEstimationTemplate);
+    return Array.from(this.templates.values()).map((tpl) =>
+      sanitizeEstimationTemplate(cloneTemplate(tpl))
+    );
   }
+
+  private async executeComponentRuleUpdate(
+    templateId: string,
+    componentId: string,
+    buildUpdates: (comp: EstimationComponentRule) => Partial<EstimationComponentRule>
+  ): Promise<EstimationSaveResult> {
+    const tpl = this.templates.get(templateId);
+    if (!tpl) {
+      return { success: false, error: `Template '${templateId}' tidak ditemukan.` };
+    }
+
+    const cloned = cloneTemplate(tpl);
+    const idx = cloned.components.findIndex((c) => c.id === componentId);
+    if (idx === -1) {
+      return { success: false, error: `Komponen '${componentId}' tidak ditemukan.` };
+    }
+
+    const oldComp = cloned.components[idx];
+    const updates = buildUpdates(oldComp);
+    cloned.components[idx] = {
+      ...oldComp,
+      ...updates,
+      description:
+        updates.description !== undefined
+          ? sanitizeComponentDescription(updates.description)
+          : oldComp.description,
+      formulaCondition:
+        updates.formulaCondition !== undefined
+          ? sanitizeComponentDescription(updates.formulaCondition)
+          : oldComp.formulaCondition,
+      humanFormula:
+        updates.humanFormula !== undefined
+          ? sanitizeComponentDescription(updates.humanFormula)
+          : oldComp.humanFormula,
+    };
+    cloned.updatedAt = new Date().toISOString();
+
+    const seq = this.nextWriteSequence(templateId);
+    return this.performTemplatePut(cloned, {
+      expectedSeq: seq,
+      auditDetails: `Komponen ${oldComp.name} pada ${tpl.name} diperbarui`,
+    });
+  }
+
+  // ─── Awaited Async Write API (Recommended for UI & API Tests) ──────────────
+
+  public async updateTemplateAsync(
+    updatedTemplate: EstimationTemplateConfig
+  ): Promise<EstimationSaveResult> {
+    if (!updatedTemplate || !updatedTemplate.id) {
+      return { success: false, error: "Template tidak valid (ID wajib diisi)." };
+    }
+    const cleanTemplate = sanitizeEstimationTemplate(cloneTemplate(updatedTemplate));
+    return this.enqueueTemplateWrite(cleanTemplate.id, () => {
+      const seq = this.nextWriteSequence(cleanTemplate.id);
+      return this.performTemplatePut(cleanTemplate, {
+        expectedSeq: seq,
+        auditDetails: `Template ${cleanTemplate.name} diperbarui`,
+      });
+    });
+  }
+
+  public async updateTemplateParamsAsync(
+    id: string,
+    updates: Partial<Omit<EstimationTemplateConfig, "id" | "components">>
+  ): Promise<EstimationSaveResult> {
+    return this.enqueueTemplateWrite(id, () => {
+      const tpl = this.templates.get(id);
+      if (!tpl) {
+        return Promise.resolve({
+          success: false,
+          error: `Template '${id}' tidak ditemukan.`,
+        });
+      }
+
+      const updated: EstimationTemplateConfig = {
+        ...cloneTemplate(tpl),
+        ...updates,
+        id: tpl.id,
+        serviceType: tpl.serviceType,
+        vehicleType: tpl.vehicleType,
+        accIdRates: updates.accIdRates
+          ? { ...tpl.accIdRates, ...updates.accIdRates }
+          : { ...tpl.accIdRates },
+        updatedAt: new Date().toISOString(),
+      };
+
+      const seq = this.nextWriteSequence(id);
+      return this.performTemplatePut(updated, {
+        expectedSeq: seq,
+        auditDetails: `Template parameter untuk ${tpl.name} diperbarui`,
+      });
+    });
+  }
+
+  public async updateComponentRuleAsync(
+    templateId: string,
+    componentId: string,
+    updates: Partial<EstimationComponentRule>
+  ): Promise<EstimationSaveResult> {
+    return this.enqueueTemplateWrite(templateId, () =>
+      this.executeComponentRuleUpdate(templateId, componentId, () => updates)
+    );
+  }
+
+  public async toggleComponentAsync(
+    templateId: string,
+    componentId: string
+  ): Promise<EstimationSaveResult> {
+    return this.enqueueTemplateWrite(templateId, () =>
+      this.executeComponentRuleUpdate(templateId, componentId, (comp) => ({
+        isActive: !comp.isActive,
+      }))
+    );
+  }
+
+  public async toggleIncludeInTotalAsync(
+    templateId: string,
+    componentId: string
+  ): Promise<EstimationSaveResult> {
+    return this.enqueueTemplateWrite(templateId, () =>
+      this.executeComponentRuleUpdate(templateId, componentId, (comp) => ({
+        includesInTotal: !comp.includesInTotal,
+      }))
+    );
+  }
+
+  public async addManualComponentAsync(
+    templateId: string,
+    compData: Omit<EstimationComponentRule, "id" | "displayOrder"> & { id?: string }
+  ): Promise<EstimationSaveResult & { component?: EstimationComponentRule }> {
+    return this.enqueueTemplateWrite(templateId, async () => {
+      const tpl = this.templates.get(templateId);
+      if (!tpl) {
+        return { success: false, error: `Template '${templateId}' tidak ditemukan.` };
+      }
+
+      const cloned = cloneTemplate(tpl);
+      const id =
+        compData.id || `custom-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const maxOrder = cloned.components.reduce(
+        (max, c) => Math.max(max, c.displayOrder),
+        0
+      );
+
+      const newComp: EstimationComponentRule = {
+        ...compData,
+        id,
+        displayOrder: maxOrder + 1,
+        isEditable: true,
+        valueType: "manual",
+        calculationMethod: compData.calculationMethod || "manual_amount",
+        applicableVehicles: compData.applicableVehicles || (cloned.vehicleType as any),
+        applicableService: compData.applicableService || cloned.serviceType,
+      };
+
+      cloned.components.push(newComp);
+      cloned.updatedAt = new Date().toISOString();
+
+      const seq = this.nextWriteSequence(templateId);
+      const saveRes = await this.performTemplatePut(cloned, { expectedSeq: seq });
+      return {
+        ...saveRes,
+        component: saveRes.success ? newComp : undefined,
+      };
+    });
+  }
+
+  public async removeManualComponentAsync(
+    templateId: string,
+    componentId: string
+  ): Promise<EstimationSaveResult> {
+    return this.enqueueTemplateWrite(templateId, async () => {
+      const tpl = this.templates.get(templateId);
+      if (!tpl) {
+        return { success: false, error: `Template '${templateId}' tidak ditemukan.` };
+      }
+
+      const comp = tpl.components.find((c) => c.id === componentId);
+      if (!comp || comp.valueType === "formula" || comp.ruleId) {
+        return {
+          success: false,
+          error: "Komponen formula inti tidak dapat dihapus.",
+        };
+      }
+
+      const cloned = cloneTemplate(tpl);
+      cloned.components = cloned.components.filter((c) => c.id !== componentId);
+      cloned.updatedAt = new Date().toISOString();
+
+      const seq = this.nextWriteSequence(templateId);
+      return this.performTemplatePut(cloned, { expectedSeq: seq });
+    });
+  }
+
+  private async performSingleResetPost(
+    templateId: string,
+    fallbackResetTpl: EstimationTemplateConfig
+  ): Promise<EstimationSaveResult> {
+    if (!this.canPersistRemote()) {
+      this.templates.set(templateId, fallbackResetTpl);
+      this.lastError = null;
+      this.isDataStale = false;
+      this.notify();
+      return { success: true, template: cloneTemplate(fallbackResetTpl) };
+    }
+
+    try {
+      const res = await fetch(
+        `${this.baseUrl}/estimation/templates/${encodeURIComponent(templateId)}/reset`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
+        }
+      );
+      const bodyPayload = await res.json().catch(() => ({}));
+      if (!res.ok || bodyPayload?.success === false) {
+        const message =
+          bodyPayload?.error?.message ||
+          bodyPayload?.message ||
+          `Gagal mereset template estimasi (HTTP ${res.status})`;
+        const err = new Error(message) as Error & { statusCode?: number };
+        err.statusCode = res.status;
+        throw err;
+      }
+      const serverTpl = bodyPayload?.data
+        ? sanitizeEstimationTemplate(cloneTemplate(bodyPayload.data))
+        : fallbackResetTpl;
+      this.templates.set(templateId, serverTpl);
+      this.lastError = null;
+      this.isDataStale = false;
+      this.notify();
+      return {
+        success: true,
+        template: cloneTemplate(serverTpl),
+        statusCode: res.status,
+      };
+    } catch (err: any) {
+      const msg = err?.message || "Gagal mereset template estimasi di server.";
+      this.lastError = msg;
+      this.isDataStale = true;
+      this.notify();
+      return { success: false, error: msg, statusCode: err?.statusCode };
+    }
+  }
+
+  public async resetToDefaultAsync(
+    templateId?: string
+  ): Promise<EstimationSaveResult> {
+    if (templateId) {
+      const def = ALL_DEFAULT_TEMPLATES.find((t) => t.id === templateId);
+      if (!def) {
+        return {
+          success: false,
+          error: `Default resmi untuk template '${templateId}' tidak ditemukan.`,
+        };
+      }
+
+      return this.enqueueTemplateWrite(def.id, async () => {
+        this.nextWriteSequence(def.id);
+        const resetTpl = sanitizeEstimationTemplate({
+          ...cloneTemplate(def),
+          updatedAt: new Date().toISOString(),
+        });
+        return this.performSingleResetPost(def.id, resetTpl);
+      });
+    }
+
+    // Global reset: wait for active per-template writes to drain first
+    if (this.writeQueues.size > 0) {
+      await Promise.allSettled(Array.from(this.writeQueues.values()));
+    }
+
+    if (!this.canPersistRemote()) {
+      for (const def of ALL_DEFAULT_TEMPLATES) {
+        this.templates.set(
+          def.id,
+          sanitizeEstimationTemplate({
+            ...cloneTemplate(def),
+            updatedAt: new Date().toISOString(),
+          })
+        );
+      }
+      this.lastError = null;
+      this.isDataStale = false;
+      this.notify();
+      return { success: true, templates: this.getAllTemplates() };
+    }
+
+    const previousAll = Array.from(this.templates.entries()).map(
+      ([k, v]) => [k, cloneTemplate(v)] as const
+    );
+
+    this.pendingWriteCount++;
+    this.isSavingState = true;
+    this.notify();
+    try {
+      const res = await fetch(`${this.baseUrl}/estimation/reset-all`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
+      });
+      const bodyPayload = await res.json().catch(() => ({}));
+      if (!res.ok || bodyPayload?.success === false) {
+        const message =
+          bodyPayload?.error?.message ||
+          bodyPayload?.message ||
+          `Gagal mereset seluruh template estimasi (HTTP ${res.status})`;
+        const err = new Error(message) as Error & { statusCode?: number };
+        err.statusCode = res.status;
+        throw err;
+      }
+      const returnedList = Array.isArray(bodyPayload?.data)
+        ? bodyPayload.data
+        : ALL_DEFAULT_TEMPLATES;
+      for (const item of returnedList) {
+        if (item && item.id) {
+          this.templates.set(
+            item.id,
+            sanitizeEstimationTemplate(cloneTemplate(item))
+          );
+        }
+      }
+      this.lastError = null;
+      this.isDataStale = false;
+      return {
+        success: true,
+        templates: this.getAllTemplates(),
+        statusCode: res.status,
+      };
+    } catch (err: any) {
+      this.templates = new Map(previousAll);
+      const msg = err?.message || "Gagal mereset seluruh template estimasi di server.";
+      this.lastError = msg;
+      this.isDataStale = true;
+      return { success: false, error: msg, statusCode: err?.statusCode };
+    } finally {
+      this.pendingWriteCount = Math.max(0, this.pendingWriteCount - 1);
+      this.isSavingState = this.pendingWriteCount > 0;
+      this.notify();
+    }
+  }
+
+  // ─── Synchronous Backward-Compatible Wrappers (Roll back cleanly if async HTTP fails) ──
 
   public updateTemplate(updatedTemplate: EstimationTemplateConfig): boolean {
     if (!updatedTemplate || !updatedTemplate.id) return false;
-    const cleanTemplate = sanitizeEstimationTemplate(updatedTemplate);
+    const existing = this.templates.get(updatedTemplate.id);
+    const previousSnapshot = existing ? cloneTemplate(existing) : null;
+    const cleanTemplate = sanitizeEstimationTemplate(cloneTemplate(updatedTemplate));
+    const seq = this.nextWriteSequence(cleanTemplate.id);
     this.templates.set(cleanTemplate.id, cleanTemplate);
-    this.persist();
     this.notify();
-    this.syncToBackend(updatedTemplate);
-
-    try {
-      auditLog.log({
-        userId: "usr-admin",
-        userName: "Admin Estimasi",
-        userRole: "admin",
-        action: "UPDATE",
-        module: "Estimasi",
-        details: `Template ${updatedTemplate.name} diperbarui`,
-        metadata: { templateId: updatedTemplate.id },
-      });
-    } catch {
-      // safe fallback
-    }
-
+    void this.enqueueTemplateWrite(cleanTemplate.id, () =>
+      this.performTemplatePut(cleanTemplate, {
+        rollbackSnapshot: previousSnapshot,
+        expectedSeq: seq,
+        auditDetails: `Template ${cleanTemplate.name} diperbarui`,
+      })
+    );
     return true;
   }
 
@@ -356,33 +789,40 @@ class EstimationStore {
   ): boolean {
     const tpl = this.templates.get(id);
     if (!tpl) return false;
-
-    const updated: EstimationTemplateConfig = {
-      ...tpl,
+    const previousSnapshot = cloneTemplate(tpl);
+    const seq = this.nextWriteSequence(id);
+    const optimistic: EstimationTemplateConfig = {
+      ...cloneTemplate(tpl),
       ...updates,
-      accIdRates: updates.accIdRates ? { ...tpl.accIdRates, ...updates.accIdRates } : tpl.accIdRates,
+      id: tpl.id,
+      serviceType: tpl.serviceType,
+      vehicleType: tpl.vehicleType,
+      accIdRates: updates.accIdRates
+        ? { ...tpl.accIdRates, ...updates.accIdRates }
+        : { ...tpl.accIdRates },
       updatedAt: new Date().toISOString(),
     };
-
-    this.templates.set(id, updated);
-    this.persist();
+    this.templates.set(id, optimistic);
     this.notify();
-    this.syncToBackend(updated);
-
-    try {
-      auditLog.log({
-        userId: "usr-admin",
-        userName: "Admin Estimasi",
-        userRole: "admin",
-        action: "UPDATE",
-        module: "Estimasi",
-        details: `Template parameter untuk ${tpl.name} diperbarui`,
-        metadata: { templateId: id, updates },
+    void this.enqueueTemplateWrite(id, () => {
+      const latestTpl = this.templates.get(id) || optimistic;
+      const merged: EstimationTemplateConfig = {
+        ...cloneTemplate(latestTpl),
+        ...updates,
+        id: latestTpl.id,
+        serviceType: latestTpl.serviceType,
+        vehicleType: latestTpl.vehicleType,
+        accIdRates: updates.accIdRates
+          ? { ...latestTpl.accIdRates, ...updates.accIdRates }
+          : { ...latestTpl.accIdRates },
+        updatedAt: new Date().toISOString(),
+      };
+      return this.performTemplatePut(merged, {
+        rollbackSnapshot: previousSnapshot,
+        expectedSeq: seq,
+        auditDetails: `Template parameter untuk ${tpl.name} diperbarui`,
       });
-    } catch {
-      // safe fallback
-    }
-
+    });
     return true;
   }
 
@@ -393,40 +833,41 @@ class EstimationStore {
   ): boolean {
     const tpl = this.templates.get(templateId);
     if (!tpl) return false;
-
-    const idx = tpl.components.findIndex((c) => c.id === componentId);
+    const previousSnapshot = cloneTemplate(tpl);
+    const cloned = cloneTemplate(tpl);
+    const idx = cloned.components.findIndex((c) => c.id === componentId);
     if (idx === -1) return false;
 
-    const oldComp = tpl.components[idx];
-    const updatedComp: EstimationComponentRule = {
+    const oldComp = cloned.components[idx];
+    cloned.components[idx] = {
       ...oldComp,
       ...updates,
-      description: updates.description !== undefined ? sanitizeComponentDescription(updates.description) : oldComp.description,
-      formulaCondition: updates.formulaCondition !== undefined ? sanitizeComponentDescription(updates.formulaCondition) : oldComp.formulaCondition,
-      humanFormula: updates.humanFormula !== undefined ? sanitizeComponentDescription(updates.humanFormula) : oldComp.humanFormula,
+      description:
+        updates.description !== undefined
+          ? sanitizeComponentDescription(updates.description)
+          : oldComp.description,
+      formulaCondition:
+        updates.formulaCondition !== undefined
+          ? sanitizeComponentDescription(updates.formulaCondition)
+          : oldComp.formulaCondition,
+      humanFormula:
+        updates.humanFormula !== undefined
+          ? sanitizeComponentDescription(updates.humanFormula)
+          : oldComp.humanFormula,
     };
+    cloned.updatedAt = new Date().toISOString();
 
-    tpl.components[idx] = updatedComp;
-    tpl.updatedAt = new Date().toISOString();
-    this.templates.set(templateId, sanitizeEstimationTemplate({ ...tpl }));
-    this.persist();
+    const sanitized = sanitizeEstimationTemplate(cloned);
+    const seq = this.nextWriteSequence(templateId);
+    this.templates.set(templateId, sanitized);
     this.notify();
-    this.syncToBackend(tpl);
-
-    try {
-      auditLog.log({
-        userId: "usr-admin",
-        userName: "Admin Estimasi",
-        userRole: "admin",
-        action: "UPDATE",
-        module: "Estimasi",
-        details: `Komponen ${oldComp.name} pada ${tpl.name} diperbarui`,
-        metadata: { templateId, componentId, updates },
-      });
-    } catch {
-      // safe fallback
-    }
-
+    void this.enqueueTemplateWrite(templateId, () =>
+      this.performTemplatePut(sanitized, {
+        rollbackSnapshot: previousSnapshot,
+        expectedSeq: seq,
+        auditDetails: `Komponen ${oldComp.name} pada ${tpl.name} diperbarui`,
+      })
+    );
     return true;
   }
 
@@ -435,7 +876,9 @@ class EstimationStore {
     if (!tpl) return false;
     const comp = tpl.components.find((c) => c.id === componentId);
     if (!comp) return false;
-    return this.updateComponentRule(templateId, componentId, { isActive: !comp.isActive });
+    return this.updateComponentRule(templateId, componentId, {
+      isActive: !comp.isActive,
+    });
   }
 
   public toggleIncludeInTotal(templateId: string, componentId: string): boolean {
@@ -443,7 +886,9 @@ class EstimationStore {
     if (!tpl) return false;
     const comp = tpl.components.find((c) => c.id === componentId);
     if (!comp) return false;
-    return this.updateComponentRule(templateId, componentId, { includesInTotal: !comp.includesInTotal });
+    return this.updateComponentRule(templateId, componentId, {
+      includesInTotal: !comp.includesInTotal,
+    });
   }
 
   public addManualComponent(
@@ -452,9 +897,15 @@ class EstimationStore {
   ): EstimationComponentRule | null {
     const tpl = this.templates.get(templateId);
     if (!tpl) return null;
+    const previousSnapshot = cloneTemplate(tpl);
+    const cloned = cloneTemplate(tpl);
 
-    const id = compData.id || `custom-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    const maxOrder = tpl.components.reduce((max, c) => Math.max(max, c.displayOrder), 0);
+    const id =
+      compData.id || `custom-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const maxOrder = cloned.components.reduce(
+      (max, c) => Math.max(max, c.displayOrder),
+      0
+    );
 
     const newComp: EstimationComponentRule = {
       ...compData,
@@ -463,84 +914,100 @@ class EstimationStore {
       isEditable: true,
       valueType: "manual",
       calculationMethod: compData.calculationMethod || "manual_amount",
-      applicableVehicles: compData.applicableVehicles || (tpl.vehicleType as any),
-      applicableService: compData.applicableService || tpl.serviceType,
+      applicableVehicles: compData.applicableVehicles || (cloned.vehicleType as any),
+      applicableService: compData.applicableService || cloned.serviceType,
     };
 
-    tpl.components.push(newComp);
-    tpl.updatedAt = new Date().toISOString();
-    this.templates.set(templateId, { ...tpl });
-    this.persist();
+    cloned.components.push(newComp);
+    cloned.updatedAt = new Date().toISOString();
+    const seq = this.nextWriteSequence(templateId);
+    this.templates.set(templateId, cloned);
     this.notify();
-    this.syncToBackend(tpl);
-
+    void this.enqueueTemplateWrite(templateId, () =>
+      this.performTemplatePut(cloned, {
+        rollbackSnapshot: previousSnapshot,
+        expectedSeq: seq,
+      })
+    );
     return newComp;
   }
 
   public removeManualComponent(templateId: string, componentId: string): boolean {
     const tpl = this.templates.get(templateId);
     if (!tpl) return false;
-
     const comp = tpl.components.find((c) => c.id === componentId);
-    // Protect core formula components from being deleted
     if (!comp || comp.valueType === "formula" || comp.ruleId) {
       return false;
     }
 
-    tpl.components = tpl.components.filter((c) => c.id !== componentId);
-    tpl.updatedAt = new Date().toISOString();
-    this.templates.set(templateId, { ...tpl });
-    this.persist();
+    const previousSnapshot = cloneTemplate(tpl);
+    const cloned = cloneTemplate(tpl);
+    cloned.components = cloned.components.filter((c) => c.id !== componentId);
+    cloned.updatedAt = new Date().toISOString();
+    const seq = this.nextWriteSequence(templateId);
+    this.templates.set(templateId, cloned);
     this.notify();
-    this.syncToBackend(tpl);
+    void this.enqueueTemplateWrite(templateId, () =>
+      this.performTemplatePut(cloned, {
+        rollbackSnapshot: previousSnapshot,
+        expectedSeq: seq,
+      })
+    );
     return true;
   }
 
   public resetToDefault(templateId?: string): void {
     if (templateId) {
       const def = ALL_DEFAULT_TEMPLATES.find((t) => t.id === templateId);
-      if (def) {
-        const resetTpl: EstimationTemplateConfig = {
-          ...def,
-          components: def.components.map((c) => ({ ...c })),
-          accIdRates: { ...def.accIdRates },
-          updatedAt: new Date().toISOString(),
-        };
-        this.templates.set(def.id, resetTpl);
-        this.persist();
-        this.notify();
-        this.syncToBackend(resetTpl);
-
-        if (typeof window !== "undefined" && typeof fetch !== "undefined") {
-          fetch(`${this.baseUrl}/estimation/templates/${encodeURIComponent(def.id)}/reset`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
-          }).catch(() => {});
-        }
-      }
-    } else {
-      for (const def of ALL_DEFAULT_TEMPLATES) {
-        const resetTpl: EstimationTemplateConfig = {
-          ...def,
-          components: def.components.map((c) => ({ ...c })),
-          accIdRates: { ...def.accIdRates },
-          updatedAt: new Date().toISOString(),
-        };
-        this.templates.set(def.id, resetTpl);
-      }
-      this.persist();
+      if (!def) return;
+      const existing = this.templates.get(def.id);
+      const previousSnapshot = existing ? cloneTemplate(existing) : null;
+      const resetTpl = sanitizeEstimationTemplate({
+        ...cloneTemplate(def),
+        updatedAt: new Date().toISOString(),
+      });
+      const seq = this.nextWriteSequence(def.id);
+      this.templates.set(def.id, resetTpl);
+      this.lastError = null;
+      this.isDataStale = false;
       this.notify();
 
-      if (typeof window !== "undefined" && typeof fetch !== "undefined") {
-        fetch(`${this.baseUrl}/estimation/reset-all`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
-        }).catch(() => {});
+      if (this.canPersistRemote()) {
+        void this.enqueueTemplateWrite(def.id, async () => {
+          const res = await this.performSingleResetPost(def.id, resetTpl);
+          if (!res.success && this.writeSeq.get(def.id) === seq && previousSnapshot) {
+            this.templates.set(def.id, cloneTemplate(previousSnapshot));
+            this.notify();
+          }
+          return res;
+        });
       }
+      return;
+    }
+
+    for (const def of ALL_DEFAULT_TEMPLATES) {
+      this.nextWriteSequence(def.id);
+      this.templates.set(
+        def.id,
+        sanitizeEstimationTemplate({
+          ...cloneTemplate(def),
+          updatedAt: new Date().toISOString(),
+        })
+      );
+    }
+    this.lastError = null;
+    this.isDataStale = false;
+    this.notify();
+
+    if (this.canPersistRemote()) {
+      void this.resetToDefaultAsync();
     }
   }
 
-  public calculate(input: EstimationInput, templateId = "template-pajak-tahunan-r4"): EstimationResult {
+  public calculate(
+    input: EstimationInput,
+    templateId = "template-pajak-tahunan-r4"
+  ): EstimationResult {
     const template = this.getTemplate(templateId);
     return calculateEstimation(input, template, defaultRuleRegistry);
   }

@@ -226,8 +226,10 @@ export function calculateCanonicalInvoiceTotals(
   }
 
   // Revenue recognition & Gross Profit (Proportional COGS matching)
-  // Revenue is capped strictly at totalTagihan; overpayment is custodial liability
-  const recognizedRevenue = isExplicitZero ? 0 : Math.min(verifiedPaid, totalTagihan);
+  // Revenue is capped strictly at totalTagihan; overpayment is custodial liability.
+  // When totalTagihan === 0 (explicit zero promotional invoice), Math.min(verifiedPaid, 0) === 0;
+  // when totalTagihan > 0 and biayaSamsat === 0 (explicit zero Samsat COGS service), recognizedRevenue is Math.min(verifiedPaid, totalTagihan).
+  const recognizedRevenue = Math.min(verifiedPaid, totalTagihan);
   const isCostAnomaly = totalTagihan > 0 && biayaSamsat > totalTagihan;
   const alpha = totalTagihan > 0 ? biayaSamsat / totalTagihan : 0;
   const matchedCOGS = Math.min(biayaSamsat, Math.round(alpha * recognizedRevenue));

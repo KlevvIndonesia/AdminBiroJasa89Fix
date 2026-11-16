@@ -3,6 +3,8 @@
  * Admin SUN89 — Biro Jasa Management System
  */
 
+import crypto from "crypto";
+import type { DatabaseSync } from "node:sqlite";
 import { dbMessengerRepository } from "../repositories/dbMessengerRepository";
 import { dbOrderRepository } from "../repositories/dbOrderRepository";
 import { dbFinanceRepository } from "../repositories/dbFinanceRepository";
@@ -11,6 +13,7 @@ import { dbUserRepository } from "../repositories/dbUserRepository";
 import { db, runInTransaction } from "../database/db";
 import { ApiError } from "../middleware/errorHandler";
 import { TokenPayload } from "../utils/crypto";
+import { parsePositiveDbUserId } from "../utils/canonicalIdentity";
 import {
   ReimbursementRequest,
   MessengerHistoryItem,
@@ -93,6 +96,16 @@ export interface TaskDetailResponse {
     };
     items: ReimbursementRequest[];
   };
+}
+
+function normalizeReimbursementStatus(status?: string | null): "Diajukan" | "Sedang Ditinjau" | "Disetujui" | "Ditolak" | "Dibayar" | string {
+  const s = String(status || "").trim().toLowerCase();
+  if (s === "diajukan" || s === "pending" || s === "submitted") return "Diajukan";
+  if (s === "sedang ditinjau" || s === "in_review" || s === "under_review" || s === "review") return "Sedang Ditinjau";
+  if (s === "disetujui" || s === "approved") return "Disetujui";
+  if (s === "ditolak" || s === "rejected") return "Ditolak";
+  if (s === "dibayar" || s === "paid") return "Dibayar";
+  return String(status || "").trim();
 }
 
 export function isSamsatOrTaxCategory(category?: string | null): boolean {
@@ -416,12 +429,14 @@ export class MessengerService {
         `Biaya resmi Samsat / Pajak ('${data.category}') tidak diperbolehkan diajukan sebagai reimbursement operasional. Biaya Samsat wajib diproses melalui alur penagihan biaya order dan invoice.`
       );
     }
-    if (!data.employeeId || !data.messengerName || !data.category || !data.amount || !data.date) {
+    if (!data.employeeId || !data.messengerName || !data.category || data.amount === undefined || !data.date) {
       throw new ApiError(400, "VALIDATION_ERROR", "Data pengajuan biaya belum lengkap (kategori, nominal, tanggal wajib diisi).");
     }
-    if (data.amount <= 0) {
-      throw new ApiError(400, "VALIDATION_ERROR", "Nominal pengajuan harus lebih besar dari 0.");
+    const requestedAmount = Number(data.amount);
+    if (!Number.isFinite(requestedAmount) || requestedAmount <= 0) {
+      throw new ApiError(400, "VALIDATION_ERROR", "Nominal pengajuan harus berupa angka yang valid dan lebih besar dari 0.");
     }
+    data.amount = requestedAmount;
 
     // Referential integrity check: order_no if provided must exist
     const rawOrderNo = data.orderNo?.trim();
@@ -434,10 +449,10 @@ export class MessengerService {
 
     // Referential integrity check: employee/messenger must exist in users or employees table
     const rawEmpId = data.employeeId.trim();
-    const numericId = Number(rawEmpId.replace(/^usr-/i, ""));
+    const numericId = parsePositiveDbUserId(rawEmpId);
     const userStmt = db.prepare("SELECT id, nama, employee_id, status FROM users WHERE id = ? OR employee_id = ?");
     const matchedUser = userStmt.get(
-      isNaN(numericId) ? -1 : numericId,
+      numericId ?? -1,
       rawEmpId
     ) as any;
 
@@ -466,10 +481,17 @@ export class MessengerService {
       }
     }
 
+    let resolvedMessengerId = (data as any).messengerId || undefined;
+    if (!resolvedMessengerId) {
+      const mRow = db.prepare("SELECT id FROM messengers WHERE employee_id = ? LIMIT 1").get(rawEmpId) as { id: string } | undefined;
+      if (mRow) resolvedMessengerId = mRow.id;
+    }
+
     return runInTransaction(() => {
       const id = dbMessengerRepository.getNextReimbursementId();
       const newReimb: ReimbursementRequest = {
         ...data,
+        messengerId: resolvedMessengerId,
         orderNo: rawOrderNo && rawOrderNo !== "-" ? rawOrderNo : undefined,
         id,
         status: "Diajukan",
@@ -480,7 +502,7 @@ export class MessengerService {
 
       // Record audit log
       dbAuditRepository.save({
-        id: `audit-reimb-create-${Date.now()}`,
+        id: `audit-reimb-create-${crypto.randomUUID()}`,
         userId: user?.userId || data.employeeId,
         userName: user?.nama || data.messengerName,
         userRole: (user?.role as any) || "messenger",
@@ -504,76 +526,122 @@ export class MessengerService {
     user: TokenPayload,
     reviewNotes?: string,
     approvedAmount?: number,
-    rejectedAmount?: number
+    rejectedAmount?: number,
+    targetDb?: DatabaseSync
   ): ReimbursementRequest {
+    const activeDb = targetDb ?? db;
     if (user.role === "messenger") {
       throw new ApiError(403, "FORBIDDEN", "Messenger tidak memiliki hak untuk menyetujui pengajuan biaya.");
     }
 
-    const existing = dbMessengerRepository.getReimbursementById(id);
-    if (!existing) {
-      throw new ApiError(404, "NOT_FOUND", `Pengajuan biaya '${id}' tidak ditemukan.`);
+    const canonicalDecision = normalizeReimbursementStatus(decision);
+    if (!["Disetujui", "Ditolak", "Sedang Ditinjau"].includes(canonicalDecision)) {
+      throw new ApiError(400, "INVALID_DECISION", `Keputusan review '${decision}' tidak valid.`);
     }
 
-    // Phase C Rule 1.A / 3.D: Reject Samsat and Tax categories from approval
-    if (decision === "Disetujui" && isSamsatOrTaxCategory(existing.category)) {
-      throw new ApiError(
-        400,
-        "FORBIDDEN_REIMBURSEMENT_CATEGORY",
-        `Pengajuan biaya kategori '${existing.category}' tidak dapat disetujui karena termasuk biaya resmi Samsat/Pajak yang wajib diproses melalui alur penagihan biaya order dan invoice.`
-      );
-    }
+    return runInTransaction(() => {
+      const existing = dbMessengerRepository.getReimbursementById(id, activeDb);
+      if (!existing) {
+        throw new ApiError(404, "NOT_FOUND", `Pengajuan biaya '${id}' tidak ditemukan.`);
+      }
 
-    if (existing.status === "Dibayar") {
-      throw new ApiError(400, "INVALID_STATE", "Pengajuan biaya sudah dicairkan/dibayar dan tidak dapat diubah lagi.");
-    }
+      const currentStatus = normalizeReimbursementStatus(existing.status);
 
-    if (existing.status === "Disetujui" && decision === "Disetujui") {
-      throw new ApiError(400, "ALREADY_APPROVED", "Pengajuan biaya ini sudah disetujui sebelumnya.");
-    }
+      // Phase C Rule 1.A / 3.D: Reject Samsat and Tax categories from approval
+      if (canonicalDecision === "Disetujui" && isSamsatOrTaxCategory(existing.category)) {
+        throw new ApiError(
+          400,
+          "FORBIDDEN_REIMBURSEMENT_CATEGORY",
+          `Pengajuan biaya kategori '${existing.category}' tidak dapat disetujui karena termasuk biaya resmi Samsat/Pajak yang wajib diproses melalui alur penagihan biaya order dan invoice.`
+        );
+      }
 
-    if (existing.status === "Ditolak" && decision === "Ditolak") {
-      throw new ApiError(400, "ALREADY_REJECTED", "Pengajuan biaya ini sudah ditolak sebelumnya.");
-    }
+      if (currentStatus === "Dibayar") {
+        throw new ApiError(400, "INVALID_STATE", "Pengajuan biaya sudah dicairkan/dibayar dan tidak dapat diubah lagi.");
+      }
 
-    const finalApproved = approvedAmount !== undefined ? approvedAmount : (decision === "Disetujui" ? existing.amount : 0);
-    const finalRejected = rejectedAmount !== undefined ? rejectedAmount : (decision === "Ditolak" ? existing.amount : (existing.amount - finalApproved));
+      if (currentStatus === "Ditolak") {
+        throw new ApiError(400, "ALREADY_REJECTED", "Pengajuan biaya yang sudah ditolak tidak dapat diubah atau disetujui lagi.");
+      }
 
-    const updates: Partial<ReimbursementRequest> = {
-      status: decision,
-      reviewedAt: new Date().toISOString(),
-      reviewedBy: user.nama,
-      reviewNotes: reviewNotes || undefined,
-      approvedAmount: finalApproved,
-      rejectedAmount: finalRejected,
-    };
+      if (currentStatus === "Disetujui" && canonicalDecision === "Disetujui") {
+        throw new ApiError(400, "ALREADY_APPROVED", "Pengajuan biaya ini sudah disetujui sebelumnya.");
+      }
 
-    dbMessengerRepository.updateReimbursement(id, updates);
+      const requestedAmt = Number(existing.amount || 0);
+      if (!Number.isFinite(requestedAmt) || requestedAmt <= 0) {
+        throw new ApiError(400, "INVALID_REIMBURSEMENT_AMOUNT", "Nominal pengajuan biaya tidak valid (harus lebih besar dari 0).");
+      }
 
-    dbAuditRepository.save({
-      id: `audit-reimb-review-${Date.now()}`,
-      userId: user.userId,
-      userName: user.nama,
-      userRole: user.role as any,
-      action: "UPDATE",
-      module: "Reimbursement Review",
-      details: `Pengajuan biaya ${id} (${existing.messengerName}) diubah status menjadi ${decision}${finalApproved > 0 ? ` (Disetujui Rp ${finalApproved.toLocaleString("id-ID")})` : ""}`,
-      metadata: { id, decision, approvedAmount: finalApproved, rejectedAmount: finalRejected },
-      createdAt: new Date().toISOString(),
-    });
+      let finalApproved = 0;
+      let finalRejected = 0;
 
-    return { ...existing, ...updates };
+      if (canonicalDecision === "Disetujui") {
+        const rawApproved = approvedAmount !== undefined ? Number(approvedAmount) : requestedAmt;
+        if (!Number.isFinite(rawApproved) || rawApproved <= 0 || rawApproved > requestedAmt) {
+          throw new ApiError(
+            400,
+            "INVALID_APPROVED_AMOUNT",
+            `Nominal yang disetujui (${approvedAmount}) harus lebih besar dari 0 dan tidak boleh melebihi nominal pengajuan (Rp ${requestedAmt.toLocaleString("id-ID")}).`
+          );
+        }
+        finalApproved = rawApproved;
+        finalRejected = rejectedAmount !== undefined ? Number(rejectedAmount) : Math.max(0, requestedAmt - finalApproved);
+        if (!Number.isFinite(finalRejected) || finalRejected < 0 || finalApproved + finalRejected > requestedAmt) {
+          throw new ApiError(
+            400,
+            "INVALID_APPROVED_AMOUNT",
+            "Kombinasi nominal disetujui dan ditolak tidak boleh melebihi nominal pengajuan."
+          );
+        }
+      } else if (canonicalDecision === "Ditolak") {
+        finalApproved = 0;
+        finalRejected = requestedAmt;
+      }
+
+      const updates: Partial<ReimbursementRequest> = {
+        status: canonicalDecision as any,
+        reviewedAt: new Date().toISOString(),
+        reviewedBy: user.nama,
+        reviewNotes: reviewNotes || undefined,
+        approvedAmount: finalApproved,
+        rejectedAmount: finalRejected,
+      };
+
+      const updatedOk = dbMessengerRepository.updateReimbursement(id, updates, activeDb);
+      if (!updatedOk) {
+        throw new ApiError(500, "UPDATE_FAILED", `Gagal memperbarui status pengajuan biaya '${id}'.`);
+      }
+
+      dbAuditRepository.save({
+        id: `audit-reimb-review-${crypto.randomUUID()}`,
+        userId: user.userId,
+        userName: user.nama,
+        userRole: user.role as any,
+        action: "UPDATE",
+        module: "Reimbursement Review",
+        details: `Pengajuan biaya ${id} (${existing.messengerName}) diubah status menjadi ${canonicalDecision}${finalApproved > 0 ? ` (Disetujui Rp ${finalApproved.toLocaleString("id-ID")})` : ""}`,
+        metadata: { id, decision: canonicalDecision, requestedAmount: requestedAmt, approvedAmount: finalApproved, rejectedAmount: finalRejected },
+        createdAt: new Date().toISOString(),
+      }, activeDb);
+
+      return dbMessengerRepository.getReimbursementById(id, activeDb) || { ...existing, ...updates };
+    }, activeDb);
   }
 
   /**
    * Void / Cancel reimbursement payout
+   * Strictly reverses the original disbursement inside kas_messenger (NOT kas_kantor),
+   * keeping kas_kantor untouched and recalculating messenger running balances.
    */
   public voidReimbursement(
     id: string,
     user: TokenPayload,
-    voidReason: string
+    voidReason: string,
+    targetDb?: DatabaseSync
   ): ReimbursementRequest {
-    const allowedRoles = ["administrator", "supervisor", "svp"];
+    const activeDb = targetDb ?? db;
+    const allowedRoles = ["administrator"];
     if (!allowedRoles.includes((user.role || "").toLowerCase())) {
       throw new ApiError(403, "FORBIDDEN", "Hanya Supervisor atau Administrator yang berhak membatalkan (void) pencairan reimbursement.");
     }
@@ -582,98 +650,183 @@ export class MessengerService {
       throw new ApiError(400, "MISSING_VOID_REASON", "Alasan pembatalan (voidReason) wajib diisi.");
     }
 
-    const existing = dbMessengerRepository.getReimbursementById(id);
-    if (!existing) {
-      throw new ApiError(404, "NOT_FOUND", `Pengajuan reimbursement '${id}' tidak ditemukan.`);
-    }
-
-    if (existing.status !== "Dibayar") {
-      throw new ApiError(400, "INVALID_STATUS", `Hanya reimbursement berstatus 'Dibayar' yang dapat dibatalkan (status saat ini: '${existing.status}').`);
-    }
-
     return runInTransaction(() => {
-      const nowStr = new Date().toISOString().split("T")[0];
-      const amountPaid = existing.approvedAmount !== undefined && existing.approvedAmount > 0
-        ? existing.approvedAmount
-        : existing.amount;
+      const existing = dbMessengerRepository.getReimbursementById(id, activeDb);
+      if (!existing) {
+        throw new ApiError(404, "NOT_FOUND", `Pengajuan reimbursement '${id}' tidak ditemukan.`);
+      }
 
-      // 1. Compensating Reversal in Kas Kantor (Debit because original payout was Kredit)
-      dbFinanceRepository.addKasKantor({
+      const currentStatus = normalizeReimbursementStatus(existing.status);
+      if (currentStatus !== "Dibayar") {
+        throw new ApiError(400, "INVALID_STATUS", `Hanya reimbursement berstatus 'Dibayar' yang dapat dibatalkan (status saat ini: '${existing.status}').`);
+      }
+
+      // Locate original disbursement entry in kas_messenger
+      let origKmRow: any = undefined;
+      if (existing.kasMessengerId) {
+        origKmRow = activeDb.prepare("SELECT * FROM kas_messenger WHERE id = ?").get(existing.kasMessengerId);
+      }
+      if (!origKmRow) {
+        origKmRow = activeDb.prepare(
+          "SELECT * FROM kas_messenger WHERE reimbursement_id = ? AND kredit > 0 ORDER BY id DESC LIMIT 1"
+        ).get(id);
+      }
+
+      const netDisbRow = activeDb.prepare(
+        "SELECT COALESCE(SUM(kredit), 0) - COALESCE(SUM(debit), 0) as netDisbursed FROM kas_messenger WHERE reimbursement_id = ?"
+      ).get(id) as { netDisbursed: number } | undefined;
+
+      if (origKmRow && Number(netDisbRow?.netDisbursed ?? 0) <= 0) {
+        throw new ApiError(400, "ALREADY_REVERSED", `Pencairan reimbursement '${id}' sudah dibatalkan/direversal sebelumnya.`);
+      }
+
+      const nowStr = new Date().toISOString().split("T")[0];
+      const nowIso = new Date().toISOString();
+      const amountPaid = origKmRow && Number(origKmRow.kredit || 0) > 0
+        ? Math.min(Number(origKmRow.kredit), Number(netDisbRow?.netDisbursed ?? origKmRow.kredit))
+        : (existing.approvedAmount !== undefined && existing.approvedAmount > 0
+          ? existing.approvedAmount
+          : existing.amount);
+
+      const targetMessengerId = origKmRow?.messenger_id || existing.messengerId || null;
+      const targetMessengerName = origKmRow?.messenger || existing.messengerName;
+
+      // 1. Compensating Reversal in Kas Messenger (Pemasukan/Debit restores courier balance because original payout was Kredit in Kas Messenger)
+      const reversalKm = dbFinanceRepository.addKasMessenger({
         tanggal: nowStr,
-        keterangan: `[VOID/BATAL] Reversal Pencairan Reimbursement: ${existing.messengerName} (${existing.category}) [Ref: ${id}] - ${voidReason.trim()}`,
-        status: "Debit",
-        debit: amountPaid,
-        kredit: 0,
+        jenis: "Pemasukan",
+        messenger: targetMessengerName,
+        messenger_id: targetMessengerId,
+        messengerId: targetMessengerId,
+        keterangan: `[VOID/BATAL] Reversal Pencairan Reimbursement: ${targetMessengerName} (${existing.category}) [Ref: ${id}] - ${voidReason.trim()}`,
+        in: amountPaid,
+        out: 0,
         penanggungJawab: user.nama,
         orderNo: existing.orderNo || undefined,
+        reimbursementId: id,
         kategori: "Reimbursement Reversal",
-      });
+        payment_method_id: null,
+        payment_method_snapshot: null,
+      }, activeDb);
 
-      // 2. Update Reimbursement status back to Disetujui
+      // 2. Update Reimbursement status back to Disetujui and clear active payout pointers
       const updates: Partial<ReimbursementRequest> = {
         status: "Disetujui",
+        paidAt: undefined,
+        paidBy: undefined,
+        paymentMethod: undefined,
+        transactionRef: undefined,
+        kasMessengerId: undefined,
+        channel: undefined,
       };
-      dbMessengerRepository.updateReimbursement(id, updates);
+      dbMessengerRepository.updateReimbursement(id, updates, activeDb);
 
       // 3. Audit Log
       dbAuditRepository.save({
-        id: `audit-void-reimb-${Date.now()}`,
+        id: `audit-void-reimb-${crypto.randomUUID()}`,
         userId: user.userId,
         userName: user.nama,
         userRole: user.role as any,
         action: "VOID_REIMBURSEMENT",
         module: "Messenger",
-        details: `Void pencairan reimbursement #${id} sebesar Rp ${amountPaid.toLocaleString("id-ID")} untuk kurir ${existing.messengerName}. Alasan: ${voidReason.trim()}`,
-        metadata: { id, amountPaid, voidReason: voidReason.trim(), messengerId: existing.messengerId },
-        createdAt: new Date().toISOString(),
-      });
+        details: `Void pencairan reimbursement #${id} sebesar Rp ${amountPaid.toLocaleString("id-ID")} untuk kurir ${targetMessengerName} (Reversal Kas Messenger #${reversalKm.id}). Alasan: ${voidReason.trim()}`,
+        metadata: {
+          id,
+          amountPaid,
+          voidReason: voidReason.trim(),
+          messengerId: targetMessengerId,
+          originalKasMessengerId: origKmRow?.id || existing.kasMessengerId || null,
+          reversalKasMessengerId: reversalKm.id,
+        },
+        createdAt: nowIso,
+      }, activeDb);
 
-      return dbMessengerRepository.getReimbursementById(id) || existing;
-    });
+      return dbMessengerRepository.getReimbursementById(id, activeDb) || { ...existing, ...updates };
+    }, activeDb);
   }
 
   /**
-   * Pay / Realize reimbursement (strictly disburses from Kas Kantor, zero mutation to Kas Messenger)
+   * Pay / Realize reimbursement (strictly disburses from Kas Messenger Kredit, zero mutation to Kas Kantor)
    */
   public payReimbursement(
     id: string,
     user: TokenPayload,
-    paymentDetails?: { paymentMethod?: string; transactionRef?: string; channel?: string }
+    paymentDetails?: { amount?: number; paymentMethod?: string; transactionRef?: string; channel?: string },
+    targetDb?: DatabaseSync
   ): ReimbursementRequest {
+    const activeDb = targetDb ?? db;
     if (user.role === "messenger") {
       throw new ApiError(403, "FORBIDDEN", "Messenger tidak memiliki hak untuk merealisasikan pembayaran.");
     }
 
-    const existing = dbMessengerRepository.getReimbursementById(id);
-    if (!existing) {
-      throw new ApiError(404, "NOT_FOUND", `Pengajuan biaya '${id}' tidak ditemukan.`);
-    }
-
-    if (existing.status === "Dibayar") {
-      throw new ApiError(400, "ALREADY_PAID", `Pengajuan biaya '${id}' sudah dibayarkan sebelumnya.`);
-    }
-
-    // Phase C Rule 1.A / 3.D: Reject Samsat and Tax categories from payout
-    if (isSamsatOrTaxCategory(existing.category)) {
-      throw new ApiError(
-        400,
-        "FORBIDDEN_REIMBURSEMENT_CATEGORY",
-        `Pengajuan reimbursement kategori '${existing.category}' tidak dapat dicairkan karena termasuk biaya resmi Samsat/Pajak.`
-      );
+    if (paymentDetails?.amount !== undefined) {
+      const requestedPay = Number(paymentDetails.amount);
+      if (!Number.isFinite(requestedPay) || requestedPay <= 0) {
+        throw new ApiError(400, "INVALID_PAYOUT_AMOUNT", "Nominal pencairan harus lebih besar dari 0.");
+      }
     }
 
     return runInTransaction(() => {
+      const existing = dbMessengerRepository.getReimbursementById(id, activeDb);
+      if (!existing) {
+        throw new ApiError(404, "NOT_FOUND", `Pengajuan biaya '${id}' tidak ditemukan.`);
+      }
+
+      const currentStatus = normalizeReimbursementStatus(existing.status);
+      if (currentStatus === "Dibayar") {
+        throw new ApiError(400, "ALREADY_PAID", `Pengajuan biaya '${id}' sudah dibayarkan sebelumnya.`);
+      }
+
+      if (currentStatus !== "Disetujui") {
+        throw new ApiError(
+          400,
+          "INVALID_STATUS",
+          `Pengajuan reimbursement '${id}' berstatus '${existing.status}' dan tidak dapat dicairkan. Hanya pengajuan berstatus 'Disetujui' yang dapat dicairkan.`
+        );
+      }
+
+      // Phase C Rule 1.A / 3.D: Reject Samsat and Tax categories from payout
+      if (isSamsatOrTaxCategory(existing.category)) {
+        throw new ApiError(
+          400,
+          "FORBIDDEN_REIMBURSEMENT_CATEGORY",
+          `Pengajuan reimbursement kategori '${existing.category}' tidak dapat dicairkan karena termasuk biaya resmi Samsat/Pajak.`
+        );
+      }
+
+      const approvedCeiling = Number(existing.approvedAmount ?? 0);
+      if (!Number.isFinite(approvedCeiling) || approvedCeiling <= 0 || approvedCeiling > Number(existing.amount || 0)) {
+        throw new ApiError(
+          400,
+          "INVALID_APPROVED_AMOUNT",
+          `Nominal disetujui (approvedAmount=${existing.approvedAmount}) tidak valid untuk dicairkan.`
+        );
+      }
+
+      const amountToPay = paymentDetails?.amount !== undefined ? Number(paymentDetails.amount) : approvedCeiling;
+      if (amountToPay > approvedCeiling) {
+        throw new ApiError(
+          400,
+          "PAYOUT_EXCEEDS_APPROVED_AMOUNT",
+          `Nominal pencairan Rp ${amountToPay.toLocaleString("id-ID")} melebihi batas nominal yang disetujui (Rp ${approvedCeiling.toLocaleString("id-ID")}).`
+        );
+      }
+
+      // Idempotency check: verify this reimbursement has no net active disbursement in kas_messenger
+      const existingKasCheck = activeDb.prepare(`
+        SELECT
+          COALESCE(SUM(kredit), 0) - COALESCE(SUM(debit), 0) as netDisbursed,
+          MAX(CASE WHEN kredit > 0 THEN id ELSE NULL END) as lastPayoutId
+        FROM kas_messenger
+        WHERE reimbursement_id = ?
+      `).get(id) as { netDisbursed: number; lastPayoutId: number | null } | undefined;
+
+      if (Number(existingKasCheck?.netDisbursed ?? 0) > 0) {
+        throw new ApiError(400, "ALREADY_DISBURSED", `Pengajuan reimbursement '${id}' sudah dicairkan pada transaksi Kas Messenger #${existingKasCheck?.lastPayoutId}.`);
+      }
+
       const nowStr = new Date().toISOString().split("T")[0];
       const nowIso = new Date().toISOString();
-      const amountToPay = existing.approvedAmount !== undefined && existing.approvedAmount > 0
-        ? existing.approvedAmount
-        : existing.amount;
-
-      // Idempotency check: verify this reimbursement has not already been disbursed into kas_messenger
-      const existingKasCheck = db.prepare("SELECT id FROM kas_messenger WHERE reimbursement_id = ?").get(id) as { id: number } | undefined;
-      if (existingKasCheck) {
-        throw new ApiError(400, "ALREADY_DISBURSED", `Pengajuan reimbursement '${id}' sudah dicairkan pada transaksi Kas Messenger #${existingKasCheck.id}.`);
-      }
 
       // Phase 4B Batch 2B: Payout is cash disbursement strictly recorded as Kredit in Kas Messenger.
       // payment_method_id = NULL, payment_method_snapshot = NULL, reimbursement_id = id.
@@ -693,7 +846,7 @@ export class MessengerService {
         kategori: existing.category,
         payment_method_id: null,
         payment_method_snapshot: null,
-      });
+      }, activeDb);
 
       // Update reimbursement record
       const updates: Partial<ReimbursementRequest> = {
@@ -706,23 +859,34 @@ export class MessengerService {
         kasMessengerId: kasMessengerItem.id,
       };
 
-      dbMessengerRepository.updateReimbursement(id, updates);
+      const updatedOk = dbMessengerRepository.updateReimbursement(id, updates, activeDb);
+      if (!updatedOk) {
+        throw new ApiError(500, "UPDATE_FAILED", `Gagal memperbarui status pencairan reimbursement '${id}'.`);
+      }
 
       // Record audit log
       dbAuditRepository.save({
-        id: `audit-reimb-pay-${Date.now()}`,
+        id: `audit-reimb-pay-${crypto.randomUUID()}`,
         userId: user.userId,
         userName: user.nama,
         userRole: user.role as any,
         action: "UPDATE",
         module: "Reimbursement Payout",
         details: `Pencairan reimbursement ${id} sebesar Rp ${amountToPay.toLocaleString("id-ID")} kepada ${existing.messengerName} dicatat pada Kas Messenger #${kasMessengerItem.id}`,
-        metadata: { id, amount: amountToPay, kasMessengerId: kasMessengerItem.id, channel: updates.channel },
+        metadata: {
+          id,
+          requestedAmount: existing.amount,
+          approvedAmount: approvedCeiling,
+          paidAmount: amountToPay,
+          forfeitedRemainder: Math.max(0, approvedCeiling - amountToPay),
+          kasMessengerId: kasMessengerItem.id,
+          channel: updates.channel,
+        },
         createdAt: nowIso,
-      });
+      }, activeDb);
 
-      return { ...existing, ...updates };
-    });
+      return dbMessengerRepository.getReimbursementById(id, activeDb) || { ...existing, ...updates };
+    }, activeDb);
   }
 
   // ==========================================
@@ -1265,12 +1429,48 @@ export class MessengerService {
   }
 
   private buildTaskDetailFromOrder(rawOrder: OperationalOrder, taskType: MessengerTaskType): TaskDetailResponse {
+    const resolvedCourierName =
+      taskType === "Proses Samsat"
+        ? (rawOrder as any).samsatMessengerNama || rawOrder.samsatMessenger
+        : taskType === "Jemput Hasil Samsat"
+          ? (rawOrder as any).samsatPickupMessengerNama || (rawOrder as any).samsatPickupMessenger
+          : taskType === "Pengantaran Dokumen"
+            ? rawOrder.messengerPengantar
+            : (rawOrder as any).assignedMessengerName || rawOrder.messenger;
+
+    const resolvedCourierId =
+      taskType === "Proses Samsat"
+        ? rawOrder.samsatMessengerId
+        : taskType === "Jemput Hasil Samsat"
+          ? (rawOrder as any).samsatPickupMessengerId
+          : taskType === "Pengantaran Dokumen"
+            ? (rawOrder as any).deliveryMessengerId
+            : (rawOrder as any).assignedMessengerId;
+
+    const isCompleted =
+      (taskType === "Jemput Dokumen" && Boolean(rawOrder.pickupCompleted)) ||
+      (taskType === "Proses Samsat" && rawOrder.samsatStatus === "Selesai") ||
+      (taskType === "Jemput Hasil Samsat" && (rawOrder as any).samsatPickupStatus === "Dokumen Samsat Diterima di Kantor") ||
+      (taskType === "Pengantaran Dokumen" && (rawOrder.deliveryStatus === "Dokumen Diserahkan" || Boolean(rawOrder.isReceived)));
+
+    const mStatus = String(rawOrder.messengerTaskStatus || "");
+    const derivedStatus = isCompleted
+      ? "Selesai"
+      : mStatus === "Pending" || mStatus === "Menunggu"
+        ? "Pending"
+        : mStatus === "Sedang Dijemput" ||
+            mStatus === "Dalam Proses" ||
+            rawOrder.samsatStatus === "Sedang Proses Samsat" ||
+            rawOrder.deliveryStatus === "Sedang Diantar"
+          ? "Dalam Proses"
+          : "Belum Diambil";
+
     const item: MessengerHistoryItem = {
       id: `HIST-${rawOrder.orderNo}-CUSTOM`,
       orderNo: rawOrder.orderNo,
       taskType,
-      messenger: rawOrder.messenger || (rawOrder as any).assignedMessengerName || "-",
-      messengerEmployeeId: (rawOrder as any).assignedMessengerId || undefined,
+      messenger: resolvedCourierName || "Belum Ditugaskan",
+      messengerEmployeeId: resolvedCourierId || undefined,
       customer: rawOrder.customer,
       phone: rawOrder.nomorHP || "-",
       nopol: rawOrder.nopol || "-",
@@ -1278,14 +1478,16 @@ export class MessengerService {
       layanan: rawOrder.layanan,
       wilayah: rawOrder.wilayahSamsatAsal || "Kantor Samsat",
       completedAt: (rawOrder as any).completedAt || rawOrder.createdAt,
-      totalTagihan: rawOrder.payment?.totalBiaya || 1500000,
-      terbayar: rawOrder.payment?.dibayar || 0,
-      statusBayar: rawOrder.payment?.statusPembayaran || "Lunas",
+      totalTagihan: rawOrder.payment?.totalBiaya ?? 0,
+      terbayar: rawOrder.payment?.dibayar ?? 0,
+      statusBayar: rawOrder.payment?.statusPembayaran || "Belum Bayar",
       status: "Selesai",
       rawOrder,
     };
 
-    return this.buildTaskDetailFromItem(item);
+    const detail = this.buildTaskDetailFromItem(item);
+    (detail.task as any).status = derivedStatus;
+    return detail;
   }
 }
 

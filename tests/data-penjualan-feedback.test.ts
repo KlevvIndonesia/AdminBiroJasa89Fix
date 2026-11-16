@@ -23,17 +23,63 @@
 import "./setup-test-portal-shim";
 import test from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
+import { createApp } from "../server/src/app";
 import {
   classifyMutationError,
   sanitizeBackendMessage,
 } from "../src/app/components/finance/MutationFeedbackDialog";
 import { financeStore } from "../src/app/data/financeStore";
 import { orderStore } from "../src/app/data/orderStore";
+import { orderRepository } from "../src/data/repositories/orderRepository";
+import { financeRepository } from "../src/data/repositories/financeRepository";
+import { ApiFinanceProvider } from "../src/data/api/apiFinanceProvider";
 import { orderService } from "../server/src/services/orderService";
 import { validateOrderUpdatePayload } from "../server/src/middleware/validation";
 import { ApiOrderProvider } from "../src/data/api/apiOrderProvider";
-import { MockOrderProvider } from "./fixtures/mock/mockOrderProvider";
 import { getDb } from "../server/src/database/db";
+
+let testServer: http.Server | undefined;
+let prevAuthToken: string | undefined;
+
+test.before(async () => {
+  prevAuthToken = process.env.AUTH_TOKEN;
+  const app = createApp();
+  const started = await new Promise<{ server: http.Server; baseUrl: string }>((resolve) => {
+    const server = http.createServer(app);
+    server.listen(0, () => {
+      const addr = server.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      resolve({ server, baseUrl: `http://localhost:${port}` });
+    });
+  });
+  testServer = started.server;
+
+  const loginRes = await fetch(`${started.baseUrl}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "svp@birojasa.com", password: "admin123" }),
+  });
+  assert.strictEqual(loginRes.status, 200);
+  const loginBody = (await loginRes.json()) as any;
+  process.env.AUTH_TOKEN = loginBody.data.token;
+
+  const apiOrder = new ApiOrderProvider(`${started.baseUrl}/api`);
+  await apiOrder.initFromApi();
+  orderRepository.setProvider(apiOrder);
+
+  const apiFinance = new ApiFinanceProvider(`${started.baseUrl}/api`);
+  await apiFinance.initFromApi();
+  financeRepository.setProvider(apiFinance);
+  financeStore.syncFromRepository();
+});
+
+test.after(() => {
+  process.env.AUTH_TOKEN = prevAuthToken;
+  orderRepository.setProvider(new ApiOrderProvider());
+  financeRepository.setProvider(new ApiFinanceProvider());
+  testServer?.close();
+});
 
 test("Scenario 1: Tambah data sukses -> modal ditutup, popup sukses ('Data Berhasil Ditambahkan'), data ada di tabel", async () => {
   const rowData = {
@@ -83,6 +129,7 @@ test("Scenario 2: Edit data sukses -> modal ditutup, popup sukses ('Perubahan Be
     layanan: "Perpanjangan 1 Tahun",
     nomorHP: "081234567890",
     wilayahSamsatAsal: "Jakarta Timur",
+    metodePembayaran: "Transfer BCA",
     biayaJasa: 150000,
     totalEstimasi: 750000,
     uangMasuk: 0,
@@ -585,7 +632,7 @@ test("Integration: ApiOrderProvider normalizes HTTP & Network errors and prevent
   }
 });
 
-test("Integration: Backend orderService enforces cross-order duplicate invoice rejection on update and opt-in create", () => {
+test("Integration: Backend orderService enforces cross-order duplicate invoice rejection on update and opt-in duplicate order check", () => {
   const ord1 = orderService.createOrder({
     customer: "User Satu",
     namaPemilik: "User Satu",
@@ -604,32 +651,36 @@ test("Integration: Backend orderService enforces cross-order duplicate invoice r
     layanan: "Perpanjangan 1 Tahun",
     nopol: "B 2020 TWO",
     wilayahSamsatAsal: "Jakarta Timur",
-    noInvoice: "INV-UNIQ-202",
     biayaJasa: 150000,
     totalEstimasi: 450000,
   });
 
-  // Attempt to update ord2 to steal ord1's invoice
+  // Authoritative backend invoice generated for ord1 (SSoT ignores client noInvoice)
+  const ord1InvoiceNo = ord1.payment?.invoiceNo || (ord1 as any).noInvoice;
+  assert.ok(ord1InvoiceNo, "ord1 must have authoritative invoice number");
+  assert.notStrictEqual(ord1InvoiceNo, "INV-UNIQ-101");
+
+  // Attempt to update ord2 to steal ord1's authoritative invoice
   assert.throws(
-    () => orderService.updateOrder(ord2.orderNo, { noInvoice: "INV-UNIQ-101" } as any),
+    () => orderService.updateOrder(ord2.orderNo, { noInvoice: ord1InvoiceNo } as any),
     (err: any) => err.statusCode === 409 && err.code === "DUPLICATE_RECORD"
   );
 
-  // Opt-in duplicate invoice rejection during creation
+  // Opt-in duplicate order rejection during creation
   assert.throws(
     () =>
       orderService.createOrderWithIdempotency({
+        orderNo: ord1.orderNo,
         customer: "User Tiga",
         namaPemilik: "User Tiga",
         nomorHP: "081255556666",
         layanan: "Perpanjangan 1 Tahun",
         nopol: "B 3030 THR",
         wilayahSamsatAsal: "Jakarta Timur",
-        noInvoice: "INV-UNIQ-101",
-        rejectDuplicateInvoice: true,
+        rejectDuplicateOrder: true,
         biayaJasa: 150000,
         totalEstimasi: 450000,
-      }),
+      } as any),
     (err: any) => err.statusCode === 409 && err.code === "DUPLICATE_RECORD"
   );
 });

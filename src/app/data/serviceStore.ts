@@ -5,6 +5,7 @@
 
 import { useState, useEffect } from "react";
 import { APP_CONFIG } from "../config/appConfig";
+import { permissionStore } from "./permissionStore";
 
 export interface ServiceItem {
   id: string;
@@ -160,15 +161,22 @@ const DEFAULT_SERVICES: ServiceItem[] = [
 ];
 
 class ServiceStore {
-  private services: ServiceItem[] = [...DEFAULT_SERVICES];
+  private services: ServiceItem[] = typeof window === "undefined" ? [...DEFAULT_SERVICES] : [];
   private listeners: Set<() => void> = new Set();
   private isInitialized = false;
   private isLoadingState = false;
   private lastError: string | null = null;
+  private isDataStale = false;
+  private lastFetchedAuthKey: string | null = null;
+  private activeFetchPromise: Promise<void> | null = null;
+  private permissionUnsubscribe: (() => void) | null = null;
 
   constructor() {
-    if (typeof window !== "undefined") {
-      this.initFromApi();
+    this.permissionUnsubscribe = permissionStore.subscribe(() => {
+      this.handlePermissionStateChange();
+    });
+    if (typeof window !== "undefined" && this.canFetchFromApi()) {
+      void this.initFromApi();
     }
   }
 
@@ -184,42 +192,101 @@ class ServiceStore {
   }
 
   private getAuthHeader(): Record<string, string> {
-    const token = typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
-    return token ? { Authorization: `Bearer ${token}` } : {};
+    try {
+      if (typeof window !== "undefined" && window.localStorage) {
+        const token = window.localStorage.getItem("auth_token");
+        return token ? { Authorization: `Bearer ${token}` } : {};
+      }
+      if (typeof process !== "undefined" && process.env?.AUTH_TOKEN) {
+        return { Authorization: `Bearer ${process.env.AUTH_TOKEN}` };
+      }
+    } catch {
+      // ignore
+    }
+    return {};
+  }
+
+  private buildAuthKey(): string {
+    const authHeader = this.getAuthHeader().Authorization || "";
+    const role = permissionStore.getSessionRole() || "";
+    return `${authHeader}::${role}`;
+  }
+
+  private canFetchFromApi(): boolean {
+    if (!this.getAuthHeader().Authorization) return false;
+    return permissionStore.getSessionAuthStatus() === "authenticated";
+  }
+
+  private handlePermissionStateChange(): void {
+    const authStatus = permissionStore.getSessionAuthStatus();
+    if (authStatus === "unauthenticated" || authStatus === "forbidden") {
+      this.services = typeof window === "undefined" ? [...DEFAULT_SERVICES] : [];
+      this.isInitialized = false;
+      this.isLoadingState = false;
+      this.lastFetchedAuthKey = null;
+      this.lastError = null;
+      this.notify();
+      return;
+    }
+    if (authStatus === "hydrating") {
+      return;
+    }
+    if (typeof window !== "undefined" && this.canFetchFromApi()) {
+      const nextKey = this.buildAuthKey();
+      if (!this.isInitialized || this.lastFetchedAuthKey !== nextKey) {
+        void this.initFromApi();
+      }
+    }
   }
 
   public async initFromApi(): Promise<void> {
-    if (this.isLoadingState) return;
-    const authHeaders = this.getAuthHeader();
-    if (!authHeaders.Authorization) {
+    if (!this.canFetchFromApi()) {
+      this.isLoadingState = false;
       return;
     }
+    if (this.activeFetchPromise) return this.activeFetchPromise;
+
+    const capturedKey = this.buildAuthKey();
     this.isLoadingState = true;
     this.lastError = null;
+    this.notify();
 
-    try {
-      const res = await fetch(`${APP_CONFIG.apiBaseUrl}/services`, {
-        headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
-      });
+    this.activeFetchPromise = (async () => {
+      try {
+        const res = await fetch(`${APP_CONFIG.apiBaseUrl}/services`, {
+          headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
+        });
 
-      if (!res.ok) {
-        throw new Error(`HTTP Error ${res.status}`);
-      }
+        if (!this.canFetchFromApi()) return;
 
-      const payload = await res.json();
-      if (payload.success && Array.isArray(payload.data)) {
-        this.services = payload.data;
-        this.isInitialized = true;
+        if (!res.ok) {
+          throw new Error(`HTTP Error ${res.status}`);
+        }
+
+        const payload = await res.json();
+        if (!this.canFetchFromApi()) return;
+        if (payload.success && Array.isArray(payload.data)) {
+          this.services = payload.data;
+          this.isInitialized = true;
+          this.isDataStale = false;
+          this.lastError = null;
+          this.lastFetchedAuthKey = capturedKey;
+          this.isLoadingState = false;
+          this.notify();
+        } else {
+          throw new Error(payload.message || "Format data layanan tidak valid");
+        }
+      } catch (err: any) {
         this.isLoadingState = false;
+        this.isDataStale = true;
+        this.lastError = err?.message || "Gagal menghubungkan ke backend layanan";
         this.notify();
-      } else {
-        throw new Error(payload.message || "Format data layanan tidak valid");
+      } finally {
+        this.activeFetchPromise = null;
       }
-    } catch (err: any) {
-      this.isLoadingState = false;
-      this.lastError = err?.message || "Gagal menghubungkan ke backend layanan";
-      this.notify();
-    }
+    })();
+
+    return this.activeFetchPromise;
   }
 
   public getAll(): ServiceItem[] {
@@ -481,6 +548,10 @@ class ServiceStore {
     return this.lastError;
   }
 
+  public isStale(): boolean {
+    return this.isDataStale;
+  }
+
   public async updateService(
     id: string,
     updates: {
@@ -624,6 +695,7 @@ export function useServiceStore() {
     activeServices: serviceStore.getActive(),
     isLoading: serviceStore.isLoading(),
     error: serviceStore.getError(),
+    isStale: serviceStore.isStale(),
     refreshServices: () => serviceStore.initFromApi(),
     updateService: (id: string, updates: any) => serviceStore.updateService(id, updates),
     getServiceById: (id: string) => serviceStore.getById(id),

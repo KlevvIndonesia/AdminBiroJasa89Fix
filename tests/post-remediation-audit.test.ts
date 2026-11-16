@@ -201,7 +201,14 @@ test("POST-REMEDIATION AUDIT: Phase A, B, and C Verification", async (t) => {
 
     // Fast advance to Supervisi Approved (Stage 6) so cashback payout is eligible
     orderService.advanceOrder(cbOrder.orderNo, "Proses Samsat", { documentsVerified: true }, adminUser);
-    orderService.advanceOrder(cbOrder.orderNo, "Verifikasi Ulang", { samsatProcesses: [{ nama: "Pajak", status: "Selesai" }] }, adminUser);
+    dbOrderRepository.updateOrder(cbOrder.orderNo, {
+      samsatProcesses: [{ id: "comp-pajak", name: "Pajak", status: "Selesai" }],
+      samsatStatus: "Selesai",
+      samsatPickupStatus: "Dokumen Samsat Diterima di Kantor",
+    } as any);
+    orderService.advanceOrder(cbOrder.orderNo, "Verifikasi Ulang", {
+      samsatProcesses: [{ id: "comp-pajak", name: "Pajak", status: "Selesai" }],
+    }, adminUser);
     orderService.advanceOrder(cbOrder.orderNo, "Supervisi", {
       documentsVerified: true,
       isCostVerified: true,
@@ -358,7 +365,14 @@ test("POST-REMEDIATION AUDIT: Phase A, B, and C Verification", async (t) => {
     }, adminUser);
 
     orderService.advanceOrder(ordCashback.orderNo, "Proses Samsat", { documentsVerified: true }, adminUser);
-    orderService.advanceOrder(ordCashback.orderNo, "Verifikasi Ulang", { samsatProcesses: [{ nama: "Pajak", status: "Selesai" }] }, adminUser);
+    dbOrderRepository.updateOrder(ordCashback.orderNo, {
+      samsatProcesses: [{ id: "comp-pajak", name: "Pajak", status: "Selesai" }],
+      samsatStatus: "Selesai",
+      samsatPickupStatus: "Dokumen Samsat Diterima di Kantor",
+    } as any);
+    orderService.advanceOrder(ordCashback.orderNo, "Verifikasi Ulang", {
+      samsatProcesses: [{ id: "comp-pajak", name: "Pajak", status: "Selesai" }],
+    }, adminUser);
     orderService.advanceOrder(ordCashback.orderNo, "Supervisi", {
       documentsVerified: true,
       isCostVerified: true,

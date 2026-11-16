@@ -480,6 +480,7 @@ export interface IOrderDataProvider {
   advanceOrderAsync?(orderNo: string, targetStage: StageName, updates?: Partial<OperationalOrder>): Promise<OperationalOrder | false>;
   rollbackOrder(orderNo: string, targetStage: StageName, updates?: Partial<OperationalOrder>): boolean;
   rollbackOrderAsync?(orderNo: string, targetStage: StageName, updates?: Partial<OperationalOrder>): Promise<OperationalOrder | false>;
+  completeDeliveryDirectAsync?(orderNo: string, payload: { receiverName: string; photoUrl?: string }): Promise<OperationalOrder | false>;
   archiveOrder(orderNo: string): boolean;
   archiveOrderAsync?(orderNo: string): Promise<boolean>;
   deleteArchivedOrder?(orderNo: string): boolean;

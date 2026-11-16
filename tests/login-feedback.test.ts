@@ -1,10 +1,24 @@
 import test from "node:test";
 import assert from "node:assert";
-import { userRepository, UserRepository, AuthResult } from "../src/data/repositories/userRepository";
-import { MockUserProvider } from "./fixtures/mock/mockUserProvider";
+import http from "node:http";
+import { createApp } from "../server/src/app";
+import { db } from "../server/src/database/db";
+import { hashPassword } from "../server/src/utils/crypto";
+import { loginRateLimiter } from "../server/src/middleware/rateLimiter";
+import { UserRepository, AuthResult } from "../src/data/repositories/userRepository";
 import { ApiUserProvider } from "../src/data/api/apiUserProvider";
 
-userRepository.setProvider(new MockUserProvider());
+function startTestServer(): Promise<{ server: http.Server; baseUrl: string }> {
+  return new Promise((resolve) => {
+    const app = createApp();
+    const server = http.createServer(app);
+    server.listen(0, () => {
+      const addr = server.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      resolve({ server, baseUrl: `http://localhost:${port}` });
+    });
+  });
+}
 
 const EXPECTED_MESSAGES = {
   INVALID_CREDENTIALS: "Email atau password yang Anda masukkan tidak sesuai. Periksa kembali data login Anda.",
@@ -16,59 +30,108 @@ const EXPECTED_MESSAGES = {
 };
 
 test("Login Feedback - Successful authentication returns valid session and success flag", async () => {
-  const result: AuthResult = await userRepository.authenticateDetailed("svp@birojasa.com", "admin123");
-  assert.strictEqual(result.success, true);
-  assert.ok(result.session);
-  assert.strictEqual(result.session?.role, "administrator");
-  assert.strictEqual(result.session?.name, "Admin Super (SVP)");
-  assert.strictEqual(result.errorCode, undefined);
-  assert.strictEqual(result.errorMessage, undefined);
+  loginRateLimiter.reset();
+  const { server, baseUrl } = await startTestServer();
+  try {
+    const repo = new UserRepository(new ApiUserProvider(`${baseUrl}/api`));
+    const result: AuthResult = await repo.authenticateDetailed("svp@birojasa.com", "admin123");
+    assert.strictEqual(result.success, true);
+    assert.ok(result.session);
+    assert.strictEqual(result.session?.role, "administrator");
+    assert.strictEqual(result.session?.name, "Admin Super (SVP)");
+    assert.strictEqual(result.errorCode, undefined);
+    assert.strictEqual(result.errorMessage, undefined);
+  } finally {
+    server.close();
+  }
 });
 
 test("Login Feedback - Wrong password returns sanitized generic credential error", async () => {
-  const result: AuthResult = await userRepository.authenticateDetailed("svp@birojasa.com", "wrongpassword");
-  assert.strictEqual(result.success, false);
-  assert.strictEqual(result.errorCode, "INVALID_CREDENTIALS");
-  assert.strictEqual(result.errorMessage, EXPECTED_MESSAGES.INVALID_CREDENTIALS);
-  assert.strictEqual(result.session, undefined);
+  loginRateLimiter.reset();
+  const { server, baseUrl } = await startTestServer();
+  try {
+    const repo = new UserRepository(new ApiUserProvider(`${baseUrl}/api`));
+    const result: AuthResult = await repo.authenticateDetailed("svp@birojasa.com", "wrongpassword");
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.errorCode, "INVALID_CREDENTIALS");
+    assert.strictEqual(result.errorMessage, EXPECTED_MESSAGES.INVALID_CREDENTIALS);
+    assert.strictEqual(result.session, undefined);
+  } finally {
+    server.close();
+  }
 });
 
 test("Login Feedback - Unregistered email returns identical generic credential error without revealing existence", async () => {
-  const result: AuthResult = await userRepository.authenticateDetailed("nonexistent@birojasa.com", "admin123");
-  assert.strictEqual(result.success, false);
-  assert.strictEqual(result.errorCode, "INVALID_CREDENTIALS");
-  assert.strictEqual(result.errorMessage, EXPECTED_MESSAGES.INVALID_CREDENTIALS);
-  assert.strictEqual(result.session, undefined);
+  loginRateLimiter.reset();
+  const { server, baseUrl } = await startTestServer();
+  try {
+    const repo = new UserRepository(new ApiUserProvider(`${baseUrl}/api`));
+    const result: AuthResult = await repo.authenticateDetailed("nonexistent@birojasa.com", "admin123");
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.errorCode, "INVALID_CREDENTIALS");
+    assert.strictEqual(result.errorMessage, EXPECTED_MESSAGES.INVALID_CREDENTIALS);
+    assert.strictEqual(result.session, undefined);
+  } finally {
+    server.close();
+  }
 });
 
 test("Login Feedback - Empty or whitespace credentials return validation error", async () => {
-  const emptyRes: AuthResult = await userRepository.authenticateDetailed("", "");
-  assert.strictEqual(emptyRes.success, false);
-  assert.strictEqual(emptyRes.errorCode, "VALIDATION_ERROR");
-  assert.ok(emptyRes.errorMessage);
+  loginRateLimiter.reset();
+  const { server, baseUrl } = await startTestServer();
+  try {
+    const repo = new UserRepository(new ApiUserProvider(`${baseUrl}/api`));
+    const emptyRes: AuthResult = await repo.authenticateDetailed("", "");
+    assert.strictEqual(emptyRes.success, false);
+    assert.strictEqual(emptyRes.errorCode, "VALIDATION_ERROR");
+    assert.ok(emptyRes.errorMessage);
 
-  const spaceRes: AuthResult = await userRepository.authenticateDetailed("   ", "   ");
-  assert.strictEqual(spaceRes.success, false);
-  assert.strictEqual(spaceRes.errorCode, "VALIDATION_ERROR");
+    const spaceRes: AuthResult = await repo.authenticateDetailed("   ", "   ");
+    assert.strictEqual(spaceRes.success, false);
+    assert.strictEqual(spaceRes.errorCode, "VALIDATION_ERROR");
+  } finally {
+    server.close();
+  }
 });
 
 test("Login Feedback - Inactive user returns account inactive notification", async () => {
-  const provider = new MockUserProvider();
-  // nina.rahayu@birojasa.com is initialized with status "Nonaktif"
-  const result = await provider.authenticateDetailed("nina.rahayu@birojasa.com", "anypass");
-  assert.strictEqual(result.success, false);
-  assert.strictEqual(result.errorCode, "ACCOUNT_INACTIVE");
-  assert.strictEqual(result.errorMessage, EXPECTED_MESSAGES.ACCOUNT_INACTIVE);
-  assert.strictEqual(result.session, undefined);
+  loginRateLimiter.reset();
+  const { server, baseUrl } = await startTestServer();
+  const inactiveEmail = `inactive.${Date.now()}@birojasa.com`;
+  try {
+    const { hash, salt } = hashPassword("secret123");
+    db.prepare(
+      "INSERT INTO users (email, password_hash, password_salt, nama, jabatan, role, status) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ).run(inactiveEmail, hash, salt, "Inactive Test User", "ADMIN", "admin", "Nonaktif");
+
+    const provider = new ApiUserProvider(`${baseUrl}/api`);
+    const result = await provider.authenticateDetailed(inactiveEmail, "secret123");
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.errorCode, "ACCOUNT_INACTIVE");
+    assert.strictEqual(result.errorMessage, EXPECTED_MESSAGES.ACCOUNT_INACTIVE);
+    assert.strictEqual(result.session, undefined);
+  } finally {
+    try {
+      db.prepare("DELETE FROM users WHERE email = ?").run(inactiveEmail);
+    } catch {}
+    server.close();
+  }
 });
 
 test("Login Feedback - Backward compatibility with userRepository.authenticate() preserved", async () => {
-  const valid = await userRepository.authenticate("finance@birojasa.com", "finance123");
-  assert.ok(valid !== null);
-  assert.strictEqual(valid?.role, "finance");
+  loginRateLimiter.reset();
+  const { server, baseUrl } = await startTestServer();
+  try {
+    const repo = new UserRepository(new ApiUserProvider(`${baseUrl}/api`));
+    const valid = await repo.authenticate("finance@birojasa.com", "finance123");
+    assert.ok(valid !== null);
+    assert.strictEqual(valid?.role, "finance");
 
-  const invalid = await userRepository.authenticate("finance@birojasa.com", "wrongpass");
-  assert.strictEqual(invalid, null);
+    const invalid = await repo.authenticate("finance@birojasa.com", "wrongpass");
+    assert.strictEqual(invalid, null);
+  } finally {
+    server.close();
+  }
 });
 
 test("Login Feedback - ApiUserProvider maps HTTP 401 to generic credential error", async () => {

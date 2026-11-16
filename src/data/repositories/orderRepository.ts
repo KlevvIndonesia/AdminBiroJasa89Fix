@@ -24,6 +24,7 @@ export interface IOrderRepository {
   advanceOrderAsync?(orderNo: string, targetStage: StageName, updates?: Partial<OperationalOrder>): Promise<OperationalOrder | false>;
   rollbackOrder(orderNo: string, targetStage: StageName, updates?: Partial<OperationalOrder>): boolean;
   rollbackOrderAsync?(orderNo: string, targetStage: StageName, updates?: Partial<OperationalOrder>): Promise<OperationalOrder | false>;
+  completeDeliveryDirectAsync?(orderNo: string, payload: { receiverName: string; photoUrl?: string }): Promise<OperationalOrder | false>;
   archiveOrder(orderNo: string): boolean;
   archiveOrderAsync?(orderNo: string): Promise<boolean>;
   deleteArchivedOrder(orderNo: string): boolean;
@@ -38,6 +39,7 @@ export interface IOrderRepository {
   getError?(): string | null;
   getIsInitialized?(): boolean;
   refresh?(silent?: boolean): Promise<void>;
+  clearSessionData?(): void;
 }
 
 export class OrderRepository implements IOrderRepository {
@@ -158,6 +160,16 @@ export class OrderRepository implements IOrderRepository {
     }
     const ok = this.provider.rollbackOrder(orderNo, targetStage, updates);
     return ok ? (this.getByOrderNo(orderNo) || false) : false;
+  }
+
+  public async completeDeliveryDirectAsync(
+    orderNo: string,
+    payload: { receiverName: string; photoUrl?: string }
+  ): Promise<OperationalOrder | false> {
+    if (typeof (this.provider as any).completeDeliveryDirectAsync === "function") {
+      return (this.provider as any).completeDeliveryDirectAsync(orderNo, payload);
+    }
+    return false;
   }
 
   public archiveOrder(orderNo: string): boolean {
@@ -295,6 +307,13 @@ export class OrderRepository implements IOrderRepository {
     } else if (typeof (this.provider as any).initFromApi === "function") {
       await (this.provider as any).initFromApi();
     }
+  }
+
+  public clearSessionData(): void {
+    if (typeof (this.provider as any)?.clearSessionData === "function") {
+      (this.provider as any).clearSessionData();
+    }
+    this.notifyListeners();
   }
 }
 

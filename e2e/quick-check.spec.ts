@@ -1,15 +1,9 @@
 import { test, expect } from "@playwright/test";
+import { loginAs } from "./helpers/authHelper";
 
 test("Quick check with domcontentloaded", async ({ page }) => {
-  await page.goto("http://localhost:3000", { waitUntil: "domcontentloaded" });
-  await page.fill("#email", "svp@birojasa.com");
-  await page.fill("#password", "admin123");
-
-  const loginResponsePromise = page.waitForResponse(
-    (response) => response.url().includes("/api/auth/login") && response.status() === 200
-  );
-  await page.click("button[type='submit']");
-  await loginResponsePromise;
+  test.setTimeout(60000);
+  await loginAs(page, "svp@birojasa.com", "admin123");
 
   await expect(page.getByRole("button", { name: "Dashboard" })).toBeVisible({ timeout: 15000 });
 

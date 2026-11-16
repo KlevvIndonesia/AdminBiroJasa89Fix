@@ -42,20 +42,17 @@ export interface NotificationLogItem {
   createdAt: string;
 }
 
-const STORAGE_KEY_SETTINGS = "sun89_notification_settings";
-const STORAGE_KEY_LOGS = "sun89_notification_logs";
-
 export const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const DEFAULT_SETTINGS: NotificationSettings = {
   id: "global",
-  recipientEmails: ["admin@sunbirojasa.com"],
+  recipientEmails: [],
   notifyTagihanReminder: true,
   notifyTagihanPerubahan: true,
   notifyOrderUpdate: true,
   notifyProsesGagal: true,
-  updatedAt: new Date().toISOString(),
-  updatedBy: "system",
+  updatedAt: "",
+  updatedBy: null,
 };
 
 const DEFAULT_SMTP: SmtpConfigStatus = {
@@ -66,7 +63,7 @@ const DEFAULT_SMTP: SmtpConfigStatus = {
   port: null,
   senderEmail: null,
   hasCredentials: false,
-  lastChecked: new Date().toISOString(),
+  lastChecked: "",
 };
 
 class NotificationSettingsStore {
@@ -78,10 +75,13 @@ class NotificationSettingsStore {
   private isLoading = false;
   private isSaving = false;
   private isTesting = false;
+  private lastError: string | null = null;
+  private isDataStale = false;
 
   constructor() {
-    this.loadFromStorage();
-    this.fetchFromApi().catch(() => {});
+    if (this.getAuthHeader().Authorization) {
+      this.fetchFromApi().catch(() => {});
+    }
   }
 
   private getAuthHeader(): Record<string, string> {
@@ -92,38 +92,13 @@ class NotificationSettingsStore {
           return { Authorization: `Bearer ${token}` };
         }
       }
+      if (typeof process !== "undefined" && process.env?.AUTH_TOKEN) {
+        return { Authorization: `Bearer ${process.env.AUTH_TOKEN}` };
+      }
     } catch {
       // ignore
     }
     return {};
-  }
-
-  private loadFromStorage() {
-    try {
-      if (typeof window !== "undefined" && window.localStorage) {
-        const cached = window.localStorage.getItem(STORAGE_KEY_SETTINGS);
-        if (cached) {
-          this.settings = { ...DEFAULT_SETTINGS, ...JSON.parse(cached) };
-        }
-        const cachedLogs = window.localStorage.getItem(STORAGE_KEY_LOGS);
-        if (cachedLogs) {
-          this.logs = JSON.parse(cachedLogs);
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  private saveToStorage() {
-    try {
-      if (typeof window !== "undefined" && window.localStorage) {
-        window.localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(this.settings));
-        window.localStorage.setItem(STORAGE_KEY_LOGS, JSON.stringify(this.logs));
-      }
-    } catch {
-      // ignore
-    }
   }
 
   public subscribe(listener: () => void): () => void {
@@ -132,7 +107,6 @@ class NotificationSettingsStore {
   }
 
   private notify() {
-    this.saveToStorage();
     this.listeners.forEach((fn) => fn());
   }
 
@@ -160,11 +134,20 @@ class NotificationSettingsStore {
     return this.isTesting;
   }
 
+  public getError(): string | null {
+    return this.lastError;
+  }
+
+  public isStale(): boolean {
+    return this.isDataStale;
+  }
+
   /**
    * Fetch persistent settings and SMTP status from the backend API
    */
   public async fetchFromApi(): Promise<void> {
     this.isLoading = true;
+    this.lastError = null;
     this.notify();
 
     try {
@@ -173,24 +156,30 @@ class NotificationSettingsStore {
         headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
       });
 
-      if (res.ok) {
-        const payload = await res.json();
-        if (payload.success && payload.data) {
-          if (payload.data.settings) {
-            this.settings = {
-              ...this.settings,
-              ...payload.data.settings,
-            };
-          }
-          if (payload.data.smtpStatus) {
-            this.smtpStatus = payload.data.smtpStatus;
-          }
+      if (!res.ok) {
+        const errPayload = await res.json().catch(() => ({}));
+        throw new Error(errPayload?.error?.message || errPayload?.message || `Gagal memuat pengaturan notifikasi (HTTP ${res.status})`);
+      }
+
+      const payload = await res.json();
+      if (payload.success && payload.data) {
+        if (payload.data.settings) {
+          this.settings = {
+            ...DEFAULT_SETTINGS,
+            ...payload.data.settings,
+          };
         }
+        if (payload.data.smtpStatus) {
+          this.smtpStatus = payload.data.smtpStatus;
+        }
+        this.lastError = null;
+        this.isDataStale = false;
       }
 
       await this.fetchLogs();
-    } catch (err) {
-      // Backend unreachable or offline mode; keep cached settings safely
+    } catch (err: any) {
+      this.lastError = err?.message || "Gagal memuat pengaturan notifikasi dari server.";
+      this.isDataStale = true;
     } finally {
       this.isLoading = false;
       this.isInitialized = true;
@@ -208,16 +197,23 @@ class NotificationSettingsStore {
         headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
       });
 
-      if (res.ok) {
-        const payload = await res.json();
-        if (payload.success && Array.isArray(payload.data)) {
-          this.logs = payload.data;
-          this.notify();
-          return this.logs;
-        }
+      if (!res.ok) {
+        const errPayload = await res.json().catch(() => ({}));
+        throw new Error(errPayload?.error?.message || errPayload?.message || `Gagal memuat log notifikasi (HTTP ${res.status})`);
       }
-    } catch {
-      // keep existing logs
+
+      const payload = await res.json();
+      if (payload.success && Array.isArray(payload.data)) {
+        this.logs = payload.data;
+        this.lastError = null;
+        this.isDataStale = false;
+        this.notify();
+        return this.logs;
+      }
+    } catch (err: any) {
+      this.lastError = err?.message || "Gagal memuat riwayat notifikasi dari server.";
+      this.isDataStale = true;
+      this.notify();
     }
     return this.logs;
   }
@@ -227,6 +223,7 @@ class NotificationSettingsStore {
    */
   public async saveSettings(customPayload?: Partial<NotificationSettings>): Promise<{ success: boolean; message: string }> {
     this.isSaving = true;
+    this.lastError = null;
     this.notify();
 
     const payloadToSave = {
@@ -254,31 +251,41 @@ class NotificationSettingsStore {
         body: JSON.stringify(payloadToSave),
       });
 
-      if (res.ok) {
-        const payload = await res.json();
-        if (payload.success && payload.data?.settings) {
-          this.settings = payload.data.settings;
-          if (payload.data.smtpStatus) {
-            this.smtpStatus = payload.data.smtpStatus;
-          }
-          this.isSaving = false;
-          this.notify();
-          return { success: true, message: "Pengaturan notifikasi berhasil disimpan secara persisten." };
-        }
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload?.success) {
+        const message = payload?.error?.message || payload?.message || `Gagal menyimpan pengaturan notifikasi (HTTP ${res.status})`;
+        this.isSaving = false;
+        this.lastError = message;
+        this.isDataStale = true;
+        this.notify();
+        return { success: false, message };
       }
-    } catch {
-      // Fallback local save
-    }
 
-    // Local fallback update
-    this.settings = {
-      ...this.settings,
-      ...payloadToSave,
-      updatedAt: new Date().toISOString(),
-    };
-    this.isSaving = false;
-    this.notify();
-    return { success: true, message: "Pengaturan notifikasi tersimpan (mode offline)." };
+      if (payload.data?.settings) {
+        this.settings = payload.data.settings;
+      } else {
+        this.settings = {
+          ...this.settings,
+          ...payloadToSave,
+          updatedAt: new Date().toISOString(),
+        };
+      }
+      if (payload.data?.smtpStatus) {
+        this.smtpStatus = payload.data.smtpStatus;
+      }
+      this.isSaving = false;
+      this.lastError = null;
+      this.isDataStale = false;
+      this.notify();
+      return { success: true, message: "Pengaturan notifikasi berhasil disimpan secara persisten." };
+    } catch (err: any) {
+      const message = err?.message || "Gagal menyimpan pengaturan notifikasi: server tidak dapat dihubungi.";
+      this.isSaving = false;
+      this.lastError = message;
+      this.isDataStale = true;
+      this.notify();
+      return { success: false, message };
+    }
   }
 
   /**
@@ -330,6 +337,7 @@ class NotificationSettingsStore {
    */
   public async sendTestEmail(targetEmail?: string): Promise<{ success: boolean; message: string; log?: NotificationLogItem }> {
     this.isTesting = true;
+    this.lastError = null;
     this.notify();
 
     const emailToSend = targetEmail?.trim() || this.settings.recipientEmails[0];
@@ -351,37 +359,42 @@ class NotificationSettingsStore {
         body: JSON.stringify({ email: emailToSend }),
       });
 
-      const payload = await res.json();
+      const payload = await res.json().catch(() => ({}));
       await this.fetchLogs();
 
+      if (!res.ok) {
+        const errMessage = payload?.error?.message || payload?.message || `Gagal mengirim email percobaan (HTTP ${res.status})`;
+        this.lastError = errMessage;
+        this.isDataStale = true;
+        this.isTesting = false;
+        this.notify();
+        return {
+          success: false,
+          message: errMessage,
+          log: payload?.data?.log,
+        };
+      }
+
       this.isTesting = false;
+      this.lastError = null;
+      this.isDataStale = false;
       this.notify();
 
       return {
-        success: payload.success,
-        message: payload.message,
+        success: Boolean(payload.success),
+        message: payload.message || "Email percobaan diproses.",
         log: payload.data?.log,
       };
     } catch (err: any) {
-      // Local fallback simulation if server is unreachable
-      const localLog: NotificationLogItem = {
-        id: `LOG-${Date.now()}`,
-        type: "EMAIL_TEST",
-        recipient: emailToSend,
-        title: "Kirim Email Percobaan Pengaturan",
-        referenceNo: "TEST-DIAGNOSTIC",
-        status: "GAGAL",
-        errorMessage: "Koneksi ke backend gagal atau layanan SMTP pengirim belum aktif.",
-        createdAt: new Date().toISOString(),
-      };
-      this.logs.unshift(localLog);
+      const errMessage = err?.message || "Pengiriman email percobaan gagal: Server backend tidak dapat dihubungi atau SMTP offline.";
+      this.lastError = errMessage;
+      this.isDataStale = true;
       this.isTesting = false;
       this.notify();
 
       return {
         success: false,
-        message: "Pengiriman email percobaan gagal: Server backend tidak dapat dihubungi atau SMTP offline.",
-        log: localLog,
+        message: errMessage,
       };
     }
   }
@@ -408,6 +421,8 @@ export function useNotificationSettings() {
     isLoading: notificationSettingsStore.getIsLoading(),
     isSaving: notificationSettingsStore.getIsSaving(),
     isTesting: notificationSettingsStore.getIsTesting(),
+    error: notificationSettingsStore.getError(),
+    isStale: notificationSettingsStore.isStale(),
     saveSettings: (payload?: Partial<NotificationSettings>) => notificationSettingsStore.saveSettings(payload),
     addRecipientEmail: (email: string) => notificationSettingsStore.addRecipientEmail(email),
     removeRecipientEmail: (index: number) => notificationSettingsStore.removeRecipientEmail(index),

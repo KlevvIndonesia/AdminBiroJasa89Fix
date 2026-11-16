@@ -399,7 +399,7 @@ export function EstimatorExtended({
                     <span className="col-span-1 font-mono text-muted-foreground">{idx + 1}</span>
                     <span className="col-span-5 font-medium text-foreground">{item.name}</span>
                     <span className="col-span-2 text-center">
-                      <Badge variant="outline" className="text-[9px] px-1.5 py-0">
+                      <Badge variant="outline" className="text-[11px] px-1.5 py-0">
                         {item.category}
                       </Badge>
                     </span>
@@ -410,7 +410,8 @@ export function EstimatorExtended({
                       <button
                         type="button"
                         onClick={() => handleOpenExplanation(item.id)}
-                        className="text-muted-foreground/60 hover:text-primary transition-colors p-1 rounded"
+                        className="text-muted-foreground/60 hover:text-primary transition-colors p-1 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        aria-label={`Lihat cara hitung ${item.name}`}
                         title="Lihat cara hitung & rumus"
                       >
                         <HelpCircle className="w-3.5 h-3.5" />

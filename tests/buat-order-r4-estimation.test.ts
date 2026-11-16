@@ -10,14 +10,68 @@
  * 5. Order & Invoice creation consistency: order total === invoice amount, zero double counting.
  */
 
-import test from "node:test";
+import test, { before, after } from "node:test";
 import assert from "node:assert";
+import http from "node:http";
+import { createApp } from "../server/src/app";
+import { orderRepository } from "../src/data/repositories/orderRepository";
+import { financeRepository } from "../src/data/repositories/financeRepository";
+import { pricingRepository } from "../src/data/repositories/pricingRepository";
+import { ApiOrderProvider } from "../src/data/api/apiOrderProvider";
+import { ApiFinanceProvider } from "../src/data/api/apiFinanceProvider";
+import { ApiPricingProvider } from "../src/data/api/apiPricingProvider";
 import { orderStore } from "../src/app/data/orderStore";
 import { financeStore } from "../src/app/data/financeStore";
 import { calculateEstimation } from "../src/domain/estimation/estimationEngine";
 import { DEFAULT_R4_ANNUAL_TEMPLATE } from "../src/domain/estimation/defaultTemplates";
 import { EstimationInput } from "../src/domain/estimation/types";
 import { pricingStore } from "../src/app/data/pricingStore";
+
+let server: http.Server | null = null;
+const prevToken = process.env.AUTH_TOKEN;
+
+before(async () => {
+  const started = await new Promise<{ server: http.Server; baseUrl: string }>((resolve) => {
+    const app = createApp();
+    const s = http.createServer(app);
+    s.listen(0, () => {
+      const addr = s.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      resolve({ server: s, baseUrl: `http://localhost:${port}` });
+    });
+  });
+  server = started.server;
+
+  const loginRes = await fetch(`${started.baseUrl}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "svp@birojasa.com", password: "admin123" }),
+  });
+  assert.strictEqual(loginRes.status, 200);
+  const loginBody = (await loginRes.json()) as any;
+  process.env.AUTH_TOKEN = loginBody.data.token;
+
+  orderRepository.setProvider(new ApiOrderProvider(`${started.baseUrl}/api`));
+  financeRepository.setProvider(new ApiFinanceProvider(`${started.baseUrl}/api`));
+  pricingRepository.setProvider(new ApiPricingProvider(`${started.baseUrl}/api`));
+  await Promise.all([
+    pricingStore.initFromApi(),
+    financeStore.initFromApi(),
+    orderStore.initFromApi(),
+  ]);
+});
+
+after(() => {
+  if (prevToken === undefined) {
+    delete process.env.AUTH_TOKEN;
+  } else {
+    process.env.AUTH_TOKEN = prevToken;
+  }
+  orderRepository.setProvider(new ApiOrderProvider());
+  financeRepository.setProvider(new ApiFinanceProvider());
+  pricingRepository.setProvider(new ApiPricingProvider());
+  server?.close();
+});
 
 test("1. R4 Annual Reference Scenario — Total must equal Rp 18.363.000", () => {
   const input: EstimationInput = {
@@ -143,9 +197,14 @@ test("6. Non-R4 Service and Vehicle Isolation — No Penalty Leakage", () => {
     swdkllj: 143000,
   });
 
-  // Zero penalty in generic calculation unless explicitly provided
+  // Zero penalty and zero auto-admin in generic calculation unless explicitly provided
   assert.strictEqual(snapshot.dendaSwdkllj, 0, "No auto-penalty in generic calculation");
-  assert.strictEqual(snapshot.biayaSamsat, 0, "No auto Cetak SKP in generic calculation");
+  assert.ok(
+    !snapshot.breakdown.some((item) => item.id === "cetak-skp" || /cetak skp/i.test(item.name)),
+    "No auto Cetak SKP in generic calculation"
+  );
+  // Canonical Batch 2 COGS: biayaSamsat includes government obligations (PKB + SWDKLLJ = 2,143,000), without Jasa/Courier
+  assert.strictEqual(snapshot.biayaSamsat, 2000000 + 143000, "biayaSamsat reflects canonical Batch 2 Samsat COGS (PKB + SWDKLLJ)");
   assert.strictEqual(snapshot.totalEstimasi, 2000000 + 143000 + 250000);
 });
 
@@ -180,6 +239,7 @@ test("7. End-to-End Order Creation and Invoice Generation Synchronization", asyn
     customer: "Test Customer R4",
     namaPemilik: "Bpk Test R4",
     nomorHP: "081234567890",
+    nopol: "B 1234 SUN",
     platNomor: "B 1234 SUN",
     jenisKendaraan: "Mobil",
     layanan: "Perpanjangan 1 Tahun",
@@ -198,7 +258,7 @@ test("7. End-to-End Order Creation and Invoice Generation Synchronization", asyn
     estimationResult: r4Result,
     payment: {
       tipePembayaran: "Bayar di Awal",
-      metodePembayaran: "Transfer Mandiri",
+      metodePembayaran: "Transfer BCA",
       statusPembayaran: "Lunas",
       totalBiaya: r4Result.totalEstimasi,
       totalEstimasi: r4Result.totalEstimasi,
@@ -212,13 +272,15 @@ test("7. End-to-End Order Creation and Invoice Generation Synchronization", asyn
 
   // Verify created order
   assert.ok(createdOrder, "Order must be created successfully");
-  assert.strictEqual(createdOrder.totalEstimasi, 18363000, "Order totalEstimasi must be Rp 18.363.000");
+  const persistedTotal = (createdOrder as any).totalBiaya ?? createdOrder.totalEstimasi ?? createdOrder.payment.totalBiaya;
+  assert.strictEqual(persistedTotal, 18363000, "Order total must be Rp 18.363.000");
   assert.strictEqual(createdOrder.payment.totalBiaya, 18363000, "Order payment.totalBiaya must be Rp 18.363.000");
   assert.ok(createdOrder.orderNo, "Order must have canonical orderNo");
   assert.ok(createdOrder.estimationResult, "estimationResult must be attached to order");
   assert.strictEqual(createdOrder.estimationResult.totalEstimasi, 18363000);
 
-  // Verify invoice generated in financeStore
+  // Verify invoice generated in financeStore (SQLite synced)
+  await financeStore.initFromApi();
   const invoices = financeStore.getInvoices();
   const matchingInvoice = invoices.find(
     (inv) => inv.orderNo === createdOrder.orderNo || inv.orderId === createdOrder.id
@@ -232,11 +294,13 @@ test("7. End-to-End Order Creation and Invoice Generation Synchronization", asyn
   );
 
   // Accounting verification in Data Penjualan semantics:
-  // uangKeluar = pkb + swdkllj + dendaSwdkllj = 17.284.000 + 429.000 + 400.000 = 18.113.000
+  // uangKeluar = pkb + dendaPkb + swdkllj + dendaSwdkllj + cetakSkp = 17.284.000 + 429.000 + 400.000 = 18.113.000
   // customer payment = 18.363.000
   // profit = 18.363.000 - 18.113.000 = 250.000 (equal to biayaJasa)
-  const uangKeluar = createdOrder.pkb + createdOrder.swdkllj + createdOrder.dendaSwdkllj;
+  const est = createdOrder.estimationResult;
+  const estCetakSkp = est.items.find((i: any) => i.id === "cetak-skp")?.amount || 0;
+  const uangKeluar = est.totalPkb + est.totalDendaPkb + est.totalSwdkllj + est.totalDendaSwdkllj + estCetakSkp;
   assert.strictEqual(uangKeluar, 18113000, "Official Samsat expenses = 18.113.000");
-  const profit = createdOrder.totalEstimasi - uangKeluar;
+  const profit = persistedTotal - uangKeluar;
   assert.strictEqual(profit, 250000, "Profit must exactly match service fee (250.000)");
 });

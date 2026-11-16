@@ -246,10 +246,16 @@ export async function reviewReimbursement(req: Request, res: Response, next: Nex
 export async function payReimbursement(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const { paymentMethod, transactionRef, channel } = req.body;
+    const { amount, nominal, paymentMethod, transactionRef, channel } = req.body || {};
     const user = (req as any).user;
+    const requestedAmount = amount !== undefined ? amount : nominal;
 
-    const data = messengerService.payReimbursement(id, user, { paymentMethod, transactionRef, channel });
+    const data = messengerService.payReimbursement(id, user, {
+      amount: requestedAmount,
+      paymentMethod,
+      transactionRef,
+      channel,
+    });
 
     res.status(200).json({
       success: true,

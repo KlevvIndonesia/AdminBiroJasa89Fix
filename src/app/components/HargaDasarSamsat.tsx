@@ -4,6 +4,7 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Badge } from "./ui/badge";
+import { Checkbox } from "./ui/checkbox";
 import { Switch } from "./ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
@@ -23,7 +24,7 @@ import {
   Building2, ArrowUpDown, Filter, Sparkles, CheckCircle2, AlertCircle
 } from "lucide-react";
 import { TablePagination } from "./ui/TablePagination";
-import { EmptyState } from "./ui/empty-state";
+import { DataTableEmptyRow } from "./ui/data-table";
 import { toast } from "sonner";
 import { pricingStore, usePricingStore, MASTER_PRICING_ITEMS } from "../data/pricingStore";
 import { ProvinsiFilterSelect } from "./ProvinsiFilterSelect";
@@ -356,8 +357,7 @@ export function HargaDasarSamsat() {
             {/* Primary Action: Atur Harga Standar */}
             <Button
               onClick={handleOpenStandardDialog}
-              size="sm"
-              className="h-9 text-xs px-4 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold shadow-xs flex items-center gap-2"
+              className="text-xs px-4 font-semibold gap-2"
             >
               <SlidersHorizontal className="w-3.5 h-3.5" />
               <span>Atur Harga Standar</span>
@@ -378,15 +378,13 @@ export function HargaDasarSamsat() {
               }}
             />
 
-            <label className="flex items-center gap-2 text-xs font-medium text-foreground cursor-pointer select-none px-2.5 py-1.5 rounded-md border border-border/70 bg-background hover:bg-muted/40 transition-colors">
-              <input
-                type="checkbox"
+            <label className="flex items-center gap-2 text-xs font-medium text-foreground cursor-pointer select-none px-2.5 h-9 rounded-md border border-border/70 bg-background hover:bg-muted/40 transition-colors">
+              <Checkbox
                 checked={onlyOverridesFilter}
-                onChange={(e) => {
-                  setOnlyOverridesFilter(e.target.checked);
+                onCheckedChange={(checked) => {
+                  setOnlyOverridesFilter(checked === true);
                   setCurrentPage(1);
                 }}
-                className="w-3.5 h-3.5 rounded text-primary focus:ring-primary accent-primary"
               />
               <span className="inline-flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-primary" />
@@ -534,14 +532,12 @@ export function HargaDasarSamsat() {
 
               {/* ─── DATA ROWS: SAMSAT OFFICES ─────────────────────────────────── */}
               {paginatedSamsats.length === 0 ? (
-                <TableRow className="hover:bg-transparent">
-                  <TableCell colSpan={31} className="text-center py-12 align-middle">
-                    <EmptyState
-                      title="Tidak ada kantor Samsat"
-                      description="Tidak ada kantor Samsat yang cocok dengan kata kunci atau filter saat ini."
-                    />
-                  </TableCell>
-                </TableRow>
+                <DataTableEmptyRow
+                  colSpan={31}
+                  title="Tidak ada kantor Samsat"
+                  description="Tidak ada kantor Samsat yang cocok dengan kata kunci atau filter saat ini."
+                  cellClassName="py-12"
+                />
               ) : (
                 paginatedSamsats.map((samsat) => {
                   const hasOverride = officesWithOverrides.has(samsat.id);
@@ -557,12 +553,12 @@ export function HargaDasarSamsat() {
                             <div className="font-semibold text-foreground/90 truncate flex items-center gap-1.5">
                               {samsat.name}
                               {hasOverride && (
-                                <Badge variant="secondary" className="text-[10px] px-1.5 py-0 font-medium text-primary bg-primary/10 border-primary/20">
+                                <Badge variant="secondary" className="text-[11px] px-1.5 py-0 font-medium text-primary bg-primary/10 border-primary/20">
                                   Khusus
                                 </Badge>
                               )}
                             </div>
-                            <div className="text-[10px] text-muted-foreground truncate">
+                            <div className="text-[11px] text-muted-foreground truncate">
                               {samsat.nama_provinsi || samsat.wilayah || "—"}
                             </div>
                           </div>
@@ -603,7 +599,7 @@ export function HargaDasarSamsat() {
         </div>
 
         {/* ─── PAGINATION BAR ──────────────────────────────────────────────── */}
-        <div className="border-t border-border p-2 bg-muted/20">
+        <div className="px-3.5 pb-2.5 bg-card shrink-0">
           <TablePagination
             currentPage={currentPage}
             itemsPerPage={itemsPerPage}
@@ -865,7 +861,7 @@ export function HargaDasarSamsat() {
                         </div>
                         {hasCustom ? (
                           <Button
-                            size="sm"
+                            size="icon-sm"
                             variant="ghost"
                             onClick={() => {
                               setSamsatTariffInputs({
@@ -873,7 +869,8 @@ export function HargaDasarSamsat() {
                                 [comp.id]: null,
                               });
                             }}
-                            className="h-8 text-[11px] px-2 text-muted-foreground hover:text-foreground"
+                            className="text-muted-foreground hover:text-foreground"
+                            aria-label={`Kembalikan ${comp.name} ke Standar Nasional`}
                             title="Kembalikan komponen ini ke Standar Nasional"
                           >
                             <RotateCcw className="w-3.5 h-3.5" />
@@ -940,7 +937,7 @@ export function HargaDasarSamsat() {
                         </div>
                         {hasCustom ? (
                           <Button
-                            size="sm"
+                            size="icon-sm"
                             variant="ghost"
                             onClick={() => {
                               setSamsatTariffInputs({
@@ -948,7 +945,8 @@ export function HargaDasarSamsat() {
                                 [comp.id]: null,
                               });
                             }}
-                            className="h-8 text-[11px] px-2 text-muted-foreground hover:text-foreground"
+                            className="text-muted-foreground hover:text-foreground"
+                            aria-label={`Kembalikan ${comp.name} ke Standar Nasional`}
                             title="Kembalikan komponen ini ke Standar Nasional"
                           >
                             <RotateCcw className="w-3.5 h-3.5" />

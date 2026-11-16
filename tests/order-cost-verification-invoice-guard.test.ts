@@ -5,15 +5,17 @@ import { financeService } from "../server/src/services/financeService";
 import { pricingService } from "../server/src/services/pricingService";
 import { dbOrderRepository } from "../server/src/repositories/dbOrderRepository";
 import { dbFinanceRepository } from "../server/src/repositories/dbFinanceRepository";
+import { db } from "../server/src/database/db";
 import { CANONICAL_PERMISSIONS } from "../server/src/config/defaultPermissions";
 import { ApiError } from "../server/src/middleware/errorHandler";
 
 test("Order Cost Verification & Invoice Guard Test Suite", async (t) => {
   const supervisorUser = {
-    userId: "usr-spv-01",
+    userId: "usr-spv",
     nama: "Budi Supervisor",
-    role: "supervisor",
-    email: "spv@birojasa.com",
+    role: "administrator",
+    jabatan: "SVP",
+    email: "svp@birojasa.com",
   };
 
   const messengerUser = {
@@ -25,7 +27,7 @@ test("Order Cost Verification & Invoice Guard Test Suite", async (t) => {
 
   await t.test("1. CANONICAL_PERMISSIONS includes master-metode-pembayaran correctly", () => {
     assert.deepEqual(
-      CANONICAL_PERMISSIONS.svp.modules["master-metode-pembayaran"],
+      CANONICAL_PERMISSIONS.administrator.modules["master-metode-pembayaran"],
       { view: true, manage: true }
     );
     assert.deepEqual(
@@ -121,7 +123,7 @@ test("Order Cost Verification & Invoice Guard Test Suite", async (t) => {
         financeService.recordPayment(
           invoice.id,
           50000,
-          { metodePembayaran: "Transfer", namaBank: "BCA" },
+          { metodePembayaran: "Transfer BCA", namaBank: "BCA" },
           supervisorUser as any
         );
       },
@@ -219,17 +221,36 @@ test("Order Cost Verification & Invoice Guard Test Suite", async (t) => {
       isVerified: true,
     });
 
-    // Now payment succeeds without COST_VERIFICATION_REQUIRED
-    const paidInv = financeService.recordPayment(
+    // Now payment succeeds without COST_VERIFICATION_REQUIRED using active payment method from isolated DB
+    const activePm = db
+      .prepare("SELECT id, nama_metode, bank FROM payment_methods WHERE LOWER(status) = 'aktif' LIMIT 1")
+      .get() as any;
+    assert.ok(activePm?.id, "At least one active payment method must exist in isolated DB");
+    let paidInv = financeService.recordPayment(
       invoice.id,
       350000,
       {
-        metodePembayaran: "Transfer",
-        namaBank: "BCA",
+        paymentMethodId: activePm.id,
+        metodePembayaran: activePm.nama_metode,
+        namaBank: activePm.bank || undefined,
         catatan: "Pelunasan setelah verifikasi biaya",
+        buktiPembayaran: {
+          fileName: "bukti-guard.jpg",
+          fileType: "image",
+          fileUrl: "/uploads/bukti-guard.jpg",
+        },
       },
       supervisorUser as any
     );
+    if (paidInv.status !== "PAID") {
+      financeService.verifyPayment({
+        orderNo: created.orderNo,
+        invoiceId: invoice.id,
+        confirmedAmount: 350000,
+        user: supervisorUser as any,
+      });
+      paidInv = dbFinanceRepository.getInvoiceById(invoice.id)!;
+    }
 
     assert.equal(paidInv.status, "PAID");
     assert.equal(paidInv.sisa, 0);

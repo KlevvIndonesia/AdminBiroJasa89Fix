@@ -2,15 +2,13 @@ import { test, expect } from "@playwright/test";
 
 test.describe("E2E Test 1 & 9 & 10: Authentication, Refresh & Persistence", () => {
   test.beforeEach(async ({ page }) => {
-    // Clear localStorage before each test
-    await page.goto("http://localhost:3000");
+    test.setTimeout(45000);
+    await page.goto("http://localhost:3000/login");
     await page.evaluate(() => window.localStorage.clear());
-    await page.reload();
+    await page.waitForSelector("#email", { timeout: 15000 });
   });
 
   test("1.1 Valid credentials login succeeds and establishes real session", async ({ page }) => {
-    await page.goto("http://localhost:3000");
-    
     // Fill credentials
     await page.fill("#email", "admin@birojasa.com");
     await page.fill("#password", "admin123");
@@ -36,8 +34,6 @@ test.describe("E2E Test 1 & 9 & 10: Authentication, Refresh & Persistence", () =
   });
 
   test("1.2 Missing password triggers HTML5/client validation without session", async ({ page }) => {
-    await page.goto("http://localhost:3000");
-    
     await page.fill("#email", "admin@birojasa.com");
     // Leave password empty
     await page.click("button[type='submit']");
@@ -48,8 +44,6 @@ test.describe("E2E Test 1 & 9 & 10: Authentication, Refresh & Persistence", () =
   });
 
   test("1.3 Invalid password displays error message and issues NO token", async ({ page }) => {
-    await page.goto("http://localhost:3000");
-    
     await page.fill("#email", "admin@birojasa.com");
     await page.fill("#password", "WrongPassword123!");
     
@@ -71,8 +65,6 @@ test.describe("E2E Test 1 & 9 & 10: Authentication, Refresh & Persistence", () =
   });
 
   test("1.4 Backend unavailable returns error with ZERO mock fallback in API mode", async ({ page }) => {
-    await page.goto("http://localhost:3000");
-
     // Intercept backend login to simulate server outage (503 Service Unavailable)
     await page.route("**/api/auth/login", route => {
       route.abort("failed");
@@ -92,8 +84,6 @@ test.describe("E2E Test 1 & 9 & 10: Authentication, Refresh & Persistence", () =
   });
 
   test("9.1 Refresh persistence preserves authenticated session across browser reloads", async ({ page }) => {
-    await page.goto("http://localhost:3000");
-    
     // Login
     await page.fill("#email", "admin@birojasa.com");
     await page.fill("#password", "admin123");

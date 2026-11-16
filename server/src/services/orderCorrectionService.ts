@@ -132,11 +132,7 @@ export class OrderCorrectionService {
     const userRole = (user?.role || "").toLowerCase();
     const isSpvOrAdmin =
       userRole === "administrator" ||
-      userRole === "admin" ||
-      userRole === "supervisor" ||
-      userRole === "spv" ||
-      userRole === "svp" ||
-      (user as { jabatan?: string } | null | undefined)?.jabatan === "SVP";
+      userRole === "admin";
 
     if (!isSpvOrAdmin) {
       throw new ApiError(
@@ -182,7 +178,7 @@ export class OrderCorrectionService {
         id: `log-corr-reject-${Date.now()}`,
         userId: user?.userId || "usr-system",
         userName: user?.nama || "Supervisor",
-        userRole: user?.role || "supervisor",
+        userRole: user?.role || "administrator",
         action: "REJECT_ORDER_CORRECTION",
         module: "Order Correction",
         details: `Menolak pengajuan koreksi untuk order ${correction.order_no}. Catatan: ${payload.reviewNotes || "-"}`,
@@ -218,7 +214,9 @@ export class OrderCorrectionService {
 
       for (const payment of activePayments) {
         const invId = inv ? inv.id : payment.invoice_no;
-        financeService.voidInvoicePayment(invId, payment.id, voidReason, user);
+        financeService.voidInvoicePayment(invId, payment.id, voidReason, user, {
+          allowCancelledOrderCorrection: true,
+        });
       }
 
       // 3. Ensure finance_invoices ends with CANCELLED, dibayar=0, sisa=0, refundStatus NOT 'PENDING'
@@ -263,7 +261,7 @@ export class OrderCorrectionService {
         id: `log-corr-approve-${Date.now()}`,
         userId: user?.userId || "usr-system",
         userName: user?.nama || "Supervisor",
-        userRole: user?.role || "supervisor",
+        userRole: user?.role || "administrator",
         action: "APPROVE_ORDER_CORRECTION",
         module: "Order Correction",
         details: `Menyetujui koreksi order ${correction.order_no} (${correction.category}). Alasan: ${correction.reason.trim()}`,

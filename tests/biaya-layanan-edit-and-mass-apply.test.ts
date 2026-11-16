@@ -1,9 +1,36 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
+import { createApp } from "../server/src/app";
 import { getDb } from "../server/src/database/db";
 import { pricingStore } from "../src/app/data/pricingStore";
 import { estimationStore } from "../src/app/data/estimationStore";
 import { pricingService } from "../server/src/services/pricingService";
+import { pricingRepository } from "../src/data/repositories/pricingRepository";
+import { ApiPricingProvider } from "../src/data/api/apiPricingProvider";
+
+function startTestServer(): Promise<{ server: http.Server; baseUrl: string }> {
+  return new Promise((resolve) => {
+    const app = createApp();
+    const server = http.createServer(app);
+    server.listen(0, () => {
+      const addr = server.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      resolve({ server, baseUrl: `http://localhost:${port}` });
+    });
+  });
+}
+
+async function loginAsSvp(baseUrl: string): Promise<string> {
+  const res = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "svp@birojasa.com", password: "admin123" }),
+  });
+  assert.strictEqual(res.status, 200);
+  const body = (await res.json()) as any;
+  return body.data.token;
+}
 
 test("Biaya Layanan - Edit & Mass Action Deep Forensic & Database Persistence Verification", async (t) => {
   const db = getDb();
@@ -110,6 +137,15 @@ test("Biaya Layanan - Edit & Mass Action Deep Forensic & Database Persistence Ve
 
   await t.test("4. Terapkan Massal: Analisa Perilaku Terhadap Samsat Bertarif Khusus", async () => {
     const serviceName = "Perpanjangan 1 Tahun";
+    const { server, baseUrl } = await startTestServer();
+    const prevToken = process.env.AUTH_TOKEN;
+
+    try {
+      process.env.AUTH_TOKEN = await loginAsSvp(baseUrl);
+      const apiPricing = new ApiPricingProvider(`${baseUrl}/api`);
+      await apiPricing.initFromApi();
+      pricingRepository.setProvider(apiPricing);
+      await pricingStore.initFromApi();
 
     // Setup Target Samsat with PRE-EXISTING CUSTOM TARIFF (Tarif Khusus) via updateBiayaLayananRow
     const targetRow = pricingStore.getBiayaLayananRows().find(
@@ -198,7 +234,7 @@ test("Biaya Layanan - Edit & Mass Action Deep Forensic & Database Persistence Ve
     assert.equal(timurAfterOverwrite.biayaJasaLengkap, 250000, "Biaya Jasa ditimpa ke 250k jika kebijakan OVERWRITE_ALL dipilih");
 
     // CASE 4B: Mass Apply with scope: applyBiayaLainnya = true (Penggabungan Aman / Non-destructive merge)
-    pricingStore.applyConfigToAllSamsats(
+    await pricingStore.applyConfigToAllSamsats(
       serviceName,
       sourceConfig,
       {
@@ -219,6 +255,11 @@ test("Biaya Layanan - Edit & Mass Action Deep Forensic & Database Persistence Ve
     const labels = timurAfterCaseB.biayaLainnya.map((b: any) => b.label);
     assert.ok(labels.includes("Parkir Lapangan Timur"), "Biaya khusus lama tetap ada");
     assert.ok(labels.includes("Biaya Materai"), "Biaya baru dari sumber berhasil dimerge");
+    } finally {
+      process.env.AUTH_TOKEN = prevToken;
+      pricingRepository.setProvider(new ApiPricingProvider());
+      server.close();
+    }
   });
 
   await t.test("5. Evaluasi Gap Persistensi Fisik pada Aksi Massal (Database Gap Analysis)", () => {

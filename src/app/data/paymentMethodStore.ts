@@ -5,6 +5,7 @@
 
 import { useState, useEffect } from "react";
 import { APP_CONFIG } from "../config/appConfig";
+import { permissionStore } from "./permissionStore";
 
 export interface PaymentMethod {
   id: string;
@@ -27,10 +28,16 @@ class PaymentMethodStore {
   private lastError: string | null = null;
   private isDataStale = false;
   private hasSuccessfullyLoaded = false;
+  private lastFetchedAuthKey: string | null = null;
+  private activeFetchPromise: Promise<void> | null = null;
+  private permissionUnsubscribe: (() => void) | null = null;
 
   constructor() {
-    if (typeof window === "undefined" || (typeof window !== "undefined" && window.localStorage?.getItem("auth_token"))) {
-      this.initFromApi();
+    this.permissionUnsubscribe = permissionStore.subscribe(() => {
+      this.handlePermissionStateChange();
+    });
+    if (typeof window !== "undefined" && this.canFetchFromApi()) {
+      void this.initFromApi();
     }
   }
 
@@ -40,47 +47,97 @@ class PaymentMethodStore {
         const token = window.localStorage.getItem("auth_token");
         if (token) return { Authorization: `Bearer ${token}` };
       }
+      if (typeof process !== "undefined" && process.env?.AUTH_TOKEN) {
+        return { Authorization: `Bearer ${process.env.AUTH_TOKEN}` };
+      }
     } catch {
       // ignore
     }
     return {};
   }
 
+  private buildAuthKey(): string {
+    const authHeader = this.getAuthHeader().Authorization || "";
+    const role = permissionStore.getSessionRole() || "";
+    return `${authHeader}::${role}`;
+  }
+
+  private canFetchFromApi(): boolean {
+    if (!this.getAuthHeader().Authorization) return false;
+    return permissionStore.getSessionAuthStatus() === "authenticated";
+  }
+
+  private handlePermissionStateChange(): void {
+    const authStatus = permissionStore.getSessionAuthStatus();
+    if (authStatus === "unauthenticated" || authStatus === "forbidden") {
+      this.methods = [];
+      this.isInitialized = false;
+      this.hasSuccessfullyLoaded = false;
+      this.isLoadingState = false;
+      this.lastFetchedAuthKey = null;
+      this.lastError = null;
+      this.notify();
+      return;
+    }
+    if (authStatus === "hydrating") {
+      return;
+    }
+    if (typeof window !== "undefined" && this.canFetchFromApi()) {
+      const nextKey = this.buildAuthKey();
+      if (!this.hasSuccessfullyLoaded || this.lastFetchedAuthKey !== nextKey) {
+        void this.initFromApi();
+      }
+    }
+  }
+
   public async initFromApi(): Promise<void> {
-    const authHeaders = this.getAuthHeader();
-    if (!authHeaders.Authorization) {
+    if (!this.canFetchFromApi()) {
       this.isLoadingState = false;
       return;
     }
+    if (this.activeFetchPromise) return this.activeFetchPromise;
+
+    const authHeaders = this.getAuthHeader();
+    const capturedKey = this.buildAuthKey();
     this.isLoadingState = true;
-    try {
-      const res = await fetch(`${APP_CONFIG.apiBaseUrl}/payment-methods?status=Aktif`, {
-        headers: { "Content-Type": "application/json", ...authHeaders },
-      });
-      if (!res.ok) {
-        throw new Error(`Gagal memuat metode pembayaran dari server (HTTP ${res.status})`);
-      }
-      const payload = await res.json();
-      if (payload.success && Array.isArray(payload.data)) {
-        this.methods = payload.data;
-        this.isInitialized = true;
-        this.hasSuccessfullyLoaded = true;
-        this.lastError = null;
-        this.isDataStale = false;
+
+    this.activeFetchPromise = (async () => {
+      try {
+        const res = await fetch(`${APP_CONFIG.apiBaseUrl}/payment-methods`, {
+          headers: { "Content-Type": "application/json", ...authHeaders },
+        });
+        if (!this.canFetchFromApi()) return;
+        if (!res.ok) {
+          throw new Error(`Gagal memuat metode pembayaran dari server (HTTP ${res.status})`);
+        }
+        const payload = await res.json();
+        if (!this.canFetchFromApi()) return;
+        if (payload.success && Array.isArray(payload.data)) {
+          this.methods = payload.data;
+          this.isInitialized = true;
+          this.hasSuccessfullyLoaded = true;
+          this.lastFetchedAuthKey = capturedKey;
+          this.lastError = null;
+          this.isDataStale = false;
+          this.isLoadingState = false;
+          this.notify();
+        } else {
+          throw new Error(payload.message || "Format data metode pembayaran tidak valid");
+        }
+      } catch (err: any) {
         this.isLoadingState = false;
+        this.lastError = err?.message || "Gagal menghubungkan ke backend metode pembayaran";
+        if (this.methods.length > 0 || this.hasSuccessfullyLoaded) {
+          this.isDataStale = true;
+        }
         this.notify();
-      } else {
-        throw new Error(payload.message || "Format data metode pembayaran tidak valid");
+        // In API mode, do not keep silent defaults on failure
+      } finally {
+        this.activeFetchPromise = null;
       }
-    } catch (err: any) {
-      this.isLoadingState = false;
-      this.lastError = err?.message || "Gagal menghubungkan ke backend metode pembayaran";
-      if (this.methods.length > 0 || this.hasSuccessfullyLoaded) {
-        this.isDataStale = true;
-      }
-      this.notify();
-      // In API mode, do not keep silent defaults on failure
-    }
+    })();
+
+    return this.activeFetchPromise;
   }
 
   public isLoading(): boolean {
@@ -169,18 +226,11 @@ class PaymentMethodStore {
     });
     const payload = await res.json().catch(() => ({}));
     if (!res.ok || !payload.success) {
-      throw new Error(payload.message || `Gagal menghapus metode pembayaran (HTTP ${res.status})`);
+      const errMsg = payload?.error?.message || payload?.message || `Gagal menghapus metode pembayaran (HTTP ${res.status})`;
+      throw new Error(errMsg);
     }
-    if (payload.deactivated) {
-      const idx = this.methods.findIndex((m) => m.id === id);
-      if (idx !== -1) {
-        this.methods[idx].status = "Nonaktif";
-        this.notify();
-      }
-    } else {
-      this.methods = this.methods.filter((m) => m.id !== id);
-      this.notify();
-    }
+    this.methods = this.methods.filter((m) => m.id !== id);
+    this.notify();
     return payload;
   }
 

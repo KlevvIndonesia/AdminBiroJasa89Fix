@@ -23,21 +23,37 @@ export interface IFinanceRepository {
   getInvoiceById(id: number): InvoiceBillingRecord | undefined;
   getInvoiceByOrderNo(orderNo: string): InvoiceBillingRecord | undefined;
   getProfitList(): ProfitItem[];
+  fetchFilteredProfitList?(
+    filters?: {
+      paymentMethodId?: string;
+      startDate?: string;
+      endDate?: string;
+      category?: string;
+    },
+    options?: { signal?: AbortSignal }
+  ): Promise<ProfitItem[] | null>;
   getKasKantorList(): KasKantorItem[];
   getKasMessengerList(): KasMessengerItem[];
   getPengeluaranList(): PengeluaranItem[];
   subscribe(listener: () => void): () => void;
   recordPayment(idOrInvoice: number | string, paymentAmount: number, details?: any): boolean | Promise<boolean>;
   resolveInvoice(id: number, details?: any): boolean;
-  completeInvoice(id: number, completedBy?: string): boolean;
+  completeInvoice(id: number, completedBy?: string): boolean | Promise<boolean>;
   payoutCashback?(id: number, payoutData: any): Promise<boolean> | boolean;
+  completeCashback?(id: number, payload?: { catatan?: string; idempotencyKey?: string; expectedVersion?: number }): Promise<InvoiceBillingRecord | boolean>;
   voidInvoicePayment?(id: number, paymentId: number, reason: string): Promise<boolean> | boolean;
   voidCashbackPayout?(id: number, reason: string): Promise<boolean> | boolean;
   getVoidAuditHistory?(): Promise<{ payments: any[]; cashbacks: any[] }>;
   addKasKantor?(item: Omit<KasKantorItem, "id">): KasKantorItem | null;
+  addKasKantorAsync?(item: Omit<KasKantorItem, "id">): Promise<KasKantorItem>;
+  updateKasKantor?(id: number, updates: Partial<KasKantorItem> & { reason?: string }): Promise<KasKantorItem>;
   deleteKasKantor?(id: number, reason: string, idempotencyKey?: string): Promise<boolean> | boolean;
   addKasMessenger?(item: Omit<KasMessengerItem, "id" | "total"> & { total?: number }): KasMessengerItem | null;
+  addKasMessengerAsync?(item: Omit<KasMessengerItem, "id" | "total"> & { total?: number }): Promise<KasMessengerItem>;
+  updateKasMessenger?(id: number, updates: Partial<KasMessengerItem> & { reason?: string }): Promise<KasMessengerItem>;
   deleteKasMessenger?(id: number, reason: string, idempotencyKey?: string): Promise<boolean> | boolean;
+  refreshKasKantor?(): Promise<void>;
+  refreshKasMessenger?(): Promise<void>;
   addPengeluaran?(item: Omit<PengeluaranItem, "id">): PengeluaranItem | null;
   deletePengeluaran?(id: number, reason: string, idempotencyKey?: string): Promise<boolean> | boolean;
   saveInvoice?(invoice: InvoiceBillingRecord): void;
@@ -45,6 +61,7 @@ export interface IFinanceRepository {
   getProvider?(): IFinanceDataProvider;
   isLoading?(): boolean;
   getError?(): Error | null;
+  getProfitError?(): Error | null;
   initFromApi?(): Promise<void>;
 }
 
@@ -87,6 +104,22 @@ export class FinanceRepository implements IFinanceRepository {
     return this.provider.getProfitList();
   }
 
+  public async fetchFilteredProfitList(
+    filters?: {
+      paymentMethodId?: string;
+      startDate?: string;
+      endDate?: string;
+      category?: string;
+    },
+    options?: { signal?: AbortSignal }
+  ): Promise<ProfitItem[] | null> {
+    const providerAny: any = this.provider;
+    if (typeof providerAny?.fetchFilteredProfitList === "function") {
+      return providerAny.fetchFilteredProfitList(filters, options);
+    }
+    return null;
+  }
+
   public getKasKantorList(): KasKantorItem[] {
     return this.provider.getKasKantorList();
   }
@@ -111,8 +144,18 @@ export class FinanceRepository implements IFinanceRepository {
     return this.provider.resolveInvoice(id, details);
   }
 
-  public completeInvoice(id: number, completedBy?: string): boolean {
+  public completeInvoice(id: number, completedBy?: string): boolean | Promise<boolean> {
     return this.provider.completeInvoice(id, completedBy);
+  }
+
+  public async completeCashback(
+    id: number,
+    payload?: { catatan?: string; idempotencyKey?: string; expectedVersion?: number }
+  ): Promise<InvoiceBillingRecord | boolean> {
+    if (this.provider.completeCashback) {
+      return await this.provider.completeCashback(id, payload);
+    }
+    throw new Error("Provider keuangan aktif tidak mendukung penyelesaian cashback.");
   }
 
   public async payoutCashback(id: number, payoutData: any): Promise<boolean> {
@@ -147,6 +190,22 @@ export class FinanceRepository implements IFinanceRepository {
     return this.provider.addKasKantor ? this.provider.addKasKantor(item) : null;
   }
 
+  public async addKasKantorAsync(item: Omit<KasKantorItem, "id">): Promise<KasKantorItem> {
+    if (this.provider.addKasKantorAsync) {
+      return await this.provider.addKasKantorAsync(item);
+    }
+    const created = this.addKasKantor(item);
+    if (!created) throw new Error("Gagal menambahkan data Kas Kantor.");
+    return created;
+  }
+
+  public async updateKasKantor(id: number, updates: Partial<KasKantorItem> & { reason?: string }): Promise<KasKantorItem> {
+    if (this.provider.updateKasKantor) {
+      return await this.provider.updateKasKantor(id, updates);
+    }
+    throw new Error("Provider keuangan aktif tidak mendukung pengeditan Kas Kantor.");
+  }
+
   public async deleteKasKantor(id: number, reason: string, idempotencyKey?: string): Promise<boolean> {
     if (this.provider.deleteKasKantor) {
       return await this.provider.deleteKasKantor(id, reason, idempotencyKey);
@@ -156,6 +215,34 @@ export class FinanceRepository implements IFinanceRepository {
 
   public addKasMessenger(item: Omit<KasMessengerItem, "id" | "total"> & { total?: number }): KasMessengerItem | null {
     return this.provider.addKasMessenger ? this.provider.addKasMessenger(item) : null;
+  }
+
+  public async addKasMessengerAsync(item: Omit<KasMessengerItem, "id" | "total"> & { total?: number }): Promise<KasMessengerItem> {
+    if (this.provider.addKasMessengerAsync) {
+      return await this.provider.addKasMessengerAsync(item);
+    }
+    const created = this.addKasMessenger(item);
+    if (!created) throw new Error("Gagal menambahkan data Kas Messenger.");
+    return created;
+  }
+
+  public async updateKasMessenger(id: number, updates: Partial<KasMessengerItem> & { reason?: string }): Promise<KasMessengerItem> {
+    if (this.provider.updateKasMessenger) {
+      return await this.provider.updateKasMessenger(id, updates);
+    }
+    throw new Error("Provider keuangan aktif tidak mendukung pengeditan Kas Messenger.");
+  }
+
+  public async refreshKasKantor(): Promise<void> {
+    if (this.provider.refreshKasKantor) {
+      await this.provider.refreshKasKantor();
+    }
+  }
+
+  public async refreshKasMessenger(): Promise<void> {
+    if (this.provider.refreshKasMessenger) {
+      await this.provider.refreshKasMessenger();
+    }
   }
 
   public async deleteKasMessenger(id: number, reason: string, idempotencyKey?: string): Promise<boolean> {
@@ -188,6 +275,14 @@ export class FinanceRepository implements IFinanceRepository {
 
   public getError(): Error | null {
     return this.provider.getError ? this.provider.getError() : null;
+  }
+
+  public getProfitError(): Error | null {
+    const providerAny: any = this.provider;
+    if (typeof providerAny?.getProfitError === "function") {
+      return providerAny.getProfitError();
+    }
+    return this.getError();
   }
 
   public async initFromApi(): Promise<void> {

@@ -5,7 +5,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Input } from "./ui/input";
 import { formatRupiah } from "../utils/financeFormatters";
 import { usePaymentMethods } from "../data/paymentMethodStore";
-import { Filter, Calendar, RotateCcw, Wallet, CreditCard, Building2, Banknote } from "lucide-react";
+import { Filter, Calendar, RotateCcw, Wallet, CreditCard, Building2 } from "lucide-react";
 
 export function parseDateString(dateStr: string | undefined): Date | null {
   if (!dateStr || dateStr === "-" || dateStr === "null") return null;
@@ -327,16 +327,16 @@ export function InflowSummaryCard({
       </div>
 
       <div className="mt-3 overflow-x-auto">
-        <table className="w-full text-left text-xs border-collapse">
-          <thead>
+        <table className="finance-table w-full text-left text-xs border-collapse">
+          <thead className="finance-table__header">
             <tr className="border-b border-border text-muted-foreground font-semibold bg-muted/20">
-              <th className="py-2.5 px-3">Metode Pembayaran</th>
-              <th className="py-2.5 px-3">Rekening Penerima</th>
-              <th className="py-2.5 px-3 text-center">Jumlah Transaksi</th>
-              <th className="py-2.5 px-3 text-right">Total Uang Masuk</th>
+              <th className="py-2 px-2.5">Metode Pembayaran</th>
+              <th className="py-2 px-2.5">Rekening Penerima</th>
+              <th className="py-2 px-2.5 text-center">Jumlah Transaksi</th>
+              <th className="py-2 px-2.5 text-right">Total Uang Masuk</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-border/50">
+          <tbody className="finance-table__body divide-y divide-border/50">
             {summaryRows.length === 0 ? (
               <tr>
                 <td colSpan={4} className="py-4 text-center text-muted-foreground italic">
@@ -346,23 +346,18 @@ export function InflowSummaryCard({
             ) : (
               summaryRows.map((row) => (
                 <tr key={row.method} className="hover:bg-muted/40 transition-colors">
-                  <td className="py-2.5 px-3 font-semibold text-foreground flex items-center gap-2">
-                    {row.method === "Cash" ? (
-                      <Banknote className="w-4 h-4 text-emerald-500" />
-                    ) : (
-                      <CreditCard className="w-4 h-4 text-blue-500" />
-                    )}
+                  <td className="py-2 px-2.5 font-semibold text-foreground">
                     <span>{row.method}</span>
                   </td>
-                  <td className="py-2.5 px-3 font-mono text-muted-foreground text-[11px]">
+                  <td className="py-2 px-2.5 font-mono text-muted-foreground text-[11px]">
                     {row.rekening}
                   </td>
-                  <td className="py-2.5 px-3 text-center font-mono font-medium">
+                  <td className="py-2 px-2.5 text-center font-mono font-medium">
                     <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] bg-secondary text-secondary-foreground font-semibold">
                       {row.count} Transaksi
                     </span>
                   </td>
-                  <td className="py-2.5 px-3 text-right font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                  <td className="py-2 px-2.5 text-right font-mono font-bold text-emerald-600 dark:text-emerald-400">
                     {formatRupiah(row.totalUangMasuk)}
                   </td>
                 </tr>
@@ -370,15 +365,15 @@ export function InflowSummaryCard({
             )}
           </tbody>
           {summaryRows.length > 0 && (
-            <tfoot>
+            <tfoot className="finance-table__footer">
               <tr className="border-t-2 border-border font-bold bg-muted/30">
-                <td className="py-2.5 px-3 text-foreground" colSpan={2}>
+                <td className="py-2 px-2.5 text-foreground" colSpan={2}>
                   Total Keseluruhan Sesuai Filter
                 </td>
-                <td className="py-2.5 px-3 text-center font-mono text-foreground">
+                <td className="py-2 px-2.5 text-center font-mono text-foreground">
                   {totalCount} Transaksi
                 </td>
-                <td className="py-2.5 px-3 text-right font-mono text-emerald-600 dark:text-emerald-400 text-sm">
+                <td className="py-2 px-2.5 text-right font-mono text-emerald-600 dark:text-emerald-400 text-sm">
                   {formatRupiah(totalAmount)}
                 </td>
               </tr>
@@ -612,16 +607,16 @@ export function UnifiedProfitInflowSection({
 
       {/* 3. Data Area: Compact Summary Table */}
       <div className="overflow-x-auto pt-1">
-        <table className="w-full text-left text-xs border-collapse">
-          <thead>
+        <table className="finance-table w-full text-left text-xs border-collapse">
+          <thead className="finance-table__header">
             <tr className="border-b border-border text-muted-foreground font-semibold bg-muted/20">
-              <th className="py-2.5 px-3">Metode Pembayaran</th>
-              <th className="py-2.5 px-3">Rekening Penerima</th>
-              <th className="py-2.5 px-3 text-center">Jumlah Transaksi</th>
-              <th className="py-2.5 px-3 text-right">Total Uang Masuk</th>
+              <th className="py-2 px-2.5">Metode Pembayaran</th>
+              <th className="py-2 px-2.5">Rekening Penerima</th>
+              <th className="py-2 px-2.5 text-center">Jumlah Transaksi</th>
+              <th className="py-2 px-2.5 text-right">Total Uang Masuk</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-border/50">
+          <tbody className="finance-table__body divide-y divide-border/50">
             {summaryRows.length === 0 ? (
               <tr>
                 <td colSpan={4} className="py-4 text-center text-muted-foreground italic text-xs">
@@ -631,23 +626,18 @@ export function UnifiedProfitInflowSection({
             ) : (
               summaryRows.map((row) => (
                 <tr key={row.method} className="hover:bg-muted/40 transition-colors">
-                  <td className="py-2.5 px-3 font-semibold text-foreground flex items-center gap-2">
-                    {row.method === "Cash" ? (
-                      <Banknote className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                    ) : (
-                      <CreditCard className="w-3.5 h-3.5 text-blue-500 shrink-0" />
-                    )}
+                  <td className="py-2 px-2.5 font-semibold text-foreground">
                     <span>{row.method}</span>
                   </td>
-                  <td className="py-2.5 px-3 font-mono text-muted-foreground text-xs">
+                  <td className="py-2 px-2.5 font-mono text-muted-foreground text-xs">
                     {row.rekening}
                   </td>
-                  <td className="py-2.5 px-3 text-center font-mono">
+                  <td className="py-2 px-2.5 text-center font-mono">
                     <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] bg-secondary text-secondary-foreground font-medium">
                       {row.count} Transaksi
                     </span>
                   </td>
-                  <td className="py-2.5 px-3 text-right font-mono tabular-nums font-semibold text-emerald-600 dark:text-emerald-400">
+                  <td className="py-2 px-2.5 text-right font-mono tabular-nums font-semibold text-emerald-600 dark:text-emerald-400">
                     {formatRupiah(row.totalUangMasuk)}
                   </td>
                 </tr>
@@ -655,15 +645,15 @@ export function UnifiedProfitInflowSection({
             )}
           </tbody>
           {summaryRows.length > 0 && (
-            <tfoot>
+            <tfoot className="finance-table__footer">
               <tr className="border-t-2 border-border font-bold bg-muted/30">
-                <td className="py-2.5 px-3 text-foreground font-semibold" colSpan={2}>
+                <td className="py-2 px-2.5 text-foreground font-semibold" colSpan={2}>
                   Total Keseluruhan Sesuai Filter
                 </td>
-                <td className="py-2.5 px-3 text-center font-mono font-semibold text-foreground">
+                <td className="py-2 px-2.5 text-center font-mono font-semibold text-foreground">
                   {totalCount} Transaksi
                 </td>
-                <td className="py-2.5 px-3 text-right font-mono tabular-nums font-bold text-emerald-600 dark:text-emerald-400 text-sm">
+                <td className="py-2 px-2.5 text-right font-mono tabular-nums font-bold text-emerald-600 dark:text-emerald-400 text-sm">
                   {formatRupiah(totalAmount)}
                 </td>
               </tr>

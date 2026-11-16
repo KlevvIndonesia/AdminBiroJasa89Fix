@@ -44,8 +44,8 @@ describe('FINANCE TABLE STANDARDIZATION — Verification Suite', () => {
         'TableHead must use text-[10px]'
       );
       assert.ok(
-        enhancedTableCode.includes('px-3.5 py-2 text-[10px]'),
-        'TableCell must use text-[10px]'
+        enhancedTableCode.includes('px-2.5 py-1.5 text-[10px]'),
+        'TableCell must use standardized compact padding and text-[10px]'
       );
     });
 
@@ -150,7 +150,7 @@ describe('FINANCE TABLE STANDARDIZATION — Verification Suite', () => {
   describe('3. Row Numbering (No.) Across All Finance Tables', () => {
     it('Adds "No." as the first column in EnhancedTableWithDialogs TableHeader', () => {
       assert.ok(
-        enhancedTableCode.includes('<TableHead className="h-9 px-2 font-semibold text-foreground/80 text-center whitespace-nowrap text-[10px] w-12 min-w-[48px] max-w-[48px] bg-card">\n                  No.\n                </TableHead>'),
+        enhancedTableCode.includes('<TableHead className="h-8.5 px-2 font-semibold text-foreground/80 text-center whitespace-nowrap text-[10px] w-11 min-w-[44px] max-w-[44px] bg-card">\n                  No.\n                </TableHead>'),
         'No. column header must be the first TableHead'
       );
     });
@@ -184,7 +184,7 @@ describe('FINANCE TABLE STANDARDIZATION — Verification Suite', () => {
 
     it('Kas Messenger Reimbursement table renders No. column in header and body', () => {
       assert.ok(
-        financeContentCode.includes('<th className="py-2.5 px-3 text-center w-12 min-w-[48px] text-[10px] font-semibold">No.</th>'),
+        financeContentCode.includes('<th className="py-2 px-2.5 text-center w-12 min-w-[48px] text-[10px] font-semibold">No.</th>'),
         'Reimbursement table must include No. in thead'
       );
       assert.ok(
@@ -192,8 +192,8 @@ describe('FINANCE TABLE STANDARDIZATION — Verification Suite', () => {
         'Reimbursement table must render {idx + 1} in the first cell'
       );
       assert.ok(
-        financeContentCode.includes('colSpan={10}'),
-        'Reimbursement empty state colSpan must be 10 (previously 9)'
+        financeContentCode.includes('colSpan={11}'),
+        'Reimbursement empty state colSpan must be 11 (matching 11 <th> columns including No. and Sumber Bank / Kas Pencairan)'
       );
     });
 

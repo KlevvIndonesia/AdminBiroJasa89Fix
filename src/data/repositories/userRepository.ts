@@ -20,6 +20,7 @@ export interface IUserRepository {
   authenticate(email: string, password: string): Promise<AuthUserSession | null>;
   authenticateDetailed(email: string, password: string): Promise<AuthResult>;
   resetPassword?(id: number | string): Promise<{ success: boolean; message?: string }>;
+  clearSessionData?(): void;
   isLoading?(): boolean;
   getError?(): string | null;
   setProvider?(provider: IUserDataProvider): void;
@@ -94,6 +95,12 @@ export class UserRepository implements IUserRepository {
   public async authenticate(email: string, password: string): Promise<AuthUserSession | null> {
     const res = await this.authenticateDetailed(email, password);
     return res.session || null;
+  }
+
+  public clearSessionData(): void {
+    if (this.provider && typeof (this.provider as any).clearSessionData === "function") {
+      (this.provider as any).clearSessionData();
+    }
   }
 
   public isLoading(): boolean {

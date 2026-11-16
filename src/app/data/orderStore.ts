@@ -27,6 +27,7 @@ import {
 import { orderRepository, IOrderRepository } from "../../data/repositories/orderRepository";
 import { APP_CONFIG } from "../config/appConfig";
 import { ActionApiError, fetchWithTimeout, parseApiErrorResponse } from "../utils/actionErrorClassifier";
+import { getWibTodayString } from "../utils/orderDateUtils";
 
 export type {
   StructuredAddress,
@@ -249,7 +250,7 @@ class OrderStore {
       },
       payment: {
         tipePembayaran: initialPaid >= totalEst && totalEst > 0 ? "Bayar di Awal" : "Bayar di Akhir",
-        metodePembayaran: "Transfer",
+        metodePembayaran: data.metodePembayaran || data["Metode Pembayaran"] || "Transfer BCA",
         statusPembayaran: data.statusPembayaran || (initialPaid >= totalEst && totalEst > 0 ? "Lunas" : initialPaid > 0 ? "Kurang" : "Belum Bayar"),
         totalBiaya: totalEst,
         totalEstimasi: totalEst,
@@ -332,7 +333,7 @@ class OrderStore {
       },
       payment: {
         tipePembayaran: initialPaid >= totalEst && totalEst > 0 ? "Bayar di Awal" : "Bayar di Akhir",
-        metodePembayaran: "Transfer",
+        metodePembayaran: data.metodePembayaran || data["Metode Pembayaran"] || "Transfer BCA",
         statusPembayaran: data.statusPembayaran || (initialPaid >= totalEst && totalEst > 0 ? "Lunas" : initialPaid > 0 ? "Kurang" : "Belum Bayar"),
         totalBiaya: totalEst,
         totalEstimasi: totalEst,
@@ -385,7 +386,7 @@ class OrderStore {
       currentStep: (data as any).currentStep || 1,
       currentStageName: (data as any).currentStageName || "Verifikasi",
       catatanOrder: data.catatanOrder || "Order baru dibuat dari formulir Buat Order.",
-      createdAt: (data as any).createdAt || new Date().toISOString().split("T")[0],
+      createdAt: (data as any).createdAt || getWibTodayString(),
       isArchived: (data as any).isArchived || false,
 
       namaPemilik: data.namaPemilik,
@@ -1295,7 +1296,7 @@ class OrderStore {
     };
 
     const userName = user.name || (stage === 6 ? "Supervisor" : "Admin Loket");
-    const userRole = user.role || (stage === 6 ? "supervisor" : "admin");
+    const userRole = user.role || (stage === 6 ? "administrator" : "admin");
 
     const updatedApproval = {
       ...currentApproval,
@@ -1319,10 +1320,9 @@ class OrderStore {
     };
 
     const token = typeof localStorage !== "undefined" ? localStorage.getItem("auth_token") : null;
-    const isApiMode = APP_CONFIG.dataProvider === "api" || Boolean(token);
 
     let confirmedOrderData: Partial<OperationalOrder> | null = null;
-    if (isApiMode) {
+    {
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (token) headers["Authorization"] = `Bearer ${token}`;
 
@@ -1372,7 +1372,7 @@ class OrderStore {
 
     try {
       auditLog.log({
-        userId: userRole === "supervisor" ? "usr-spv" : "usr-admin",
+        userId: userRole === "administrator" ? "usr-1" : "usr-admin",
         userName,
         userRole: userRole as any,
         action: "UPDATE",
@@ -1388,6 +1388,27 @@ class OrderStore {
     return true;
   }
 
+  public async completeDeliveryDirectAsync(
+    orderNo: string,
+    payload: { receiverName: string; photoUrl?: string }
+  ): Promise<OperationalOrder | false> {
+    const repo = this.repository as any;
+    const provider = typeof repo.getProvider === "function" ? repo.getProvider() : repo;
+    if (!provider || typeof provider.completeDeliveryDirectAsync !== "function") {
+      throw new ActionApiError(
+        500,
+        "PROVIDER_NOT_SUPPORTED",
+        `Provider order aktif tidak mendukung penyelesaian pengantaran langsung untuk order ${orderNo}.`
+      );
+    }
+
+    const updated = typeof repo.completeDeliveryDirectAsync === "function"
+      ? await repo.completeDeliveryDirectAsync(orderNo, payload)
+      : await provider.completeDeliveryDirectAsync(orderNo, payload);
+    this.notify();
+    return updated;
+  }
+
   public async initFromApi(): Promise<void> {
     if (typeof (this.repository as any).initFromApi === "function") {
       await (this.repository as any).initFromApi();
@@ -1397,6 +1418,13 @@ class OrderStore {
 
   public async refresh(silent?: boolean): Promise<void> {
     return this.initFromApi();
+  }
+
+  public clearSessionData(): void {
+    if (typeof (this.repository as any).clearSessionData === "function") {
+      (this.repository as any).clearSessionData();
+    }
+    this.notify();
   }
 }
 
@@ -1438,6 +1466,7 @@ export function useOrderStore() {
     addRekapDocument: orderStore.addRekapDocument.bind(orderStore),
     addRekapDocumentAsync: orderStore.addRekapDocumentAsync.bind(orderStore),
     approveDocumentsAsync: orderStore.approveDocumentsAsync.bind(orderStore),
+    completeDeliveryDirectAsync: orderStore.completeDeliveryDirectAsync.bind(orderStore),
     cancelOrder: orderStore.cancelOrder.bind(orderStore),
   };
 }

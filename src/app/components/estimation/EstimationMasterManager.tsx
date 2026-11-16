@@ -135,6 +135,7 @@ export function EstimationMasterManager() {
   // Active template
   const activeTemplateId = resolveTemplateIdByService(selectedService, selectedVehicle);
   const activeTemplate = store.getTemplate(activeTemplateId);
+  const [isSaving, setIsSaving] = useState(false);
 
   // Parameter Form State
   const [paramKoefisienDenda, setParamKoefisienDenda] = useState<string>(
@@ -258,10 +259,11 @@ export function EstimationMasterManager() {
   }, [simPkb, simDueDate, simProgram, activeTemplate]);
 
   // Handler: Save Formula Parameters
-  const handleSaveParameters = () => {
+  const handleSaveParameters = async () => {
+    if (isSaving) return;
     const koefVal = parseFloat(paramKoefisienDenda);
-    if (isNaN(koefVal) || koefVal < 0 || koefVal > 500) {
-      toast.error("Koefisien denda tidak valid. Masukkan persentase antara 0% dan 500%.");
+    if (isNaN(koefVal) || koefVal < 0 || koefVal > 100) {
+      toast.error("Koefisien denda tidak valid. Masukkan persentase antara 0% dan 100%.");
       return;
     }
 
@@ -277,43 +279,93 @@ export function EstimationMasterManager() {
       return;
     }
 
+    const swdklljVal = Number(paramSwdklljPokok);
+    const dendaSwdVal = Number(paramDendaSwdklljPokok);
+    const jasaVal = Number(paramBiayaJasa);
+    const skpVal = Number(paramBiayaCetakSkp);
+    const stnkVal = Number(paramAdminStnk);
+    const tnkbVal = Number(paramAdminTnkb);
+    if (
+      [swdklljVal, dendaSwdVal, jasaVal, skpVal, stnkVal, tnkbVal].some(
+        (n) => !Number.isFinite(n) || n < 0
+      )
+    ) {
+      toast.error("Nominal biaya parameter harus berupa angka valid >= 0.");
+      return;
+    }
+
     const updates = {
       koefisienDenda: koefVal / 100, // convert percentage e.g. 48 -> 0.48
       pembagiBulan: pembagiVal,
       kelipatanPembulatan: pembulatanVal,
-      swdklljPokok: parseFloat(paramSwdklljPokok) || 0,
-      dendaSwdklljPokok: parseFloat(paramDendaSwdklljPokok) || 0,
-      biayaJasa: parseFloat(paramBiayaJasa) || 0,
-      biayaCetakSkp: parseFloat(paramBiayaCetakSkp) || 0,
-      adminStnk: parseFloat(paramAdminStnk) || 0,
-      adminTnkb: parseFloat(paramAdminTnkb) || 0,
+      swdklljPokok: swdklljVal,
+      dendaSwdklljPokok: dendaSwdVal,
+      biayaJasa: jasaVal,
+      biayaCetakSkp: skpVal,
+      adminStnk: stnkVal,
+      adminTnkb: tnkbVal,
     };
 
-    const success = store.updateTemplateParams(activeTemplate.id, updates);
-    if (success) {
-      toast.success(`Parameter rumus ${activeTemplate.name} berhasil disimpan dan disinkronkan ke server.`);
-    } else {
-      toast.error("Gagal menyimpan parameter rumus.");
+    setIsSaving(true);
+    try {
+      const res = await store.updateTemplateParamsAsync(activeTemplate.id, updates);
+      if (res.success) {
+        toast.success(`Parameter rumus ${activeTemplate.name} berhasil disimpan dan disinkronkan ke server.`);
+      } else {
+        toast.error(res.error || "Gagal menyimpan parameter rumus ke server.");
+      }
+    } finally {
+      setIsSaving(false);
     }
   };
 
   // Handler: Reset to Official Workbook Defaults
-  const handleConfirmReset = () => {
-    store.resetToDefault(activeTemplate.id);
-    setIsResetDialogOpen(false);
-    toast.success(`Template ${activeTemplate.name} telah dikembalikan ke Standar Resmi Default Workbook.`);
+  const handleConfirmReset = async () => {
+    if (isSaving) return;
+    setIsSaving(true);
+    try {
+      const res = await store.resetToDefaultAsync(activeTemplate.id);
+      if (!res.success) {
+        toast.error(res.error || "Gagal mereset template di server.");
+        return;
+      }
+      setIsResetDialogOpen(false);
+      toast.success(`Template ${activeTemplate.name} telah dikembalikan ke Standar Resmi Default Workbook.`);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   // Handler: Toggle Component Active Status
-  const handleToggleActive = (componentId: string) => {
-    store.toggleComponent(activeTemplate.id, componentId);
-    toast.info("Status komponen berhasil diperbarui.");
+  const handleToggleActive = async (componentId: string) => {
+    if (isSaving) return;
+    setIsSaving(true);
+    try {
+      const res = await store.toggleComponentAsync(activeTemplate.id, componentId);
+      if (res.success) {
+        toast.info("Status komponen berhasil diperbarui dan disimpan.");
+      } else {
+        toast.error(res.error || "Gagal menyimpan perubahan status komponen.");
+      }
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   // Handler: Toggle Masuk Total
-  const handleToggleIncludeInTotal = (componentId: string) => {
-    store.toggleIncludeInTotal(activeTemplate.id, componentId);
-    toast.info("Pengaturan Masuk Total komponen berhasil diperbarui.");
+  const handleToggleIncludeInTotal = async (componentId: string) => {
+    if (isSaving) return;
+    setIsSaving(true);
+    try {
+      const res = await store.toggleIncludeInTotalAsync(activeTemplate.id, componentId);
+      if (res.success) {
+        toast.info("Pengaturan Masuk Total komponen berhasil diperbarui dan disimpan.");
+      } else {
+        toast.error(res.error || "Gagal menyimpan perubahan Masuk Total komponen.");
+      }
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   // Handler: Open Edit Component Modal
@@ -334,70 +386,103 @@ export function EstimationMasterManager() {
   };
 
   // Handler: Save Edited Component
-  const handleSaveEditedComponent = () => {
-    if (!selectedComponent) return;
-    const defVal = parseFloat(editCompData.defaultValue) || 0;
+  const handleSaveEditedComponent = async () => {
+    if (isSaving || !selectedComponent) return;
+    const defVal = parseFloat(editCompData.defaultValue);
+    if (isNaN(defVal) || !Number.isFinite(defVal) || defVal < 0) {
+      toast.error("Nilai default komponen tidak valid.");
+      return;
+    }
     const minVal = editCompData.minAmount ? parseFloat(editCompData.minAmount) : undefined;
     const maxVal = editCompData.maxAmount ? parseFloat(editCompData.maxAmount) : undefined;
 
-    store.updateComponentRule(activeTemplate.id, selectedComponent.id, {
-      name: editCompData.name.trim() || selectedComponent.name,
-      category: editCompData.category,
-      calculationMethod: editCompData.calculationMethod,
-      defaultValue: defVal,
-      minAmount: minVal,
-      maxAmount: maxVal,
-      description: editCompData.description.trim(),
-      isActive: editCompData.isActive,
-      includesInTotal: editCompData.includesInTotal,
-    });
+    setIsSaving(true);
+    try {
+      const res = await store.updateComponentRuleAsync(activeTemplate.id, selectedComponent.id, {
+        name: editCompData.name.trim() || selectedComponent.name,
+        category: editCompData.category,
+        calculationMethod: editCompData.calculationMethod,
+        defaultValue: defVal,
+        minAmount: minVal,
+        maxAmount: maxVal,
+        description: editCompData.description.trim(),
+        isActive: editCompData.isActive,
+        includesInTotal: editCompData.includesInTotal,
+      });
 
-    setIsEditComponentModalOpen(false);
-    toast.success(`Komponen '${selectedComponent.name}' berhasil diperbarui.`);
+      if (!res.success) {
+        toast.error(res.error || "Gagal menyimpan perubahan komponen ke server.");
+        return;
+      }
+
+      setIsEditComponentModalOpen(false);
+      toast.success(`Komponen '${selectedComponent.name}' berhasil diperbarui.`);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   // Handler: Add New Custom Component
-  const handleAddNewComponent = () => {
+  const handleAddNewComponent = async () => {
+    if (isSaving) return;
     if (!newCompData.name.trim()) {
       toast.error("Nama komponen wajib diisi.");
       return;
     }
 
-    const defVal = parseFloat(newCompData.defaultValue) || 0;
-    const added = store.addManualComponent(activeTemplate.id, {
-      code: newCompData.code.trim().toUpperCase() || "CST-01",
-      name: newCompData.name.trim(),
-      category: newCompData.category,
-      calculationMethod: newCompData.calculationMethod,
-      defaultValue: defVal,
-      description: newCompData.description.trim(),
-      isActive: true,
-      includesInTotal: newCompData.includesInTotal,
-      valueType: "manual",
-    });
+    const defVal = parseFloat(newCompData.defaultValue);
+    if (isNaN(defVal) || !Number.isFinite(defVal) || defVal < 0) {
+      toast.error("Nilai default komponen tidak valid.");
+      return;
+    }
 
-    if (added) {
-      toast.success(`Komponen baru '${added.name}' berhasil ditambahkan ke ${activeTemplate.name}.`);
-      setIsAddComponentModalOpen(false);
-      setNewCompData({
-        code: "ADM-NEW",
-        name: "",
-        category: "ADMIN",
-        calculationMethod: "fixed_amount",
-        defaultValue: "0",
-        description: "",
-        includesInTotal: true,
+    setIsSaving(true);
+    try {
+      const res = await store.addManualComponentAsync(activeTemplate.id, {
+        code: newCompData.code.trim().toUpperCase() || "CST-01",
+        name: newCompData.name.trim(),
+        category: newCompData.category,
+        calculationMethod: newCompData.calculationMethod,
+        defaultValue: defVal,
+        description: newCompData.description.trim(),
+        isActive: true,
+        includesInTotal: newCompData.includesInTotal,
+        valueType: "manual",
       });
+
+      if (res.success && res.component) {
+        toast.success(`Komponen baru '${res.component.name}' berhasil ditambahkan ke ${activeTemplate.name}.`);
+        setIsAddComponentModalOpen(false);
+        setNewCompData({
+          code: "ADM-NEW",
+          name: "",
+          category: "ADMIN",
+          calculationMethod: "fixed_amount",
+          defaultValue: "0",
+          description: "",
+          includesInTotal: true,
+        });
+      } else {
+        toast.error(res.error || "Gagal menambahkan komponen baru ke server.");
+      }
+    } finally {
+      setIsSaving(false);
     }
   };
 
   // Handler: Delete Manual Component
-  const handleDeleteComponent = (componentId: string, componentName: string) => {
-    const success = store.removeManualComponent(activeTemplate.id, componentId);
-    if (success) {
-      toast.success(`Komponen '${componentName}' berhasil dihapus.`);
-    } else {
-      toast.error("Komponen formula inti dilindungi dan tidak dapat dihapus.");
+  const handleDeleteComponent = async (componentId: string, componentName: string) => {
+    if (isSaving) return;
+    setIsSaving(true);
+    try {
+      const res = await store.removeManualComponentAsync(activeTemplate.id, componentId);
+      if (res.success) {
+        toast.success(`Komponen '${componentName}' berhasil dihapus.`);
+      } else {
+        toast.error(res.error || "Komponen formula inti dilindungi dan tidak dapat dihapus.");
+      }
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -438,6 +523,7 @@ export function EstimationMasterManager() {
 
               <Button
                 size="sm"
+                disabled={isSaving}
                 className="h-8.5 text-xs bg-primary hover:bg-primary/90 text-primary-foreground gap-1.5 shadow-xs font-medium"
                 onClick={() => setIsAddComponentModalOpen(true)}
               >
@@ -448,6 +534,7 @@ export function EstimationMasterManager() {
               <Button
                 variant="outline"
                 size="sm"
+                disabled={isSaving}
                 className="h-8.5 text-xs text-amber-600 dark:text-amber-400 border-amber-500/40 hover:bg-amber-500/10 gap-1.5 font-medium"
                 onClick={() => setIsResetDialogOpen(true)}
               >
@@ -474,6 +561,7 @@ export function EstimationMasterManager() {
                   key={srv}
                   type="button"
                   size="sm"
+                  disabled={isSaving}
                   variant={selectedService === srv ? "default" : "outline"}
                   onClick={() => setSelectedService(srv)}
                   className={cn(
@@ -496,6 +584,7 @@ export function EstimationMasterManager() {
                 type="button"
                 variant={selectedVehicle === "Mobil" ? "default" : "ghost"}
                 size="sm"
+                disabled={isSaving}
                 onClick={() => setSelectedVehicle("Mobil")}
                 className={cn("h-7 px-3 text-xs font-semibold", selectedVehicle === "Mobil" && "shadow-xs")}
               >
@@ -505,6 +594,7 @@ export function EstimationMasterManager() {
                 type="button"
                 variant={selectedVehicle === "Motor" ? "default" : "ghost"}
                 size="sm"
+                disabled={isSaving}
                 onClick={() => setSelectedVehicle("Motor")}
                 className={cn("h-7 px-3 text-xs font-semibold", selectedVehicle === "Motor" && "shadow-xs")}
               >
@@ -556,11 +646,12 @@ export function EstimationMasterManager() {
             </div>
             <Button
               size="sm"
+              disabled={isSaving}
               onClick={handleSaveParameters}
               className="h-8 text-xs bg-primary hover:bg-primary/90 text-primary-foreground gap-1.5 shadow-xs font-medium self-start sm:self-auto"
             >
               <Save className="w-3.5 h-3.5" />
-              <span>Simpan Parameter</span>
+              <span>{isSaving ? "Menyimpan..." : "Simpan Parameter"}</span>
             </Button>
           </div>
         </CardHeader>
@@ -576,6 +667,7 @@ export function EstimationMasterManager() {
                 <Input
                   type="number"
                   step="0.5"
+                  disabled={isSaving}
                   value={paramKoefisienDenda}
                   onChange={(e) => setParamKoefisienDenda(e.target.value)}
                   className="h-8.5 text-xs pr-7 font-semibold"
@@ -599,6 +691,7 @@ export function EstimationMasterManager() {
                 type="number"
                 min="1"
                 max="60"
+                disabled={isSaving}
                 value={paramPembagiBulan}
                 onChange={(e) => setParamPembagiBulan(e.target.value)}
                 className="h-8.5 text-xs font-semibold"
@@ -617,6 +710,7 @@ export function EstimationMasterManager() {
               <Input
                 type="number"
                 step="100"
+                disabled={isSaving}
                 value={paramPembulatan}
                 onChange={(e) => setParamPembulatan(e.target.value)}
                 className="h-8.5 text-xs font-semibold"
@@ -635,6 +729,7 @@ export function EstimationMasterManager() {
               <Input
                 type="number"
                 step="5000"
+                disabled={isSaving}
                 value={paramBiayaJasa}
                 onChange={(e) => setParamBiayaJasa(e.target.value)}
                 className="h-8.5 text-xs font-semibold"
@@ -655,6 +750,7 @@ export function EstimationMasterManager() {
               <Input
                 type="number"
                 step="1000"
+                disabled={isSaving}
                 value={paramSwdklljPokok}
                 onChange={(e) => setParamSwdklljPokok(e.target.value)}
                 className="h-8.5 text-xs font-semibold"
@@ -675,6 +771,7 @@ export function EstimationMasterManager() {
               <Input
                 type="number"
                 step="1000"
+                disabled={isSaving}
                 value={paramDendaSwdklljPokok}
                 onChange={(e) => setParamDendaSwdklljPokok(e.target.value)}
                 className="h-8.5 text-xs font-semibold"
@@ -695,6 +792,7 @@ export function EstimationMasterManager() {
               <Input
                 type="number"
                 step="5000"
+                disabled={isSaving}
                 value={paramBiayaCetakSkp}
                 onChange={(e) => setParamBiayaCetakSkp(e.target.value)}
                 className="h-8.5 text-xs font-semibold"
@@ -716,6 +814,7 @@ export function EstimationMasterManager() {
                 <Input
                   type="number"
                   step="5000"
+                  disabled={isSaving}
                   value={paramAdminStnk}
                   onChange={(e) => setParamAdminStnk(e.target.value)}
                   className="h-8.5 text-xs font-semibold"
@@ -738,6 +837,7 @@ export function EstimationMasterManager() {
                 <Input
                   type="number"
                   step="5000"
+                  disabled={isSaving}
                   value={paramAdminTnkb}
                   onChange={(e) => setParamAdminTnkb(e.target.value)}
                   className="h-8.5 text-xs font-semibold"
@@ -828,6 +928,7 @@ export function EstimationMasterManager() {
                         <div className="flex items-center justify-center">
                           <Switch
                             checked={comp.isActive}
+                            disabled={isSaving}
                             onCheckedChange={() => handleToggleActive(comp.id)}
                             aria-label={`Toggle active ${comp.name}`}
                           />
@@ -837,7 +938,7 @@ export function EstimationMasterManager() {
                         <div className="flex items-center justify-center">
                           <Switch
                             checked={comp.includesInTotal}
-                            disabled={!comp.isActive}
+                            disabled={isSaving || !comp.isActive}
                             onCheckedChange={() => handleToggleIncludeInTotal(comp.id)}
                             aria-label={`Toggle include in total ${comp.name}`}
                           />
@@ -847,9 +948,11 @@ export function EstimationMasterManager() {
                         <div className="flex items-center justify-center gap-1">
                           <Button
                             variant="ghost"
-                            size="icon"
-                            className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                            size="icon-sm"
+                            disabled={isSaving}
+                            className="text-muted-foreground hover:text-foreground"
                             onClick={() => handleOpenEditComponent(comp)}
+                            aria-label={`Edit komponen ${comp.name}`}
                             title="Edit Komponen"
                           >
                             <Edit className="w-3.5 h-3.5" />
@@ -858,9 +961,11 @@ export function EstimationMasterManager() {
                           {isManualOrCustom && !isCoreRule && (
                             <Button
                               variant="ghost"
-                              size="icon"
-                              className="h-7 w-7 text-red-500 hover:text-red-700 hover:bg-red-500/10"
+                              size="icon-sm"
+                              disabled={isSaving}
+                              className="text-destructive hover:text-destructive hover:bg-destructive/10"
                               onClick={() => handleDeleteComponent(comp.id, comp.name)}
+                              aria-label={`Hapus komponen ${comp.name}`}
                               title="Hapus Komponen Kustom"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
@@ -981,7 +1086,12 @@ export function EstimationMasterManager() {
       </Card>
 
       {/* DIALOG: Edit Component Modal */}
-      <Dialog open={isEditComponentModalOpen} onOpenChange={setIsEditComponentModalOpen}>
+      <Dialog
+        open={isEditComponentModalOpen}
+        onOpenChange={(open) => {
+          if (!isSaving) setIsEditComponentModalOpen(open);
+        }}
+      >
         <DialogContent className="border-border sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="text-base font-bold text-foreground">
@@ -996,6 +1106,7 @@ export function EstimationMasterManager() {
             <div className="space-y-1.5">
               <Label className="text-xs font-medium">Nama Komponen</Label>
               <Input
+                disabled={isSaving}
                 value={editCompData.name}
                 onChange={(e) => setEditCompData((prev) => ({ ...prev, name: e.target.value }))}
                 className="h-8 text-xs font-semibold"
@@ -1006,6 +1117,7 @@ export function EstimationMasterManager() {
               <div className="space-y-1.5">
                 <Label className="text-xs font-medium">Kategori</Label>
                 <Select
+                  disabled={isSaving}
                   value={editCompData.category}
                   onValueChange={(val) => setEditCompData((prev) => ({ ...prev, category: val as ComponentCategory }))}
                 >
@@ -1025,6 +1137,7 @@ export function EstimationMasterManager() {
               <div className="space-y-1.5">
                 <Label className="text-xs font-medium">Metode Perhitungan</Label>
                 <Select
+                  disabled={isSaving}
                   value={editCompData.calculationMethod}
                   onValueChange={(val) => setEditCompData((prev) => ({ ...prev, calculationMethod: val as CalculationMethod }))}
                 >
@@ -1046,6 +1159,7 @@ export function EstimationMasterManager() {
               <Label className="text-xs font-medium">Tarif Default (Rp)</Label>
               <Input
                 type="number"
+                disabled={isSaving}
                 value={editCompData.defaultValue}
                 onChange={(e) => setEditCompData((prev) => ({ ...prev, defaultValue: e.target.value }))}
                 className="h-8 text-xs font-semibold"
@@ -1055,6 +1169,7 @@ export function EstimationMasterManager() {
             <div className="space-y-1.5">
               <Label className="text-xs font-medium">Keterangan Bisnis / Catatan</Label>
               <Input
+                disabled={isSaving}
                 value={editCompData.description}
                 onChange={(e) => setEditCompData((prev) => ({ ...prev, description: e.target.value }))}
                 placeholder="Deskripsi fungsi biaya..."
@@ -1068,6 +1183,7 @@ export function EstimationMasterManager() {
                 <p className="text-[11px] text-muted-foreground">Aktifkan atau nonaktifkan komponen ini</p>
               </div>
               <Switch
+                disabled={isSaving}
                 checked={editCompData.isActive}
                 onCheckedChange={(checked) => setEditCompData((prev) => ({ ...prev, isActive: checked }))}
               />
@@ -1080,25 +1196,37 @@ export function EstimationMasterManager() {
               </div>
               <Switch
                 checked={editCompData.includesInTotal}
-                disabled={!editCompData.isActive}
+                disabled={isSaving || !editCompData.isActive}
                 onCheckedChange={(checked) => setEditCompData((prev) => ({ ...prev, includesInTotal: checked }))}
               />
             </div>
           </div>
 
           <DialogFooter className="gap-2 sm:gap-0">
-            <Button variant="outline" size="sm" onClick={() => setIsEditComponentModalOpen(false)}>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={isSaving}
+              onClick={() => {
+                if (!isSaving) setIsEditComponentModalOpen(false);
+              }}
+            >
               Batal
             </Button>
-            <Button size="sm" onClick={handleSaveEditedComponent} className="bg-primary text-primary-foreground">
-              Simpan Komponen
+            <Button size="sm" disabled={isSaving} onClick={handleSaveEditedComponent} className="bg-primary text-primary-foreground">
+              {isSaving ? "Menyimpan..." : "Simpan Komponen"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {/* DIALOG: Add Component Modal */}
-      <Dialog open={isAddComponentModalOpen} onOpenChange={setIsAddComponentModalOpen}>
+      <Dialog
+        open={isAddComponentModalOpen}
+        onOpenChange={(open) => {
+          if (!isSaving) setIsAddComponentModalOpen(open);
+        }}
+      >
         <DialogContent className="border-border sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="text-base font-bold text-foreground">
@@ -1114,6 +1242,7 @@ export function EstimationMasterManager() {
               <div className="col-span-1 space-y-1.5">
                 <Label className="text-xs font-medium">Kode</Label>
                 <Input
+                  disabled={isSaving}
                   value={newCompData.code}
                   onChange={(e) => setNewCompData((prev) => ({ ...prev, code: e.target.value }))}
                   placeholder="ADM-01"
@@ -1123,6 +1252,7 @@ export function EstimationMasterManager() {
               <div className="col-span-2 space-y-1.5">
                 <Label className="text-xs font-medium">Nama Komponen</Label>
                 <Input
+                  disabled={isSaving}
                   value={newCompData.name}
                   onChange={(e) => setNewCompData((prev) => ({ ...prev, name: e.target.value }))}
                   placeholder="Contoh: Materai Surat Kuasa"
@@ -1135,6 +1265,7 @@ export function EstimationMasterManager() {
               <div className="space-y-1.5">
                 <Label className="text-xs font-medium">Kategori</Label>
                 <Select
+                  disabled={isSaving}
                   value={newCompData.category}
                   onValueChange={(val) => setNewCompData((prev) => ({ ...prev, category: val as ComponentCategory }))}
                 >
@@ -1154,6 +1285,7 @@ export function EstimationMasterManager() {
               <div className="space-y-1.5">
                 <Label className="text-xs font-medium">Metode Perhitungan</Label>
                 <Select
+                  disabled={isSaving}
                   value={newCompData.calculationMethod}
                   onValueChange={(val) => setNewCompData((prev) => ({ ...prev, calculationMethod: val as CalculationMethod }))}
                 >
@@ -1172,6 +1304,7 @@ export function EstimationMasterManager() {
               <Label className="text-xs font-medium">Tarif Default (Rp)</Label>
               <Input
                 type="number"
+                disabled={isSaving}
                 value={newCompData.defaultValue}
                 onChange={(e) => setNewCompData((prev) => ({ ...prev, defaultValue: e.target.value }))}
                 className="h-8 text-xs font-semibold"
@@ -1181,6 +1314,7 @@ export function EstimationMasterManager() {
             <div className="space-y-1.5">
               <Label className="text-xs font-medium">Keterangan Bisnis</Label>
               <Input
+                disabled={isSaving}
                 value={newCompData.description}
                 onChange={(e) => setNewCompData((prev) => ({ ...prev, description: e.target.value }))}
                 placeholder="Keterangan komponen..."
@@ -1194,6 +1328,7 @@ export function EstimationMasterManager() {
                 <p className="text-[11px] text-muted-foreground">Sertakan dalam penjumlahan total tagihan</p>
               </div>
               <Switch
+                disabled={isSaving}
                 checked={newCompData.includesInTotal}
                 onCheckedChange={(checked) => setNewCompData((prev) => ({ ...prev, includesInTotal: checked }))}
               />
@@ -1201,18 +1336,30 @@ export function EstimationMasterManager() {
           </div>
 
           <DialogFooter className="gap-2 sm:gap-0">
-            <Button variant="outline" size="sm" onClick={() => setIsAddComponentModalOpen(false)}>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={isSaving}
+              onClick={() => {
+                if (!isSaving) setIsAddComponentModalOpen(false);
+              }}
+            >
               Batal
             </Button>
-            <Button size="sm" onClick={handleAddNewComponent} className="bg-primary text-primary-foreground">
-              Tambah Komponen
+            <Button size="sm" disabled={isSaving} onClick={handleAddNewComponent} className="bg-primary text-primary-foreground">
+              {isSaving ? "Menyimpan..." : "Tambah Komponen"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {/* DIALOG: Reset Confirmation Alert Dialog */}
-      <AlertDialog open={isResetDialogOpen} onOpenChange={setIsResetDialogOpen}>
+      <AlertDialog
+        open={isResetDialogOpen}
+        onOpenChange={(open) => {
+          if (!isSaving) setIsResetDialogOpen(open);
+        }}
+      >
         <AlertDialogContent className="border-border sm:max-w-md">
           <AlertDialogHeader>
             <AlertDialogTitle className="text-base font-bold text-foreground flex items-center gap-2">
@@ -1226,12 +1373,15 @@ export function EstimationMasterManager() {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter className="gap-2 sm:gap-0">
-            <AlertDialogCancel className="text-xs h-8">Batal</AlertDialogCancel>
+            <AlertDialogCancel disabled={isSaving} className="text-xs h-8">
+              Batal
+            </AlertDialogCancel>
             <AlertDialogAction
+              disabled={isSaving}
               onClick={handleConfirmReset}
               className="text-xs h-8 bg-amber-600 hover:bg-amber-700 text-white font-medium"
             >
-              Ya, Reset ke Standar Resmi
+              {isSaving ? "Mereset..." : "Ya, Reset ke Standar Resmi"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

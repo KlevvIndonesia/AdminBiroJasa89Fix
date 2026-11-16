@@ -10,6 +10,7 @@
 import { OperationalOrder, StageName, STAGES, IOrderDataProvider } from "../../domain/order/types";
 // createInitialOrders removed from api provider to prevent mock data leakage in production/API mode
 import { APP_CONFIG } from "../../app/config/appConfig";
+import { permissionStore } from "../../app/data/permissionStore";
 import { toast } from "sonner";
 import {
   ActionApiError,
@@ -59,12 +60,88 @@ export class ApiOrderProvider implements IOrderDataProvider {
   private currentDataVersion = 0;
   private latestAppliedGetId = 0;
   private nextGetRequestId = 0;
+  private sessionGeneration = 0;
+  private activeAbortController: AbortController | null = null;
+  private permissionUnsubscribe: (() => void) | null = null;
+  private lastAuthStateKey: string | null = null;
+  private isDestroyed = false;
 
   constructor(baseUrl = APP_CONFIG.apiBaseUrl) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
-    if (typeof window === "undefined" || (typeof window !== "undefined" && window.localStorage?.getItem("auth_token"))) {
+    this.lastAuthStateKey = this.buildAuthStateKey();
+    this.permissionUnsubscribe = permissionStore.subscribe(() => {
+      this.handlePermissionStateChange();
+    });
+    const hasOrderAccess =
+      permissionStore.canAccessApiEndpoint("orders") ||
+      permissionStore.canAccessApiEndpoint("orders-archived") ||
+      permissionStore.canAccessApiEndpoint("messenger-tasks");
+    if (
+      typeof window === "undefined" ||
+      (typeof window !== "undefined" &&
+        window.localStorage?.getItem("auth_token") &&
+        (permissionStore.hasInitializedFromApi() || permissionStore.hasExplicitSessionHydration()) &&
+        hasOrderAccess)
+    ) {
       this.initFromApi();
     }
+  }
+
+  private buildAuthStateKey(): string {
+    const token = this.getAuthHeader().Authorization || "";
+    const role = permissionStore.getSessionRole() || "";
+    return `${token}::${role}`;
+  }
+
+  private abortInFlightFetch(): void {
+    if (this.activeAbortController) {
+      this.activeAbortController.abort();
+      this.activeAbortController = null;
+    }
+  }
+
+  private handlePermissionStateChange(): void {
+    if (this.isDestroyed) return;
+    const nextKey = this.buildAuthStateKey();
+
+    if (typeof window !== "undefined") {
+      const status = permissionStore.getSessionAuthStatus();
+      const hasToken = Boolean(this.getAuthHeader().Authorization);
+      if (status === "unauthenticated" || status === "forbidden" || status === "hydrating" || !hasToken) {
+        this.clearSessionData();
+        return;
+      }
+    }
+
+    if (this.lastAuthStateKey !== null && this.lastAuthStateKey !== nextKey) {
+      this.clearSessionData();
+      this.lastAuthStateKey = nextKey;
+    }
+  }
+
+  public clearSessionData(): void {
+    this.sessionGeneration++;
+    this.abortInFlightFetch();
+    this.activeOrders = createEmptyActiveOrders();
+    this.archivedOrders = [];
+    this.isInitialized = false;
+    this.isLoading = false;
+    this.error = null;
+    this.inFlightMutationCount = 0;
+    this.nextGetRequestId++;
+    this.latestAppliedGetId = this.nextGetRequestId;
+    this.lastAuthStateKey = null;
+    this.notify();
+  }
+
+  public destroy(): void {
+    this.isDestroyed = true;
+    if (this.permissionUnsubscribe) {
+      this.permissionUnsubscribe();
+      this.permissionUnsubscribe = null;
+    }
+    this.clearSessionData();
+    this.listeners.clear();
   }
 
   public getInFlightMutationCount(): number {
@@ -106,42 +183,76 @@ export class ApiOrderProvider implements IOrderDataProvider {
       if (!authHeaders.Authorization) return;
 
       const capturedVersion = this.currentDataVersion;
+      const capturedGeneration = this.sessionGeneration;
+      const capturedAuthKey = this.buildAuthStateKey();
       const requestId = ++this.nextGetRequestId;
+      this.abortInFlightFetch();
+      const abortController = typeof AbortController !== "undefined" ? new AbortController() : null;
+      this.activeAbortController = abortController;
+      const signalOpt = abortController ? { signal: abortController.signal } : {};
 
       try {
         const isCourier = getCurrentUserRole() === "messenger";
-        const orderUrl = isCourier ? `${this.baseUrl}/messenger/my-tasks` : `${this.baseUrl}/orders`;
-        const res = await fetch(orderUrl, {
-          headers: { "Content-Type": "application/json", ...authHeaders },
-        });
+        const canFetchOrders = isCourier
+          ? permissionStore.canAccessApiEndpoint("messenger-tasks")
+          : permissionStore.canAccessApiEndpoint("orders");
+        const canFetchArchived = !isCourier && permissionStore.canAccessApiEndpoint("orders-archived");
 
-        // Discard stale GET response if a mutation completed or newer GET arrived while request was in-flight
-        if (capturedVersion < this.currentDataVersion || requestId < this.latestAppliedGetId) {
+        if (!canFetchOrders && !canFetchArchived) {
           return;
         }
 
         let fetchedActive: Record<StageName, OperationalOrder[]> | null = null;
-        if (res.ok) {
-          const payload = await res.json();
-          if (payload.success && payload.data) {
-            fetchedActive = payload.data;
+        if (canFetchOrders) {
+          const orderUrl = isCourier ? `${this.baseUrl}/messenger/my-tasks` : `${this.baseUrl}/orders`;
+          const res = await fetch(orderUrl, {
+            headers: { "Content-Type": "application/json", ...authHeaders },
+            ...signalOpt,
+          });
+
+          // Discard stale GET response if session cleared/switched, mutation completed, or newer GET arrived
+          if (
+            this.isDestroyed ||
+            capturedGeneration !== this.sessionGeneration ||
+            capturedVersion < this.currentDataVersion ||
+            requestId < this.latestAppliedGetId
+          ) {
+            return;
+          }
+
+          if (res.ok) {
+            const payload = await res.json();
+            if (payload.success && payload.data) {
+              fetchedActive = payload.data;
+            }
           }
         }
 
         let archRes: Response | null = null;
-        if (!isCourier) {
+        if (canFetchArchived) {
           archRes = await fetch(`${this.baseUrl}/orders/archived`, {
             headers: { "Content-Type": "application/json", ...authHeaders },
+            ...signalOpt,
           });
         }
 
-        if (capturedVersion < this.currentDataVersion || requestId < this.latestAppliedGetId) {
+        if (
+          this.isDestroyed ||
+          capturedGeneration !== this.sessionGeneration ||
+          capturedVersion < this.currentDataVersion ||
+          requestId < this.latestAppliedGetId
+        ) {
           return;
         }
 
         if (archRes && archRes.ok) {
           const archPayload = await archRes.json();
-          if (archPayload.success && Array.isArray(archPayload.data)) {
+          if (
+            !this.isDestroyed &&
+            capturedGeneration === this.sessionGeneration &&
+            archPayload.success &&
+            Array.isArray(archPayload.data)
+          ) {
             this.archivedOrders = archPayload.data;
           }
         }
@@ -150,10 +261,15 @@ export class ApiOrderProvider implements IOrderDataProvider {
           this.activeOrders = fetchedActive;
         }
 
+        this.lastAuthStateKey = capturedAuthKey;
         this.latestAppliedGetId = requestId;
         this.notify();
       } catch {
         // Silent background sync error safe fallback
+      } finally {
+        if (this.activeAbortController === abortController) {
+          this.activeAbortController = null;
+        }
       }
     } else {
       await this.initFromApi();
@@ -178,16 +294,31 @@ export class ApiOrderProvider implements IOrderDataProvider {
   }
 
   public async initFromApi(): Promise<void> {
+    if (this.isDestroyed) return;
     if (this.inFlightMutationCount > 0) {
       // In-flight mutation taking place; do not overwrite local state with stale API snapshot
       return;
     }
     const authHeaders = this.getAuthHeader();
     if (!authHeaders.Authorization) {
-      this.isInitialized = true;
+      this.abortInFlightFetch();
       this.activeOrders = createEmptyActiveOrders();
+      this.archivedOrders = [];
+      this.isLoading = false;
+      this.isInitialized = true;
+      this.error = null;
+      this.lastAuthStateKey = "";
       this.notify();
       return;
+    }
+
+    const capturedAuthKey = this.buildAuthStateKey();
+    if (this.lastAuthStateKey && this.lastAuthStateKey !== capturedAuthKey) {
+      // Auth identity/role changed without explicit clearSessionData; purge previous account data immediately
+      this.sessionGeneration += 1;
+      this.activeOrders = createEmptyActiveOrders();
+      this.archivedOrders = [];
+      this.error = null;
     }
 
     this.isLoading = true;
@@ -195,41 +326,81 @@ export class ApiOrderProvider implements IOrderDataProvider {
     this.notify();
 
     const capturedVersion = this.currentDataVersion;
+    const capturedGeneration = this.sessionGeneration;
     const requestId = ++this.nextGetRequestId;
+    this.abortInFlightFetch();
+    const abortController = typeof AbortController !== "undefined" ? new AbortController() : null;
+    this.activeAbortController = abortController;
+    const signalOpt = abortController ? { signal: abortController.signal } : {};
 
     try {
       const isCourier = getCurrentUserRole() === "messenger";
-      const orderUrl = isCourier ? `${this.baseUrl}/messenger/my-tasks` : `${this.baseUrl}/orders`;
-      const res = await fetch(orderUrl, {
-        headers: { "Content-Type": "application/json", ...authHeaders },
-      });
-      if (res.status === 401 && typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent("sun89_auth_unauthorized"));
-        this.isLoading = false;
-        this.error = "Sesi telah berakhir. Silakan login kembali.";
-        this.notify();
-        return;
-      }
-      if (!res.ok) {
-        throw new Error(`Gagal memuat data order (HTTP ${res.status})`);
-      }
+      const canFetchOrders = isCourier
+        ? permissionStore.canAccessApiEndpoint("messenger-tasks")
+        : permissionStore.canAccessApiEndpoint("orders");
+      const canFetchArchived = !isCourier && permissionStore.canAccessApiEndpoint("orders-archived");
 
-      if (capturedVersion < this.currentDataVersion || requestId < this.latestAppliedGetId) {
+      if (!canFetchOrders && !canFetchArchived) {
+        if (this.isDestroyed || capturedGeneration !== this.sessionGeneration) return;
+        this.activeOrders = createEmptyActiveOrders();
+        this.archivedOrders = [];
+        this.lastAuthStateKey = capturedAuthKey;
         this.isLoading = false;
+        this.isInitialized = true;
+        this.error = null;
         this.notify();
         return;
       }
 
-      const payload = await res.json();
       let fetchedActive: Record<StageName, OperationalOrder[]> | null = null;
-      if (payload.success && payload.data) {
-        fetchedActive = payload.data;
+      if (canFetchOrders) {
+        const orderUrl = isCourier ? `${this.baseUrl}/messenger/my-tasks` : `${this.baseUrl}/orders`;
+        const res = await fetch(orderUrl, {
+          headers: { "Content-Type": "application/json", ...authHeaders },
+          ...signalOpt,
+        });
+        if (
+          this.isDestroyed ||
+          capturedGeneration !== this.sessionGeneration ||
+          capturedVersion < this.currentDataVersion ||
+          requestId < this.latestAppliedGetId
+        ) {
+          if (capturedGeneration === this.sessionGeneration && !this.isDestroyed) {
+            this.isLoading = false;
+            this.notify();
+          }
+          return;
+        }
+        if (res.status === 401 && typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("sun89_auth_unauthorized"));
+          this.isLoading = false;
+          this.error = "Sesi telah berakhir. Silakan login kembali.";
+          this.notify();
+          return;
+        }
+        if (!res.ok) {
+          throw new Error(`Gagal memuat data order (HTTP ${res.status})`);
+        }
+
+        const payload = await res.json();
+        if (
+          this.isDestroyed ||
+          capturedGeneration !== this.sessionGeneration ||
+          capturedVersion < this.currentDataVersion ||
+          requestId < this.latestAppliedGetId
+        ) {
+          return;
+        }
+        if (payload.success && payload.data) {
+          fetchedActive = payload.data;
+        }
       }
 
       let archRes: Response | null = null;
-      if (!isCourier) {
+      if (canFetchArchived) {
         archRes = await fetch(`${this.baseUrl}/orders/archived`, {
           headers: { "Content-Type": "application/json", ...authHeaders },
+          ...signalOpt,
         });
         if (archRes.status === 401 && typeof window !== "undefined") {
           window.dispatchEvent(new CustomEvent("sun89_auth_unauthorized"));
@@ -240,32 +411,63 @@ export class ApiOrderProvider implements IOrderDataProvider {
         }
       }
 
-      if (capturedVersion < this.currentDataVersion || requestId < this.latestAppliedGetId) {
-        this.isLoading = false;
-        this.notify();
+      if (
+        this.isDestroyed ||
+        capturedGeneration !== this.sessionGeneration ||
+        capturedVersion < this.currentDataVersion ||
+        requestId < this.latestAppliedGetId
+      ) {
+        if (capturedGeneration === this.sessionGeneration && !this.isDestroyed) {
+          this.isLoading = false;
+          this.notify();
+        }
         return;
       }
 
       if (archRes && archRes.ok) {
         const archPayload = await archRes.json();
-        if (archPayload.success && Array.isArray(archPayload.data)) {
+        if (
+          !this.isDestroyed &&
+          capturedGeneration === this.sessionGeneration &&
+          archPayload.success &&
+          Array.isArray(archPayload.data)
+        ) {
           this.archivedOrders = archPayload.data;
         }
+      }
+
+      if (this.isDestroyed || capturedGeneration !== this.sessionGeneration) {
+        return;
       }
 
       if (fetchedActive) {
         this.activeOrders = fetchedActive;
         this.isInitialized = true;
+      } else if (!canFetchOrders) {
+        this.activeOrders = createEmptyActiveOrders();
+        this.isInitialized = true;
       }
 
+      if (!canFetchArchived) {
+        this.archivedOrders = [];
+      }
+
+      this.lastAuthStateKey = capturedAuthKey;
       this.latestAppliedGetId = requestId;
       this.isLoading = false;
       this.error = null;
       this.notify();
     } catch (err: any) {
+      if (err?.name === "AbortError" || this.isDestroyed || capturedGeneration !== this.sessionGeneration) {
+        return;
+      }
       this.isLoading = false;
       this.error = err?.message || "Gagal terhubung ke server backend.";
       this.notify();
+    } finally {
+      if (this.activeAbortController === abortController) {
+        this.activeAbortController = null;
+      }
     }
   }
 
@@ -701,6 +903,46 @@ export class ApiOrderProvider implements IOrderDataProvider {
       toast.error(`Gagal memajukan order ${orderNo}: ${err?.message || "Kesalahan server"}`);
     });
     return true;
+  }
+
+  public async completeDeliveryDirectAsync(
+    orderNo: string,
+    payload: { receiverName: string; photoUrl?: string }
+  ): Promise<OperationalOrder> {
+    this.inFlightMutationCount++;
+    try {
+      const res = await fetchWithTimeout(
+        `${this.baseUrl}/orders/${encodeURIComponent(orderNo)}/delivery/complete`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...this.getAuthHeader() },
+          body: JSON.stringify(payload),
+        },
+        15000
+      );
+
+      if (!res.ok) {
+        throw await parseApiErrorResponse(
+          res,
+          `Gagal mencatat penyelesaian serah terima dokumen untuk order ${orderNo}.`
+        );
+      }
+
+      const body = await res.json();
+      if (!body.success || !body.data) {
+        throw new ActionApiError(
+          res.status || 500,
+          body?.error?.code || "INTERNAL_SERVER_ERROR",
+          body?.error?.message || body?.message || `Gagal menyelesaikan pengantaran order ${orderNo}`
+        );
+      }
+
+      const serverOrder: OperationalOrder = body.data;
+      this.applyServerOrderSnapshot(orderNo, serverOrder);
+      return serverOrder;
+    } finally {
+      this.inFlightMutationCount = Math.max(0, this.inFlightMutationCount - 1);
+    }
   }
 
   public async rollbackOrderAsync(

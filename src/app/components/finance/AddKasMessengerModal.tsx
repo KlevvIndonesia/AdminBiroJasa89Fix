@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "../ui/dialog";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -13,6 +13,8 @@ export interface AddKasMessengerModalProps {
   onOpenChange: (open: boolean) => void;
   messengerOptions: string[];
   orderOptions: string[];
+  isLoading?: boolean;
+  error?: string | null;
   onSubmit: (data: {
     tanggal: string;
     jenis: string;
@@ -31,11 +33,25 @@ export function AddKasMessengerModal({
   onOpenChange,
   messengerOptions,
   orderOptions,
+  isLoading = false,
+  error = null,
   onSubmit,
 }: AddKasMessengerModalProps) {
   const [tanggal, setTanggal] = useState<string>(new Date().toISOString().split("T")[0]);
   const [jenis, setJenis] = useState<string>("Petty cash");
   const [messenger, setMessenger] = useState<string>(messengerOptions[0] || "");
+  useEffect(() => {
+    if (messengerOptions.length > 0) {
+      if (!messenger) {
+        setMessenger(messengerOptions[0]);
+      } else if (!messengerOptions.includes(messenger)) {
+        // Selected messenger is no longer active; reset to empty to avoid silent arbitrary replacement
+        setMessenger("");
+      }
+    } else if (!isLoading && messengerOptions.length === 0) {
+      setMessenger("");
+    }
+  }, [messengerOptions, messenger, isLoading]);
   const [arah, setArah] = useState<"IN" | "OUT">("IN");
   const [nominal, setNominal] = useState<string>("");
   const [keterangan, setKeterangan] = useState<string>("");
@@ -74,6 +90,11 @@ export function AddKasMessengerModal({
       return;
     }
 
+    if (!messenger || messenger.startsWith("__") || messengerOptions.length === 0) {
+      setErrorMsg("Nama messenger wajib dipilih dari daftar kurir aktif.");
+      return;
+    }
+
     if (arah === "IN" && !paymentMethodId) {
       setErrorMsg("Metode pembayaran wajib dipilih untuk transaksi kas masuk (top-up).");
       return;
@@ -84,7 +105,7 @@ export function AddKasMessengerModal({
       await onSubmit({
         tanggal,
         jenis,
-        messenger: messenger || messengerOptions[0] || "Kurir",
+        messenger: messenger.trim(),
         keterangan: keterangan.trim(),
         in: arah === "IN" ? cleanNominal : 0,
         out: arah === "OUT" ? cleanNominal : 0,
@@ -163,14 +184,28 @@ export function AddKasMessengerModal({
               <Label className="text-xs font-semibold">Nama Messenger *</Label>
               <Select value={messenger} onValueChange={setMessenger}>
                 <SelectTrigger className="h-9 text-xs">
-                  <SelectValue placeholder="Pilih kurir" />
+                  <SelectValue placeholder={isLoading && messengerOptions.length === 0 ? "Memuat data kurir..." : "Pilih kurir"} />
                 </SelectTrigger>
                 <SelectContent>
-                  {messengerOptions.map((opt) => (
-                    <SelectItem key={opt} value={opt} className="text-xs">
-                      {opt}
+                  {isLoading && messengerOptions.length === 0 ? (
+                    <SelectItem value="__loading" disabled className="text-xs text-muted-foreground">
+                      Memuat data kurir...
                     </SelectItem>
-                  ))}
+                  ) : error && messengerOptions.length === 0 ? (
+                    <SelectItem value="__error" disabled className="text-xs text-rose-500">
+                      Gagal memuat: {error}
+                    </SelectItem>
+                  ) : messengerOptions.length === 0 ? (
+                    <SelectItem value="__empty" disabled className="text-xs text-muted-foreground">
+                      Tidak ada messenger aktif
+                    </SelectItem>
+                  ) : (
+                    messengerOptions.map((opt) => (
+                      <SelectItem key={opt} value={opt} className="text-xs">
+                        {opt}
+                      </SelectItem>
+                    ))
+                  )}
                 </SelectContent>
               </Select>
             </div>
@@ -295,7 +330,7 @@ export function AddKasMessengerModal({
               type="submit"
               size="sm"
               className="text-xs h-8 bg-primary text-primary-foreground gap-1.5 font-semibold"
-              disabled={isSubmitting}
+              disabled={isSubmitting || isLoading || !messenger || messenger.startsWith("__") || messengerOptions.length === 0}
             >
               <Plus className="w-3.5 h-3.5" />
               {isSubmitting ? "Menyimpan..." : "Simpan Transaksi"}

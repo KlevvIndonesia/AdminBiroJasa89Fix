@@ -6,9 +6,9 @@
  * 1. Historical order with service_id = NULL produces serviceId = undefined (no heuristic guessing).
  * 2. Historical service name (layanan) is faithfully preserved.
  * 3. Valid service_id from database remains mapped correctly.
- * 4. API mode: messenger loading / empty / error states never leak KNOWN_MESSENGERS dummy data.
+ * 4. Messenger loading / empty / error states never leak dummy hardcoded data.
  * 5. Active messengers from API are valid and selectable for assignment.
- * 6. Isolated demo/mock mode preserves fixture usage without affecting API mode.
+ * 6. Empty employee response returns empty list strictly without mock fallback.
  * 7. Order tracking helper handles undefined serviceId gracefully without crashing.
  */
 
@@ -18,7 +18,6 @@ import http from "node:http";
 import { createApp } from "../server/src/app";
 import { generateToken } from "../server/src/utils/crypto";
 import { getDb } from "../server/src/database/db";
-import { KNOWN_MESSENGERS } from "../src/domain/messenger/types";
 
 test("P1.1 — Operational Identity & Fallback Cleanup Suite", async (t) => {
   const app = createApp();
@@ -121,51 +120,40 @@ test("P1.1 — Operational Identity & Fallback Cleanup Suite", async (t) => {
       assert.strictEqual(created.layanan, "Perpanjangan 1 Tahun");
     });
 
-    await t.test("3. Messenger API resolution in API Mode: empty array produces empty state, NEVER dummy KNOWN_MESSENGERS", async () => {
-      // Simulate API mode activeMessengers resolution logic
-      const isApiMode = true;
-
+    await t.test("3. Messenger API resolution: empty array produces empty state, NEVER dummy fallback", async () => {
       // Skenario A: API Berhasil tapi 0 messenger aktif
       const emptyKaryawan: any[] = [
         { id: "EMP-001", nama: "Admin Loket", jabatan: "Staff Loket", status: "Aktif" },
         { id: "EMP-002", nama: "Driver Nonaktif", jabatan: "Messenger", status: "Nonaktif" },
       ];
 
-      const resolveActiveMessengers = (karyawanList: any[], isApi: boolean) => {
-        const active = (karyawanList || [])
+      const resolveActiveMessengers = (karyawanList: any[]) => {
+        return (karyawanList || [])
           .filter((k) => (k.jabatan || "").toUpperCase() === "MESSENGER" && k.status === "Aktif")
           .map((k) => ({ id: k.id, nama: k.nama, wilayah: k.wilayah }));
-        if (active.length > 0) return active;
-        if (isApi) return [];
-        return KNOWN_MESSENGERS.map((nama, idx) => ({
-          id: idx === 0 ? "EMP-0004" : idx === 1 ? "EMP-0005" : `EMP-000${idx + 4}`,
-          nama,
-          wilayah: "Jakarta",
-        }));
       };
 
-      const resultEmpty = resolveActiveMessengers(emptyKaryawan, isApiMode);
-      assert.strictEqual(resultEmpty.length, 0, "In API mode, empty messengers MUST return empty array []");
-      assert.ok(!resultEmpty.some((m) => m.nama === "Ahmad Rizki"), "Must NOT contain dummy KNOWN_MESSENGERS");
+      const resultEmpty = resolveActiveMessengers(emptyKaryawan);
+      assert.strictEqual(resultEmpty.length, 0, "Empty messengers MUST return empty array []");
+      assert.ok(!resultEmpty.some((m) => m.nama === "Ahmad Rizki"), "Must NOT contain dummy fallback names");
 
       // Skenario B: API Gagal / Error (karyawan = undefined / null)
-      const resultError = resolveActiveMessengers(null as any, isApiMode);
-      assert.strictEqual(resultError.length, 0, "In API mode, error/null MUST return empty array []");
+      const resultError = resolveActiveMessengers(null as any);
+      assert.strictEqual(resultError.length, 0, "Error/null MUST return empty array []");
 
       // Skenario C: API Berhasil dengan Messenger Aktif
       const liveKaryawan = [
         { id: "EMP-0004", nama: "Budi Santoso", jabatan: "Messenger", status: "Aktif", wilayah: "Jakarta Timur" },
         { id: "EMP-0005", nama: "Andi Pratama", jabatan: "Messenger", status: "Aktif", wilayah: "Jakarta Barat" },
       ];
-      const resultLive = resolveActiveMessengers(liveKaryawan, isApiMode);
+      const resultLive = resolveActiveMessengers(liveKaryawan);
       assert.strictEqual(resultLive.length, 2, "Active messengers from API must be returned");
       assert.strictEqual(resultLive[0].nama, "Budi Santoso");
       assert.strictEqual(resultLive[1].nama, "Andi Pratama");
 
-      // Skenario D: Mock/Demo mode (isApiMode = false) tetap dapat menggunakan fixture
-      const resultMock = resolveActiveMessengers([], false);
-      assert.strictEqual(resultMock.length, KNOWN_MESSENGERS.length, "Mock/demo mode preserves fixtures");
-      assert.strictEqual(resultMock[0].nama, KNOWN_MESSENGERS[0]);
+      // Skenario D: Daftar karyawan kosong tetap menghasilkan array kosong tanpa fixture dummy
+      const resultNoEmployees = resolveActiveMessengers([]);
+      assert.strictEqual(resultNoEmployees.length, 0, "Zero employees must yield empty list strictly");
     });
 
     await t.test("4. Messenger assignment validation guards reject invalid/unlisted messengers", async () => {

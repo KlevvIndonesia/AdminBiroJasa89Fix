@@ -55,31 +55,13 @@ export interface DashboardActivityItem {
   rawDate?: Date;
 }
 
+import { parseDateFlexibleWib } from "../../domain/finance/datePeriod";
+
 /**
- * Parse standard or Indonesian dates safely without throwing
+ * Parse standard or Indonesian dates safely without throwing (delegates to Asia/Jakarta canonical parser)
  */
 export function parseDateSafe(dateInput?: string | Date): Date | null {
-  if (!dateInput) return null;
-  if (dateInput instanceof Date) return isNaN(dateInput.getTime()) ? null : dateInput;
-
-  const str = String(dateInput).trim();
-
-  // YYYY-MM-DD format
-  if (/^\d{4}-\d{2}-\d{2}/.test(str)) {
-    const parts = str.split("T")[0].split("-").map(Number);
-    const d = new Date(parts[0], parts[1] - 1, parts[2]);
-    return isNaN(d.getTime()) ? null : d;
-  }
-
-  // DD/MM/YYYY or D/M/YYYY format
-  if (/^\d{1,2}\/\d{1,2}\/\d{4}/.test(str)) {
-    const parts = str.split("/").map(Number);
-    const d = new Date(parts[2], parts[1] - 1, parts[0]);
-    return isNaN(d.getTime()) ? null : d;
-  }
-
-  const d = new Date(str);
-  return isNaN(d.getTime()) ? null : d;
+  return parseDateFlexibleWib(dateInput);
 }
 
 /**

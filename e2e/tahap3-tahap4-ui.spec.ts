@@ -1,14 +1,9 @@
 import { test, expect } from "@playwright/test";
+import { loginAs } from "./helpers/authHelper";
 
 test.describe("Tahap 3 & Tahap 4 Comprehensive Verification", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto("http://localhost:3000/login", { waitUntil: "domcontentloaded" });
-    await page.fill("#email", "svp@birojasa.com");
-    await page.fill("#password", "admin123");
-    await page.click("button[type='submit']");
-
-    // Wait until dashboard is loaded
-    await page.waitForURL("**/dashboard", { timeout: 15000 });
+    await loginAs(page, "svp@birojasa.com", "admin123");
   });
 
   test("Tahap 4: Verify SPV Void Audit History Modal and Log Display", async ({ page }) => {
@@ -65,9 +60,16 @@ test.describe("Tahap 3 & Tahap 4 Comprehensive Verification", () => {
     await page.evaluate(() => { window.location.href = "/finance/profit-pending"; });
     await page.waitForURL("**/finance/profit-pending", { timeout: 15000 });
 
-    // Verify Ekspor CSV button exists
-    const exportBtn = page.getByRole("button", { name: /Ekspor CSV/i });
-    await expect(exportBtn).toBeVisible({ timeout: 10000 });
+    // Verify integrated CSV/PDF export inside Table Settings
+    const settingsBtn = page.locator("button[aria-label='Pengaturan tabel']");
+    await expect(settingsBtn).toBeVisible({ timeout: 10000 });
+    await settingsBtn.click();
+    const openExportBtn = page.getByRole("button", { name: /Buka dialog ekspor/i });
+    await expect(openExportBtn).toBeVisible();
+    await openExportBtn.click();
+    await expect(page.getByText("Ekspor Data Profit Terpending")).toBeVisible();
+    await expect(page.getByText("CSV / Excel")).toBeVisible();
+    await page.keyboard.press("Escape");
 
     // Verify "Closing & Selesai" button exists
     const closingButtons = page.locator("button", { hasText: "Closing & Selesai" });
@@ -90,8 +92,12 @@ test.describe("Tahap 3 & Tahap 4 Comprehensive Verification", () => {
     await page.evaluate(() => { window.location.href = "/finance/cashback-pending"; });
     await page.waitForURL("**/finance/cashback-pending", { timeout: 15000 });
 
-    // Verify Log Audit Void and Ekspor CSV buttons
+    // Verify Log Audit Void button and integrated export in Table Settings
     await expect(page.getByRole("button", { name: /Log Audit Void/i })).toBeVisible({ timeout: 10000 });
-    await expect(page.getByRole("button", { name: /Ekspor CSV/i })).toBeVisible({ timeout: 10000 });
+    const settingsBtn = page.locator("button[aria-label='Pengaturan tabel']");
+    await expect(settingsBtn).toBeVisible({ timeout: 10000 });
+    await settingsBtn.click();
+    await expect(page.getByRole("button", { name: /Buka dialog ekspor/i })).toBeVisible();
+    await page.keyboard.press("Escape");
   });
 });

@@ -9,6 +9,7 @@ import { orderService } from "../services/orderService";
 import { orderCorrectionService } from "../services/orderCorrectionService";
 import { ApiError } from "../middleware/errorHandler";
 import { resolveCanonicalActorEmployeeId } from "../utils/actorResolver";
+import { dbPermissionRepository } from "../repositories/dbPermissionRepository";
 
 export async function getOrders(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -187,9 +188,10 @@ export async function approveOrderDocuments(req: AuthenticatedRequest, res: Resp
       throw new ApiError(400, "VALIDATION_ERROR", "Field 'stage' harus bernilai 5 atau 6.");
     }
     if (stage === 6) {
-      const isSpv = req.user.role === "administrator" || req.user.jabatan === "SVP" || (req.user.role as string) === "svp";
+      const role = (req.user.role || "").toLowerCase();
+      const isSpv = role === "administrator";
       if (!isSpv) {
-        throw new ApiError(403, "FORBIDDEN", "Hanya Supervisor / SVP yang berwenang menyetujui dokumen Stage 6.");
+        throw new ApiError(403, "FORBIDDEN", "Stage 6 (Supervisi) hanya dapat disetujui oleh SVP.");
       }
     }
     const order = orderService.approveOrderDocuments(orderNo, stage, req.user, snapshotDocs || []);
@@ -427,6 +429,36 @@ export async function startSamsatProcess(req: AuthenticatedRequest, res: Respons
   }
 }
 
+export async function updateSamsatSubprogress(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { orderNo } = req.params;
+    const updated = orderService.updateSamsatSubprogress(orderNo, req.body || {}, req.user!);
+    res.json({
+      success: true,
+      message: "Progres loket Samsat berhasil diperbarui.",
+      data: updated,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function updateMessengerTaskStatus(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { orderNo, taskType } = req.params;
+    const updated = orderService.updateMessengerTaskStatus(orderNo, taskType, req.body || {}, req.user!);
+    res.json({
+      success: true,
+      message: `Status tugas ${taskType} berhasil diperbarui.`,
+      data: updated,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function completeSamsatProcess(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const { orderNo } = req.params;
@@ -443,6 +475,30 @@ export async function completeSamsatProcess(req: AuthenticatedRequest, res: Resp
     res.json({
       success: true,
       message: "Proses Samsat berhasil diselesaikan.",
+      data: updated,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function releaseSamsatTask(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { orderNo } = req.params;
+    const { notes } = req.body || {};
+    const role = (req.user?.role || "").toLowerCase();
+    if (role === "messenger" && notes && typeof notes === "string" && notes.trim().length > 0) {
+      throw new ApiError(
+        400,
+        "MESSENGER_NOTES_NOT_ALLOWED",
+        "Catatan operasional bebas (free-text notes) tidak diizinkan pada penyerahan tugas."
+      );
+    }
+    const updated = orderService.releaseSamsatTask(orderNo, req.user!, notes);
+    res.json({
+      success: true,
+      message: "Tugas Samsat berhasil diserahkan ke tim.",
       data: updated,
       timestamp: new Date().toISOString(),
     });

@@ -20,8 +20,14 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { pricingStore, usePricingStore, resolveSamsatId, resolveServiceId } from "../data/pricingStore";
-import { estimationStore, useEstimationStore, ALL_DEFAULT_TEMPLATES, sanitizeComponentDescription } from "../data/estimationStore";
-import { EstimationComponentRule } from "../../domain/estimation/types";
+import {
+  estimationStore,
+  useEstimationStore,
+  ALL_DEFAULT_TEMPLATES,
+  sanitizeComponentDescription,
+  EstimationSaveResult,
+} from "../data/estimationStore";
+import { EstimationComponentRule, EstimationTemplateConfig } from "../../domain/estimation/types";
 import { resolveTemplateIdByService } from "./estimation/EstimationMasterManager";
 import { cn } from "./ui/utils";
 import { EstimatorR4Tahunan } from "./estimation/EstimatorR4Tahunan";
@@ -40,12 +46,17 @@ export const isRowCustomOrOverridden = (item: any, vehicle: "Mobil" | "Motor" = 
   const baselineJasa = vehicle === "Mobil" ? (baseline.jasaR4 ?? baseline.jasa) : (baseline.jasaR2 ?? Math.round(baseline.jasa * 0.5));
   const jasa = vehicle === "Mobil"
     ? (item.biayaJasaR4 ?? item.biayaJasaLengkap ?? item.biayaJasa ?? 0)
-    : (item.biayaJasaR2 ?? (item.layanan === "Mutasi Luar Daerah" ? 500000 : Math.round(Number(item.biayaJasa ?? 0) * 0.5)));
+    : (item.biayaJasaR2 ?? baselineJasa);
   const kurir = item.biayaAntarJemput ?? 50000;
   const hasCustomFees = Array.isArray(item.biayaLainnya) && item.biayaLainnya.some((b: any) => b.enabled !== false && b.label && b.label.trim() !== "");
   const isKhususActive = vehicle === "Mobil"
     ? (item.khususR4Enabled === true || item.pengurusanKhususEnabled === true || item.jasaNembakEnabled === true)
-    : (item.khususR2Enabled === true || item.pengurusanKhususEnabled === true || item.jasaNembakEnabled === true);
+    : (
+        item.khususR2Enabled === true ||
+        (item.khususR2Enabled === undefined &&
+          item.khususR4Enabled === undefined &&
+          (item.pengurusanKhususEnabled === true || item.jasaNembakEnabled === true))
+      );
   return jasa !== baselineJasa || kurir !== baseline.kurir || hasCustomFees || isKhususActive;
 };
 
@@ -331,18 +342,21 @@ const buildEmptySamsatDraft = (): SamsatFeeDraft => ({
 interface ComponentStatusControlsProps {
   isActive: boolean;
   includesInTotal?: boolean;
+  disabled?: boolean;
   onToggleActive: () => void;
   onToggleIncludesInTotal?: () => void;
 }
 
 function ComponentStatusControls({
   isActive,
+  disabled = false,
   onToggleActive,
 }: ComponentStatusControlsProps) {
   return (
     <div className="flex items-center shrink-0 select-none">
       <Switch
         checked={isActive}
+        disabled={disabled}
         onCheckedChange={onToggleActive}
         aria-label="Status aktif"
       />
@@ -353,6 +367,247 @@ function ComponentStatusControls({
 // ─────────────────────────────────────────────────────────────────────────────
 // Main Component
 // ─────────────────────────────────────────────────────────────────────────────
+
+function parseNonNegativeIntDraft(
+  raw: string,
+  fieldLabel: string,
+  min = 0,
+  max?: number
+): { value?: number; error?: string } {
+  const trimmed = String(raw ?? "").trim();
+  if (!trimmed || !/^-?\d+$/.test(trimmed)) {
+    return { error: `${fieldLabel} harus berupa bilangan bulat yang valid.` };
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed < min) {
+    return { error: `${fieldLabel} minimal ${min}.` };
+  }
+  if (typeof max === "number" && parsed > max) {
+    return { error: `${fieldLabel} maksimal ${max}.` };
+  }
+  return { value: parsed };
+}
+
+export function buildTemplateFromVehicleDraft(
+  baseTemplate: EstimationTemplateConfig,
+  draft: VehicleFormulaDraft
+): { template?: EstimationTemplateConfig; error?: string } {
+  const vehicleLabel = baseTemplate.vehicleType === "Motor" ? "Motor" : "Mobil";
+  const rawKoefStr = String(draft.koefDenda ?? "").trim().replace(",", ".");
+  const rawKoef = Number(rawKoefStr);
+  if (!rawKoefStr || !Number.isFinite(rawKoef) || rawKoef < 0) {
+    return { error: `Koefisien Denda PKB (${vehicleLabel}) harus berupa angka valid >= 0.` };
+  }
+  const normalizedKoef = rawKoef > 1 ? rawKoef / 100 : rawKoef;
+  if (normalizedKoef > 1) {
+    return { error: `Koefisien Denda PKB (${vehicleLabel}) maksimal 100% (1.0).` };
+  }
+
+  const pembagiRes = parseNonNegativeIntDraft(draft.pembagiBulan, `Pembagi Bulan (${vehicleLabel})`, 1, 60);
+  if (pembagiRes.error) return { error: pembagiRes.error };
+
+  const pembulatanRes = parseNonNegativeIntDraft(draft.kelipatanPembulatan, `Kelipatan Pembulatan (${vehicleLabel})`, 1);
+  if (pembulatanRes.error) return { error: pembulatanRes.error };
+
+  const swdklljRes = parseNonNegativeIntDraft(draft.swdklljPokok, `SWDKLLJ Pokok (${vehicleLabel})`, 0);
+  if (swdklljRes.error) return { error: swdklljRes.error };
+
+  const dendaSwdRes = parseNonNegativeIntDraft(draft.dendaSwdkllj, `Denda SWDKLLJ Pokok (${vehicleLabel})`, 0);
+  if (dendaSwdRes.error) return { error: dendaSwdRes.error };
+
+  const skpRes = parseNonNegativeIntDraft(draft.biayaCetakSkp, `Biaya Cetak SKP (${vehicleLabel})`, 0);
+  if (skpRes.error) return { error: skpRes.error };
+
+  const stnkRes = parseNonNegativeIntDraft(draft.adminStnk, `Admin STNK PNBP (${vehicleLabel})`, 0);
+  if (stnkRes.error) return { error: stnkRes.error };
+
+  const tnkbRes = parseNonNegativeIntDraft(draft.adminTnkb, `Admin TNKB PNBP (${vehicleLabel})`, 0);
+  if (tnkbRes.error) return { error: tnkbRes.error };
+
+  const components = draft.components.map((c) => ({ ...c }));
+  let biayaJasa = baseTemplate.biayaJasa;
+  const jasaComp = components.find(
+    (c) => c.category === "JASA" || c.ruleId === "PROSES_DAN_JASA_MUTASI" || c.ruleId === "JASA"
+  );
+  if (
+    jasaComp &&
+    typeof jasaComp.defaultValue === "number" &&
+    Number.isFinite(jasaComp.defaultValue) &&
+    jasaComp.defaultValue > 0
+  ) {
+    biayaJasa = jasaComp.defaultValue;
+  }
+
+  return {
+    template: {
+      ...baseTemplate,
+      components,
+      accIdRates: baseTemplate.accIdRates ? { ...baseTemplate.accIdRates } : {},
+      koefisienDenda: normalizedKoef,
+      pembagiBulan: pembagiRes.value!,
+      kelipatanPembulatan: pembulatanRes.value!,
+      swdklljPokok: swdklljRes.value!,
+      dendaSwdklljPokok: dendaSwdRes.value!,
+      biayaCetakSkp: skpRes.value!,
+      adminStnk: stnkRes.value!,
+      adminTnkb: tnkbRes.value!,
+      biayaJasa,
+      updatedAt: new Date().toISOString(),
+    },
+  };
+}
+
+export interface GeneralRulesSaveDependencies {
+  updateTemplateAsync: (template: EstimationTemplateConfig) => Promise<EstimationSaveResult>;
+  applyConfigToAllSamsats: (
+    serviceIdOrName: string,
+    sourceConfig: any,
+    options: any,
+    overwriteMode: any
+  ) => Promise<any>;
+}
+
+export interface GeneralRulesSaveResult {
+  success: boolean;
+  shouldCloseModal: boolean;
+  mobilResult?: EstimationSaveResult;
+  motorResult?: EstimationSaveResult;
+  samsatSyncError?: string;
+  partialSuccessMessage?: string;
+  errorMessage?: string;
+}
+
+export async function executeGeneralRulesSave(params: {
+  currentLayanan: string;
+  mobilBaseTemplate: EstimationTemplateConfig;
+  motorBaseTemplate: EstimationTemplateConfig;
+  mobilDraft: VehicleFormulaDraft;
+  motorDraft: VehicleFormulaDraft;
+  selectedComponents: Record<string, boolean>;
+  deps: GeneralRulesSaveDependencies;
+}): Promise<GeneralRulesSaveResult> {
+  const {
+    currentLayanan,
+    mobilBaseTemplate,
+    motorBaseTemplate,
+    mobilDraft,
+    motorDraft,
+    selectedComponents,
+    deps,
+  } = params;
+
+  const mobilBuilt = buildTemplateFromVehicleDraft(mobilBaseTemplate, mobilDraft);
+  if (mobilBuilt.error || !mobilBuilt.template) {
+    return {
+      success: false,
+      shouldCloseModal: false,
+      errorMessage: mobilBuilt.error || "Konfigurasi Mobil tidak valid.",
+    };
+  }
+
+  const motorBuilt = buildTemplateFromVehicleDraft(motorBaseTemplate, motorDraft);
+  if (motorBuilt.error || !motorBuilt.template) {
+    return {
+      success: false,
+      shouldCloseModal: false,
+      errorMessage: motorBuilt.error || "Konfigurasi Motor tidak valid.",
+    };
+  }
+
+  // Send strictly ONE unified PUT per vehicle template
+  const mobilResult = await deps.updateTemplateAsync(mobilBuilt.template);
+  const motorResult = await deps.updateTemplateAsync(motorBuilt.template);
+
+  if (!mobilResult.success && !motorResult.success) {
+    return {
+      success: false,
+      shouldCloseModal: false,
+      mobilResult,
+      motorResult,
+      errorMessage: `Gagal menyimpan template Mobil (${mobilResult.error || "Error"}) dan Motor (${motorResult.error || "Error"}).`,
+    };
+  }
+
+  if (mobilResult.success !== motorResult.success) {
+    const partialMsg = mobilResult.success
+      ? `Template Mobil berhasil disimpan, namun template Motor gagal disimpan: ${motorResult.error || "Gagal menyimpan ke server"}. Periksa input Motor dan coba simpan ulang.`
+      : `Template Motor berhasil disimpan, namun template Mobil gagal disimpan: ${mobilResult.error || "Gagal menyimpan ke server"}. Periksa input Mobil dan coba simpan ulang.`;
+    return {
+      success: false,
+      shouldCloseModal: false,
+      mobilResult,
+      motorResult,
+      partialSuccessMessage: partialMsg,
+      errorMessage: partialMsg,
+    };
+  }
+
+  // Sync ONLY Mutasi components & estimation rules (never overwrite per-Samsat Jasa)
+  try {
+    await deps.applyConfigToAllSamsats(
+      currentLayanan,
+      {
+        biayaJasaLengkap: 0,
+        jasaLengkapEnabled: true,
+        biayaJasaNembak: 0,
+        jasaNembakEnabled: false,
+        biayaAntarJemput: 0,
+        antarJemputEnabled: true,
+        nominalSwdkllj: 0,
+        swdklljEnabled: true,
+        components: selectedComponents,
+      },
+      {
+        applyBiayaLayanan: false,
+        applyBiayaTambahan: false,
+        applyKomponenSamsat: true,
+        applyBiayaLainnya: false,
+        applyAturanEstimasi: true,
+      },
+      "PRESERVE_EXISTING_CUSTOM"
+    );
+  } catch (err) {
+    const samsatErr =
+      err instanceof Error ? err.message : "Gagal menyinkronkan komponen ke seluruh Samsat";
+    return {
+      success: false,
+      shouldCloseModal: false,
+      mobilResult,
+      motorResult,
+      samsatSyncError: samsatErr,
+      errorMessage: `Template Mobil & Motor tersimpan, tetapi sinkronisasi ke seluruh Samsat gagal: ${samsatErr}`,
+    };
+  }
+
+  return {
+    success: true,
+    shouldCloseModal: true,
+    mobilResult,
+    motorResult,
+  };
+}
+
+export function findSummaryComponentRule(
+  components: EstimationComponentRule[],
+  kind: "SWDKLLJ_POKOK" | "CETAK_SKP" | "ADMIN_STNK" | "ADMIN_TNKB"
+): EstimationComponentRule | undefined {
+  if (kind === "SWDKLLJ_POKOK") {
+    return components.find(
+      (c) =>
+        c.ruleId === "SWDKLLJ_PAJAK_BARU" ||
+        c.id === "swdkllj-pajak-baru" ||
+        c.id === "swdkllj-baru" ||
+        c.id === "swdkllj-masuk"
+    );
+  }
+  if (kind === "CETAK_SKP") {
+    return components.find((c) => c.ruleId === "CETAK_SKP" || c.id === "cetak-skp");
+  }
+  if (kind === "ADMIN_STNK") {
+    return components.find((c) => c.ruleId === "ADMIN_STNK" || c.id === "admin-stnk");
+  }
+  return components.find((c) => c.ruleId === "ADMIN_TNKB" || c.id === "admin-tnkb");
+}
 
 export function BiayaLayanan() {
   usePricingStore();
@@ -373,10 +628,14 @@ export function BiayaLayanan() {
     : (rawService || "perpanjangan-1-tahun");
 
   useEffect(() => {
-    if (rawService && BIAYA_LAYANAN_ALIAS_MAP[rawService]) {
-      navigate(`/master-data/biaya-layanan/${BIAYA_LAYANAN_ALIAS_MAP[rawService]}`, { replace: true });
+    if (rawService) {
+      if (BIAYA_LAYANAN_ALIAS_MAP[rawService]) {
+        navigate(`/master-data/biaya-layanan/${BIAYA_LAYANAN_ALIAS_MAP[rawService]}${location.search}`, { replace: true });
+      } else if (!CANONICAL_BIAYA_LAYANAN_SERVICES.some((s) => s.key === rawService)) {
+        navigate(`/master-data/biaya-layanan/perpanjangan-1-tahun${location.search}`, { replace: true });
+      }
     }
-  }, [rawService, navigate]);
+  }, [rawService, location.search, navigate]);
 
   const activeService = CANONICAL_BIAYA_LAYANAN_SERVICES.find((s) => s.key === activeServiceKey)
     || CANONICAL_BIAYA_LAYANAN_SERVICES[0];
@@ -418,6 +677,8 @@ export function BiayaLayanan() {
 
   // General Rules Modal & Regional Samsat Tariff Modal states
   const [isGeneralRulesOpen, setIsGeneralRulesOpen] = useState(false);
+  const [isSavingGeneralRules, setIsSavingGeneralRules] = useState(false);
+  const [generalRulesSaveError, setGeneralRulesSaveError] = useState<string | null>(null);
   const [generalActiveSection, setGeneralActiveSection] = useState<GeneralSectionId>("parameter");
   const [samsatActiveSection, setSamsatActiveSection] = useState<SamsatSectionId>("biaya-layanan");
   const [activeSection, setActiveSection] = useState<SectionId>("biaya-layanan");
@@ -468,15 +729,15 @@ export function BiayaLayanan() {
   // Count of offices with custom tariffs for the active service
   const customOfficesCount = useMemo(() => {
     const currentLayanan = getCurrentLayanan();
-    return biayaData.filter((item) => item.layanan === currentLayanan && isRowCustomOrOverridden(item)).length;
-  }, [biayaData, activeService]);
+    return biayaData.filter((item) => item.layanan === currentLayanan && isRowCustomOrOverridden(item, tableVehicle)).length;
+  }, [biayaData, activeService, tableVehicle]);
 
   // Real-time custom tariff metrics for Apply All Dialog
   const applyAllMetrics = useMemo(() => {
     const currentLayanan = selectedItem?.layanan || getCurrentLayanan();
     const rowsForService = biayaData.filter((item) => item.layanan === currentLayanan);
     const totalOffices = rowsForService.length || 515;
-    const customCount = rowsForService.filter((item) => isRowCustomOrOverridden(item)).length;
+    const customCount = rowsForService.filter((item) => isRowCustomOrOverridden(item, tableVehicle)).length;
     const standardCount = Math.max(0, totalOffices - customCount);
     return {
       currentLayanan,
@@ -484,7 +745,7 @@ export function BiayaLayanan() {
       customCount,
       standardCount,
     };
-  }, [selectedItem, biayaData, activeService]);
+  }, [selectedItem, biayaData, activeService, tableVehicle]);
 
   // Filter data based on tab, search, provinsi, and custom tariff filter
   const getFilteredData = () => {
@@ -493,7 +754,7 @@ export function BiayaLayanan() {
       if (item.layanan !== currentLayanan) return false;
 
       // Filter Hanya Tarif Khusus / Berbeda
-      if (onlyCustomFilter && !isRowCustomOrOverridden(item)) {
+      if (onlyCustomFilter && !isRowCustomOrOverridden(item, tableVehicle)) {
         return false;
       }
 
@@ -562,17 +823,10 @@ export function BiayaLayanan() {
     const adminStnk = (tpl?.adminStnk ?? refTpl?.adminStnk ?? (serviceName.includes("5 Tahun") ? (vehicle === "Mobil" ? 200000 : 100000) : 0)).toString();
     const adminTnkb = (tpl?.adminTnkb ?? refTpl?.adminTnkb ?? (serviceName.includes("5 Tahun") ? (vehicle === "Mobil" ? 100000 : 60000) : 0)).toString();
 
-    const standardJasa = getStandardJasa(serviceName, vehicle);
-    const components = (tpl?.components || refTpl?.components || []).map((c) => {
-      const isJasaComp = c.category === "JASA" || c.ruleId === "PROSES_DAN_JASA_MUTASI" || c.ruleId === "JASA" || c.code === "FEE-01" || c.id === "proses-dan-jasa";
-      return {
-        ...c,
-        defaultValue: isJasaComp ? standardJasa : c.defaultValue,
-        description: isJasaComp
-          ? `Biaya Proses dan Jasa ${serviceName === "Mutasi Luar Daerah" ? "Mutasi LD" : serviceName} ${vehicle === "Mobil" ? "Mobil" : "Motor"} Rp ${standardJasa.toLocaleString("id-ID")}`
-          : sanitizeComponentDescription(c.description),
-      };
-    });
+    const components = (tpl?.components || refTpl?.components || []).map((c) => ({
+      ...c,
+      description: sanitizeComponentDescription(c.description),
+    }));
     const savedIncludesInTotal: Record<string, boolean> = {};
     components.forEach((c) => {
       savedIncludesInTotal[c.id] = c.includesInTotal ?? true;
@@ -638,8 +892,9 @@ export function BiayaLayanan() {
     const componentIncludesInTotal: Record<string, boolean> = {};
     const savedComponentIncludesInTotal: Record<string, boolean> = {};
     const masterItems = pricingStore.getMasterPricingItems();
+    const configComponents = Array.isArray(config?.components) ? config.components : [];
     masterItems.forEach((c) => {
-      const found = config?.components.find((sc) => sc.pricingItemId === c.id);
+      const found = configComponents.find((sc) => sc.pricingItemId === c.id);
       const isEn = found ? found.enabled : false;
       selectedComponents[c.id] = isEn;
       componentIncludesInTotal[c.id] = true;
@@ -736,6 +991,7 @@ export function BiayaLayanan() {
 
   const handleOpenGeneralRulesModal = () => {
     const currentLayanan = getCurrentLayanan();
+    setGeneralRulesSaveError(null);
     setEditVehicle("Mobil");
     setGeneralActiveSection("parameter");
 
@@ -1019,105 +1275,47 @@ export function BiayaLayanan() {
   };
 
   // Save Handler for General Rules Modal (Template Parameters & Mutasi Components)
-  const handleSaveGeneralRules = () => {
+  const handleSaveGeneralRules = async () => {
+    if (isSavingGeneralRules) return;
     const currentLayanan = getCurrentLayanan();
-
-    // 1. Save Mobil template params & components to estimationStore
     const mobilTplId = resolveTemplateIdByService(currentLayanan, "Mobil");
-    const rawKoefMobil = parseFloat(vehicleDrafts.Mobil.koefDenda);
-    const normalizedKoefMobil = isNaN(rawKoefMobil) ? 0.48 : (rawKoefMobil > 1 ? rawKoefMobil / 100 : rawKoefMobil);
-
-    estimationStore.updateTemplateParams(mobilTplId, {
-      koefisienDenda: normalizedKoefMobil,
-      pembagiBulan: parseInt(vehicleDrafts.Mobil.pembagiBulan) || 12,
-      kelipatanPembulatan: parseInt(vehicleDrafts.Mobil.kelipatanPembulatan) || 1000,
-      swdklljPokok: parseInt(vehicleDrafts.Mobil.swdklljPokok) || 0,
-      dendaSwdklljPokok: parseInt(vehicleDrafts.Mobil.dendaSwdkllj) || 0,
-      biayaCetakSkp: parseInt(vehicleDrafts.Mobil.biayaCetakSkp) || 0,
-      adminStnk: parseInt(vehicleDrafts.Mobil.adminStnk) || 0,
-      adminTnkb: parseInt(vehicleDrafts.Mobil.adminTnkb) || 0,
-    });
-    const activeMobilTpl = estimationStore.getTemplate(mobilTplId);
-    let newMobilJasa: number | undefined;
-    if (activeMobilTpl) {
-      activeMobilTpl.components = vehicleDrafts.Mobil.components.map((c) => ({ ...c }));
-      const jasaComp = activeMobilTpl.components.find((c) => c.category === "JASA" || c.ruleId === "PROSES_DAN_JASA_MUTASI" || c.ruleId === "JASA");
-      if (jasaComp && typeof jasaComp.defaultValue === "number" && jasaComp.defaultValue > 0) {
-        activeMobilTpl.biayaJasa = jasaComp.defaultValue;
-        newMobilJasa = jasaComp.defaultValue;
-      }
-      estimationStore.updateTemplate(activeMobilTpl);
-    }
-
-    // 2. Save Motor template params & components to estimationStore
     const motorTplId = resolveTemplateIdByService(currentLayanan, "Motor");
-    const rawKoefMotor = parseFloat(vehicleDrafts.Motor.koefDenda);
-    const normalizedKoefMotor = isNaN(rawKoefMotor) ? 0.48 : (rawKoefMotor > 1 ? rawKoefMotor / 100 : rawKoefMotor);
+    const mobilBaseTemplate = estimationStore.getTemplate(mobilTplId);
+    const motorBaseTemplate = estimationStore.getTemplate(motorTplId);
 
-    estimationStore.updateTemplateParams(motorTplId, {
-      koefisienDenda: normalizedKoefMotor,
-      pembagiBulan: parseInt(vehicleDrafts.Motor.pembagiBulan) || 12,
-      kelipatanPembulatan: parseInt(vehicleDrafts.Motor.kelipatanPembulatan) || 1000,
-      swdklljPokok: parseInt(vehicleDrafts.Motor.swdklljPokok) || 0,
-      dendaSwdklljPokok: parseInt(vehicleDrafts.Motor.dendaSwdkllj) || 0,
-      biayaCetakSkp: parseInt(vehicleDrafts.Motor.biayaCetakSkp) || 0,
-      adminStnk: parseInt(vehicleDrafts.Motor.adminStnk) || 0,
-      adminTnkb: parseInt(vehicleDrafts.Motor.adminTnkb) || 0,
-    });
-    const activeMotorTpl = estimationStore.getTemplate(motorTplId);
-    let newMotorJasa: number | undefined;
-    if (activeMotorTpl) {
-      activeMotorTpl.components = vehicleDrafts.Motor.components.map((c) => ({ ...c }));
-      const motorJasaComp = activeMotorTpl.components.find((c) => c.category === "JASA" || c.ruleId === "PROSES_DAN_JASA_MUTASI" || c.ruleId === "JASA");
-      if (motorJasaComp && typeof motorJasaComp.defaultValue === "number" && motorJasaComp.defaultValue > 0) {
-        activeMotorTpl.biayaJasa = motorJasaComp.defaultValue;
-        newMotorJasa = motorJasaComp.defaultValue;
+    setIsSavingGeneralRules(true);
+    setGeneralRulesSaveError(null);
+    try {
+      const saveResult = await executeGeneralRulesSave({
+        currentLayanan,
+        mobilBaseTemplate,
+        motorBaseTemplate,
+        mobilDraft: vehicleDrafts.Mobil,
+        motorDraft: vehicleDrafts.Motor,
+        selectedComponents: samsatDraft.selectedComponents,
+        deps: {
+          updateTemplateAsync: (tpl) => estimationStore.updateTemplateAsync(tpl),
+          applyConfigToAllSamsats: (serviceIdOrName, sourceConfig, options, overwriteMode) =>
+            pricingStore.applyConfigToAllSamsats(serviceIdOrName, sourceConfig, options, overwriteMode),
+        },
+      });
+
+      if (!saveResult.success) {
+        const msg = saveResult.errorMessage || "Gagal menyimpan aturan estimasi ke server.";
+        setGeneralRulesSaveError(msg);
+        toast.error(msg);
+        return;
       }
-      estimationStore.updateTemplate(activeMotorTpl);
+
+      setIsGeneralRulesOpen(false);
+      toast.success(`Aturan estimasi & komponen general untuk ${currentLayanan} berhasil disimpan ke seluruh Samsat!`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Terjadi kesalahan saat menyimpan aturan estimasi.";
+      setGeneralRulesSaveError(msg);
+      toast.error(msg);
+    } finally {
+      setIsSavingGeneralRules(false);
     }
-
-    // 3. Sync Mutasi components and baseline service fee to all Samsats for this service
-    const shouldSyncBiayaLayanan = (typeof newMobilJasa === "number" && newMobilJasa > 0) || (typeof newMotorJasa === "number" && newMotorJasa > 0);
-    const standardEntry = SERVICE_STANDARD_BASELINES[currentLayanan];
-    if (shouldSyncBiayaLayanan && standardEntry) {
-      if (typeof newMobilJasa === "number" && newMobilJasa > 0) {
-        standardEntry.jasa = newMobilJasa;
-        standardEntry.jasaR4 = newMobilJasa;
-      }
-      if (typeof newMotorJasa === "number" && newMotorJasa > 0) {
-        standardEntry.jasaR2 = newMotorJasa;
-      }
-    }
-
-    pricingStore.applyConfigToAllSamsats(
-      currentLayanan,
-      {
-        biayaJasaLengkap: newMobilJasa ?? 0,
-        biayaJasaR4: newMobilJasa,
-        biayaJasaR2: newMotorJasa,
-        jasaLengkapEnabled: true,
-        jasaR4Enabled: true,
-        jasaR2Enabled: true,
-        biayaJasaNembak: 0,
-        jasaNembakEnabled: false,
-        biayaAntarJemput: 0,
-        antarJemputEnabled: true,
-        nominalSwdkllj: 0,
-        swdklljEnabled: true,
-        components: samsatDraft.selectedComponents,
-      },
-      {
-        applyBiayaLayanan: shouldSyncBiayaLayanan,
-        applyBiayaTambahan: false,
-        applyKomponenSamsat: true,
-        applyBiayaLainnya: false,
-        applyAturanEstimasi: true,
-      },
-      "PRESERVE_EXISTING_CUSTOM"
-    );
-
-    setIsGeneralRulesOpen(false);
-    toast.success(`Aturan estimasi & komponen general untuk ${currentLayanan} berhasil disimpan ke seluruh Samsat!`);
   };
 
   // Apply to All Samsat Handler (Tarif operasional: Jasa, Kurir, & Biaya Lainnya/Kustom)
@@ -1318,8 +1516,9 @@ export function BiayaLayanan() {
 
     const compMap: Record<string, boolean> = {};
     const masterItems = pricingStore.getMasterPricingItems();
+    const configComponents = Array.isArray(config?.components) ? config.components : [];
     masterItems.forEach((c) => {
-      const found = config?.components.find((sc) => sc.pricingItemId === c.id);
+      const found = configComponents.find((sc) => sc.pricingItemId === c.id);
       compMap[c.id] = found ? found.enabled : false;
     });
     setAddSelectedComponents(compMap);
@@ -1450,7 +1649,7 @@ export function BiayaLayanan() {
     // 8. Fixed component parameters from template
     const swdklljPokokNom = parseInt(currentVehicleDraft.swdklljPokok) || 0;
     if (swdklljPokokNom > 0) {
-      const compRule = currentVehicleDraft.components.find((c) => c.ruleId === "SWDKLLJ_POKOK");
+      const compRule = findSummaryComponentRule(currentVehicleDraft.components, "SWDKLLJ_POKOK");
       items.push({
         id: "swdkllj-pokok",
         category: "SWDKLLJ",
@@ -1464,7 +1663,7 @@ export function BiayaLayanan() {
 
     const cetakSkpNom = parseInt(currentVehicleDraft.biayaCetakSkp) || 0;
     if (cetakSkpNom > 0) {
-      const compRule = currentVehicleDraft.components.find((c) => c.ruleId === "BIAYA_CETAK_SKP");
+      const compRule = findSummaryComponentRule(currentVehicleDraft.components, "CETAK_SKP");
       items.push({
         id: "cetak-skp",
         category: "ADMIN",
@@ -1479,26 +1678,28 @@ export function BiayaLayanan() {
     if (hasAdminStnkTnkb(selectedItem?.layanan)) {
       const stnkNom = parseInt(currentVehicleDraft.adminStnk) || 0;
       if (stnkNom > 0) {
+        const stnkRule = findSummaryComponentRule(currentVehicleDraft.components, "ADMIN_STNK");
         items.push({
           id: "admin-stnk",
           category: "ADMIN",
           name: `Admin STNK PNBP (${editVehicle})`,
           code: "ADM-STNK",
           nominal: stnkNom,
-          isActive: true,
-          includesInTotal: true,
+          isActive: stnkRule ? stnkRule.isActive : true,
+          includesInTotal: stnkRule ? stnkRule.includesInTotal : true,
         });
       }
       const tnkbNom = parseInt(currentVehicleDraft.adminTnkb) || 0;
       if (tnkbNom > 0) {
+        const tnkbRule = findSummaryComponentRule(currentVehicleDraft.components, "ADMIN_TNKB");
         items.push({
           id: "admin-tnkb",
           category: "ADMIN",
           name: `Admin TNKB / Plat PNBP (${editVehicle})`,
           code: "ADM-TNKB",
           nominal: tnkbNom,
-          isActive: true,
-          includesInTotal: true,
+          isActive: tnkbRule ? tnkbRule.isActive : true,
+          includesInTotal: tnkbRule ? tnkbRule.includesInTotal : true,
         });
       }
     }
@@ -1558,6 +1759,7 @@ export function BiayaLayanan() {
               <Input
                 className="h-8.5 text-xs font-mono tabular-nums text-right bg-background border-border pr-7"
                 type="number"
+                disabled={isSavingGeneralRules}
                 value={draft.koefDenda}
                 onChange={(e) => updateVehicleDraft("koefDenda", e.target.value)}
               />
@@ -1571,6 +1773,7 @@ export function BiayaLayanan() {
             <Input
               className="h-8.5 text-xs font-mono tabular-nums text-right bg-background border-border"
               type="number"
+              disabled={isSavingGeneralRules}
               value={draft.pembagiBulan}
               onChange={(e) => updateVehicleDraft("pembagiBulan", e.target.value)}
             />
@@ -1582,6 +1785,7 @@ export function BiayaLayanan() {
             <Input
               className="h-8.5 text-xs font-mono tabular-nums text-right bg-background border-border"
               type="number"
+              disabled={isSavingGeneralRules}
               value={draft.kelipatanPembulatan}
               onChange={(e) => updateVehicleDraft("kelipatanPembulatan", e.target.value)}
             />
@@ -1593,6 +1797,7 @@ export function BiayaLayanan() {
             <Input
               className="h-8.5 text-xs font-mono tabular-nums text-right bg-background border-border"
               type="number"
+              disabled={isSavingGeneralRules}
               value={draft.swdklljPokok}
               onChange={(e) => updateVehicleDraft("swdklljPokok", e.target.value)}
             />
@@ -1604,6 +1809,7 @@ export function BiayaLayanan() {
             <Input
               className="h-8.5 text-xs font-mono tabular-nums text-right bg-background border-border"
               type="number"
+              disabled={isSavingGeneralRules}
               value={draft.dendaSwdkllj}
               onChange={(e) => updateVehicleDraft("dendaSwdkllj", e.target.value)}
             />
@@ -1615,6 +1821,7 @@ export function BiayaLayanan() {
             <Input
               className="h-8.5 text-xs font-mono tabular-nums text-right bg-background border-border"
               type="number"
+              disabled={isSavingGeneralRules}
               value={draft.biayaCetakSkp}
               onChange={(e) => updateVehicleDraft("biayaCetakSkp", e.target.value)}
             />
@@ -1628,6 +1835,7 @@ export function BiayaLayanan() {
                 <Input
                   className="h-8.5 text-xs font-mono tabular-nums text-right bg-background border-border"
                   type="number"
+                  disabled={isSavingGeneralRules}
                   value={draft.adminStnk}
                   onChange={(e) => updateVehicleDraft("adminStnk", e.target.value)}
                 />
@@ -1638,6 +1846,7 @@ export function BiayaLayanan() {
                 <Input
                   className="h-8.5 text-xs font-mono tabular-nums text-right bg-background border-border"
                   type="number"
+                  disabled={isSavingGeneralRules}
                   value={draft.adminTnkb}
                   onChange={(e) => updateVehicleDraft("adminTnkb", e.target.value)}
                 />
@@ -1671,10 +1880,10 @@ export function BiayaLayanan() {
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5 flex-wrap">
                     <span className="font-semibold text-foreground text-xs">{comp.name}</span>
-                    <Badge variant="outline" className={cn("text-[9px] px-1 py-0", getCategoryBadgeClass(comp.category))}>
+                    <Badge variant="outline" className={cn("text-[11px] px-1.5 py-0", getCategoryBadgeClass(comp.category))}>
                       {comp.category}
                     </Badge>
-                    <span className="text-[9px] font-mono text-muted-foreground">{comp.code}</span>
+                    <span className="text-[11px] font-mono text-muted-foreground">{comp.code}</span>
                   </div>
                   {comp.description && (
                     <p className="text-[11px] text-muted-foreground mt-0.5 leading-relaxed">
@@ -1686,6 +1895,7 @@ export function BiayaLayanan() {
                 <ComponentStatusControls
                   isActive={comp.isActive}
                   includesInTotal={comp.includesInTotal}
+                  disabled={isSavingGeneralRules}
                   onToggleActive={() => handleToggleComponentActive(editVehicle, comp.id)}
                   onToggleIncludesInTotal={() => handleToggleComponentIncludesInTotal(editVehicle, comp.id)}
                 />
@@ -2065,10 +2275,10 @@ export function BiayaLayanan() {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="font-semibold text-xs text-foreground truncate">{comp.name}</span>
-                      <span className="text-[9px] px-1 py-0.2 rounded bg-muted text-muted-foreground font-mono">
+                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground font-mono">
                         {comp.code}
                       </span>
-                      <Badge variant="outline" className="text-[9px] px-1 py-0 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/20">
+                      <Badge variant="outline" className="text-[11px] px-1.5 py-0 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/20">
                         Standar Nasional
                       </Badge>
                     </div>
@@ -2078,6 +2288,7 @@ export function BiayaLayanan() {
                   </div>
                   <ComponentStatusControls
                     isActive={isChecked}
+                    disabled={isSavingGeneralRules}
                     onToggleActive={() => handleToggleSamsatComponent(comp.id, "isActive")}
                   />
                 </div>
@@ -2134,10 +2345,10 @@ export function BiayaLayanan() {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="font-semibold text-xs text-foreground truncate">{comp.name}</span>
-                      <span className="text-[9px] px-1 py-0.2 rounded bg-muted text-muted-foreground font-mono">
+                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground font-mono">
                         {comp.code}
                       </span>
-                      <Badge variant="outline" className="text-[9px] px-1 py-0 bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/20">
+                      <Badge variant="outline" className="text-[11px] px-1.5 py-0 bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/20">
                         Standar Nasional
                       </Badge>
                     </div>
@@ -2147,6 +2358,7 @@ export function BiayaLayanan() {
                   </div>
                   <ComponentStatusControls
                     isActive={isChecked}
+                    disabled={isSavingGeneralRules}
                     onToggleActive={() => handleToggleSamsatComponent(comp.id, "isActive")}
                   />
                 </div>
@@ -2237,9 +2449,10 @@ export function BiayaLayanan() {
                     <Button
                       type="button"
                       variant="ghost"
-                      size="sm"
+                      size="icon-sm"
                       onClick={() => handleDeleteBiayaLainnyaItem(bl.id)}
-                      className="h-7 w-7 p-0 text-muted-foreground hover:text-red-500 hover:bg-red-500/10 shrink-0"
+                      className="h-7 w-7 text-muted-foreground hover:text-red-500 hover:bg-red-500/10 shrink-0"
+                      aria-label={`Hapus ${bl.label || "biaya lainnya"}`}
                       title="Hapus biaya lainnya"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
@@ -2322,14 +2535,14 @@ export function BiayaLayanan() {
                     <TableRow key={item.id} className="border-b border-border/60 hover:bg-muted/20">
                       <TableCell className="text-center py-2 px-2.5 text-muted-foreground font-mono">{idx + 1}</TableCell>
                       <TableCell className="py-2 px-3">
-                        <Badge variant="outline" className={cn("text-[9px] px-1 py-0", getCategoryBadgeClass(item.category))}>
+                        <Badge variant="outline" className={cn("text-[11px] px-1.5 py-0", getCategoryBadgeClass(item.category))}>
                           {item.category}
                         </Badge>
                       </TableCell>
                       <TableCell className="py-2 px-3 font-medium text-foreground">
                         <div className="flex items-center gap-1.5">
                           <span>{item.name}</span>
-                          {item.code && <span className="text-[9px] font-mono text-muted-foreground">({item.code})</span>}
+                          {item.code && <span className="text-[11px] font-mono text-muted-foreground">({item.code})</span>}
                         </div>
                       </TableCell>
                       <TableCell className="py-2 px-3 text-center">
@@ -2425,9 +2638,9 @@ export function BiayaLayanan() {
             <TableBody>
               <TableRow className="border-b border-border/60">
                 <TableCell className="py-1.5 px-3 font-medium text-foreground">Biaya Jasa Standar</TableCell>
-                <TableCell className="py-1.5 px-3"><Badge variant="outline" className="text-[9px]">Jasa</Badge></TableCell>
+                <TableCell className="py-1.5 px-3"><Badge variant="outline" className="text-[11px]">Jasa</Badge></TableCell>
                 <TableCell className="py-1.5 px-3 text-center">
-                  <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", samsatDraft.jasaLengkapEnabled ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" : "bg-muted text-muted-foreground")}>
+                  <span className={cn("text-[11px] px-1.5 py-0.5 rounded font-medium", samsatDraft.jasaLengkapEnabled ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" : "bg-muted text-muted-foreground")}>
                     {samsatDraft.jasaLengkapEnabled ? "Aktif" : "Off"}
                   </span>
                 </TableCell>
@@ -2437,9 +2650,9 @@ export function BiayaLayanan() {
               </TableRow>
               <TableRow className="border-b border-border/60">
                 <TableCell className="py-1.5 px-3 font-medium text-foreground">Biaya Pengurusan Khusus</TableCell>
-                <TableCell className="py-1.5 px-3"><Badge variant="outline" className="text-[9px]">Jasa</Badge></TableCell>
+                <TableCell className="py-1.5 px-3"><Badge variant="outline" className="text-[11px]">Jasa</Badge></TableCell>
                 <TableCell className="py-1.5 px-3 text-center">
-                  <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", samsatDraft.jasaNembakEnabled ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" : "bg-muted text-muted-foreground")}>
+                  <span className={cn("text-[11px] px-1.5 py-0.5 rounded font-medium", samsatDraft.jasaNembakEnabled ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" : "bg-muted text-muted-foreground")}>
                     {samsatDraft.jasaNembakEnabled ? "Aktif" : "Off"}
                   </span>
                 </TableCell>
@@ -2449,9 +2662,9 @@ export function BiayaLayanan() {
               </TableRow>
               <TableRow className="border-b border-border/60">
                 <TableCell className="py-1.5 px-3 font-medium text-foreground">Biaya Antar & Jemput ({samsatDraft.antarJemputMode})</TableCell>
-                <TableCell className="py-1.5 px-3"><Badge variant="outline" className="text-[9px]">Kurir</Badge></TableCell>
+                <TableCell className="py-1.5 px-3"><Badge variant="outline" className="text-[11px]">Kurir</Badge></TableCell>
                 <TableCell className="py-1.5 px-3 text-center">
-                  <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", samsatDraft.antarJemputEnabled ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" : "bg-muted text-muted-foreground")}>
+                  <span className={cn("text-[11px] px-1.5 py-0.5 rounded font-medium", samsatDraft.antarJemputEnabled ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" : "bg-muted text-muted-foreground")}>
                     {samsatDraft.antarJemputEnabled ? "Aktif" : "Off"}
                   </span>
                 </TableCell>
@@ -2462,7 +2675,7 @@ export function BiayaLayanan() {
               {samsatDraft.biayaLainnya.map((bl) => (
                 <TableRow key={bl.id} className="border-b border-border/60">
                   <TableCell className="py-1.5 px-3 font-medium text-foreground">{bl.label || "Biaya Lainnya"}</TableCell>
-                  <TableCell className="py-1.5 px-3"><Badge variant="outline" className="text-[9px] bg-blue-500/10 text-blue-700 dark:text-blue-300">Kustom Wilayah</Badge></TableCell>
+                  <TableCell className="py-1.5 px-3"><Badge variant="outline" className="text-[11px] bg-blue-500/10 text-blue-700 dark:text-blue-300">Kustom Wilayah</Badge></TableCell>
                   <TableCell className="py-1.5 px-3 text-center">
                     <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", bl.enabled ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" : "bg-muted text-muted-foreground")}>
                       {bl.enabled ? "Aktif" : "Off"}
@@ -2616,7 +2829,7 @@ export function BiayaLayanan() {
             Rp {biayaJasaVal.toLocaleString("id-ID")}
           </span>
           {!isLengkapActive && (
-            <span className="ml-1.5 text-[9px] px-1 py-0.2 rounded bg-muted text-muted-foreground font-sans">Off</span>
+            <span className="ml-1.5 text-[11px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground font-sans">Off</span>
           )}
         </TableCell>
         <TableCell className="px-3.5 py-2 text-xs text-right font-mono tabular-nums font-medium text-foreground">
@@ -2624,7 +2837,7 @@ export function BiayaLayanan() {
             Rp {biayaAntarJemputVal.toLocaleString("id-ID")}
           </span>
           {!isAntarJemputActive && (
-            <span className="ml-1.5 text-[9px] px-1 py-0.2 rounded bg-muted text-muted-foreground font-sans">Off</span>
+            <span className="ml-1.5 text-[11px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground font-sans">Off</span>
           )}
         </TableCell>
         <TableCell className="px-3.5 py-2 text-xs text-right font-mono tabular-nums font-bold text-foreground">
@@ -2721,16 +2934,6 @@ export function BiayaLayanan() {
                   >
                     <Sliders className="w-3.5 h-3.5" />
                     <span>Aturan Estimasi & Komponen General</span>
-                  </Button>
-
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-8.5 text-xs gap-1.5 border-primary/30 text-primary hover:bg-primary/10 shadow-2xs font-semibold shrink-0"
-                    onClick={() => setIsEstimatorOpen(true)}
-                  >
-                    <Calculator className="w-3.5 h-3.5" />
-                    <span>Kalkulator Estimasi</span>
                   </Button>
 
                   {supportsVehicleChoice(getCurrentLayanan()) && (
@@ -2910,10 +3113,10 @@ export function BiayaLayanan() {
             {renderAddFormFields()}
           </div>
           <DialogFooter className="px-5 py-3 border-t border-border/70 shrink-0 bg-card flex justify-end gap-2">
-            <Button size="sm" variant="outline" className="h-9 text-xs px-4" onClick={handleCancelAddClick}>
+            <Button variant="outline" className="text-xs px-4" onClick={handleCancelAddClick}>
               Batal
             </Button>
-            <Button size="sm" className="h-9 text-xs px-4 bg-primary hover:bg-primary/90 text-primary-foreground shadow-xs font-semibold flex items-center gap-1.5" onClick={handleAddSubmit}>
+            <Button className="text-xs px-4 font-semibold gap-1.5" onClick={handleAddSubmit}>
               <Plus className="w-3.5 h-3.5" />
               <span>Simpan Biaya</span>
             </Button>
@@ -2990,10 +3193,10 @@ export function BiayaLayanan() {
             </Button>
 
             <div className="flex items-center justify-end gap-2 w-full sm:w-auto">
-              <Button size="sm" variant="outline" className="h-9 text-xs px-4 font-medium" onClick={handleCancelClick}>
+              <Button variant="outline" className="text-xs px-4 font-medium" onClick={handleCancelClick}>
                 Batal
               </Button>
-              <Button size="sm" className="h-9 text-xs px-4 bg-primary hover:bg-primary/90 text-primary-foreground shadow-xs font-semibold" onClick={handleSaveUnified}>
+              <Button className="text-xs px-4 font-semibold" onClick={handleSaveUnified}>
                 Simpan Tarif Samsat
               </Button>
             </div>
@@ -3004,7 +3207,12 @@ export function BiayaLayanan() {
       {/* ─────────────────────────────────────────────────────────────────────────
           Modal 1: Aturan Estimasi & Komponen General (Berlaku Seragam ke 10 Samsat)
       ────────────────────────────────────────────────────────────────────────── */}
-      <Dialog open={isGeneralRulesOpen} onOpenChange={setIsGeneralRulesOpen}>
+      <Dialog
+        open={isGeneralRulesOpen}
+        onOpenChange={(open) => {
+          if (!isSavingGeneralRules) setIsGeneralRulesOpen(open);
+        }}
+      >
         <DialogContent className="border-border sm:max-w-5xl lg:max-w-6xl w-[96vw] h-[92vh] max-h-[92vh] flex flex-col p-0 overflow-hidden bg-card">
           {/* Sticky Header with Vehicle Switcher */}
           <DialogHeader className="px-5 py-3.5 border-b border-border/70 shrink-0 bg-card">
@@ -3037,6 +3245,7 @@ export function BiayaLayanan() {
                     type="button"
                     variant={editVehicle === "Mobil" ? "default" : "ghost"}
                     size="sm"
+                    disabled={isSavingGeneralRules}
                     onClick={() => setEditVehicle("Mobil")}
                     className={cn("h-7 px-3 text-xs font-semibold", editVehicle === "Mobil" && "shadow-xs")}
                   >
@@ -3046,6 +3255,7 @@ export function BiayaLayanan() {
                     type="button"
                     variant={editVehicle === "Motor" ? "default" : "ghost"}
                     size="sm"
+                    disabled={isSavingGeneralRules}
                     onClick={() => setEditVehicle("Motor")}
                     className={cn("h-7 px-3 text-xs font-semibold", editVehicle === "Motor" && "shadow-xs")}
                   >
@@ -3128,19 +3338,50 @@ export function BiayaLayanan() {
           </div>
 
           {/* Sticky Bottom Action Bar */}
-          <DialogFooter className="px-5 py-3 border-t border-border/70 shrink-0 bg-card flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5">
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
-              <span>Aturan denda, pembulatan & komponen mutasi ini otomatis diterapkan seragam ke seluruh Samsat.</span>
-            </div>
+          <DialogFooter className="px-5 py-3 border-t border-border/70 shrink-0 bg-card flex flex-col gap-2">
+            {generalRulesSaveError && (
+              <div
+                role="alert"
+                className="w-full rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive flex items-start gap-2"
+              >
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{generalRulesSaveError}</span>
+              </div>
+            )}
+            <div className="w-full flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5">
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                <span>Aturan denda, pembulatan & komponen mutasi ini otomatis diterapkan seragam ke seluruh Samsat.</span>
+              </div>
 
-            <div className="flex items-center justify-end gap-2 w-full sm:w-auto">
-              <Button size="sm" variant="outline" className="h-8.5 text-xs font-medium" onClick={() => setIsGeneralRulesOpen(false)}>
-                Batal
-              </Button>
-              <Button size="sm" className="h-8.5 text-xs bg-primary hover:bg-primary/90 text-primary-foreground shadow-xs font-semibold" onClick={handleSaveGeneralRules}>
-                Simpan Aturan General
-              </Button>
+              <div className="flex items-center justify-end gap-2 w-full sm:w-auto">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8.5 text-xs font-medium"
+                  disabled={isSavingGeneralRules}
+                  onClick={() => {
+                    if (!isSavingGeneralRules) setIsGeneralRulesOpen(false);
+                  }}
+                >
+                  Batal
+                </Button>
+                <Button
+                  size="sm"
+                  className="h-8.5 text-xs bg-primary hover:bg-primary/90 text-primary-foreground shadow-xs font-semibold"
+                  disabled={isSavingGeneralRules}
+                  onClick={() => void handleSaveGeneralRules()}
+                >
+                  {isSavingGeneralRules ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                      Menyimpan...
+                    </>
+                  ) : (
+                    "Simpan Aturan General"
+                  )}
+                </Button>
+              </div>
             </div>
           </DialogFooter>
         </DialogContent>
@@ -3268,7 +3509,7 @@ export function BiayaLayanan() {
                       <div className="space-y-0.5 leading-tight">
                         <div className="flex items-center gap-1.5">
                           <span className="text-xs font-semibold text-foreground">Biaya Lainnya (Komponen Kustom)</span>
-                          <Badge variant="outline" className="text-[9px] px-1 py-0 bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/30">
+                          <Badge variant="outline" className="text-[11px] px-1.5 py-0 bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/30">
                             Penggabungan Aman
                           </Badge>
                         </div>
@@ -3315,7 +3556,7 @@ export function BiayaLayanan() {
                           <div>
                             <div className="text-xs font-semibold text-foreground flex items-center gap-1.5">
                               <span>Pertahankan Tarif Khusus Kantor</span>
-                              <Badge variant="outline" className="text-[9px] px-1 py-0 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30">
+                              <Badge variant="outline" className="text-[11px] px-1.5 py-0 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30">
                                 Direkomendasikan
                               </Badge>
                             </div>
@@ -3355,7 +3596,7 @@ export function BiayaLayanan() {
                           <div>
                             <div className="text-xs font-semibold text-foreground flex items-center gap-1.5">
                               <span>Timpa Seluruh Kantor (Termasuk Tarif Khusus)</span>
-                              <Badge variant="outline" className="text-[9px] px-1 py-0 bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30">
+                              <Badge variant="outline" className="text-[11px] px-1.5 py-0 bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30">
                                 Override Total
                               </Badge>
                             </div>

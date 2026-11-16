@@ -1,9 +1,47 @@
 import test from "node:test";
 import assert from "node:assert";
+import http from "node:http";
+import { createApp } from "../server/src/app";
 import { pricingStore } from "../src/app/data/pricingStore";
+import { pricingRepository } from "../src/data/repositories/pricingRepository";
+import { ApiPricingProvider } from "../src/data/api/apiPricingProvider";
 import { formatRupiah } from "../src/app/utils/financeFormatters";
+import { dbOrderRepository } from "../server/src/repositories/dbOrderRepository";
+import { dbFinanceRepository } from "../server/src/repositories/dbFinanceRepository";
+
+function startTestServer(): Promise<{ server: http.Server; baseUrl: string }> {
+  return new Promise((resolve) => {
+    const app = createApp();
+    const server = http.createServer(app);
+    server.listen(0, () => {
+      const addr = server.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      resolve({ server, baseUrl: `http://localhost:${port}` });
+    });
+  });
+}
+
+async function loginAsSvp(baseUrl: string): Promise<string> {
+  const res = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "svp@birojasa.com", password: "admin123" }),
+  });
+  assert.strictEqual(res.status, 200);
+  const body = (await res.json()) as any;
+  return body.data.token;
+}
 
 test("FASE 5: UX ESTIMASI BIAYA, INVOICE & KOMUNIKASI PELANGGAN", async (t) => {
+  const { server, baseUrl } = await startTestServer();
+  const prevToken = process.env.AUTH_TOKEN;
+
+  try {
+    process.env.AUTH_TOKEN = await loginAsSvp(baseUrl);
+    const apiPricing = new ApiPricingProvider(`${baseUrl}/api`);
+    await apiPricing.initFromApi();
+    pricingRepository.setProvider(apiPricing);
+    await pricingStore.initFromApi();
 
   // Setup: Make sure we test on an isolated Samsat for deterministic conditions
   const testSamsatId = "samsat-jakarta-timur";
@@ -40,18 +78,25 @@ test("FASE 5: UX ESTIMASI BIAYA, INVOICE & KOMUNIKASI PELANGGAN", async (t) => {
   // ───────────────────────────────────────────────────────────────────────────
   // TEST B: Order estimasi parsial
   // ───────────────────────────────────────────────────────────────────────────
-  await t.test("Test B — Order estimasi parsial (PARTIAL_ESTIMATE & unconfigured indicator)", () => {
-    // For unconfigured Samsat, missing items return null from getSamsatPrice
-    const partialSnapshot = pricingStore.calculateOrderCost({
-      serviceName: "Mutasi Antar Samsat",
-      wilayahSamsat: "Samsat Belum Ada Tarif",
-      samsatId: unconfiguredSamsatId,
-      metodeLayanan: "Datang Langsung",
-      tipeJasa: "Lengkap",
-      pkb: 2000000,
-      swdkllj: 143000,
-      dendaSwdkllj: 0,
-    });
+  await t.test("Test B — Order estimasi parsial (PARTIAL_ESTIMATE, PENDING_DESTINATION & Finance guard)", async () => {
+    // Under 2-Stage Pricing Architecture:
+    // 1. Unconfigured item (national default isConfigured = false) produces PARTIAL_ESTIMATE
+    await pricingStore.updateNationalDefault("mutasi-cek-blokir", { isConfigured: false });
+    let partialSnapshot: ReturnType<typeof pricingStore.calculateOrderCost>;
+    try {
+      partialSnapshot = pricingStore.calculateOrderCost({
+        serviceName: "Mutasi Antar Samsat",
+        wilayahSamsat: "Samsat Belum Ada Tarif",
+        samsatId: unconfiguredSamsatId,
+        metodeLayanan: "Datang Langsung",
+        tipeJasa: "Lengkap",
+        pkb: 2000000,
+        swdkllj: 143000,
+        dendaSwdkllj: 0,
+      });
+    } finally {
+      await pricingStore.updateNationalDefault("mutasi-cek-blokir", { isConfigured: true });
+    }
 
     assert.strictEqual(partialSnapshot.completenessStatus, "PARTIAL_ESTIMATE", "Order with missing tariff must be PARTIAL_ESTIMATE");
     assert.strictEqual(partialSnapshot.hasUnconfiguredTariff, true, "hasUnconfiguredTariff must be true");
@@ -65,25 +110,109 @@ test("FASE 5: UX ESTIMASI BIAYA, INVOICE & KOMUNIKASI PELANGGAN", async (t) => {
       assert.strictEqual(item.amount, 0, "UNCONFIGURED item amount in snapshot must be 0");
       assert.strictEqual(item.isEstimated, true, "UNCONFIGURED item must be flagged isEstimated: true");
     });
+
+    // 2. PENDING_DESTINATION for Mutasi Masuk enabled without wilayahSamsatTujuan also produces PARTIAL_ESTIMATE
+    pricingStore.toggleComponent("Mutasi Antar Samsat", testSamsatId, "mutasi-legalisir-mutmas", true);
+    try {
+      const pendingDestSnapshot = pricingStore.calculateOrderCost({
+        serviceName: "Mutasi Antar Samsat",
+        wilayahSamsat: "Jakarta Timur",
+        samsatId: testSamsatId,
+        metodeLayanan: "Datang Langsung",
+        tipeJasa: "Lengkap",
+        pkb: 1500000,
+        swdkllj: 143000,
+        dendaSwdkllj: 0,
+      });
+      assert.strictEqual(pendingDestSnapshot.completenessStatus, "PARTIAL_ESTIMATE", "Mutasi Masuk without destination must be PARTIAL_ESTIMATE");
+      assert.strictEqual(pendingDestSnapshot.hasUnconfiguredTariff, true, "PENDING_DESTINATION must set hasUnconfiguredTariff");
+      assert.ok(
+        pendingDestSnapshot.unconfiguredItems.some((item) => item.includes("Menunggu Samsat Tujuan")),
+        "unconfiguredItems must explain missing destination Samsat"
+      );
+    } finally {
+      pricingStore.toggleComponent("Mutasi Antar Samsat", testSamsatId, "mutasi-legalisir-mutmas", false);
+    }
+
+    // 3. Finance regression guard: PARTIAL_ESTIMATE order created via API must block payment until cost is verified
+    const authHeaders = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.AUTH_TOKEN}`,
+    };
+    const createPartialOrderRes = await fetch(`${baseUrl}/api/orders`, {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({
+        customer: "Customer Partial G2",
+        nomorHP: "081234567891",
+        layanan: "Mutasi Antar Samsat",
+        nopol: "B 7711 G2T",
+        wilayahSamsatAsal: "Samsat Belum Ada Tarif",
+        biayaJasa: partialSnapshot.biayaJasa,
+        biayaAntarJemput: partialSnapshot.biayaAntarJemput,
+        biayaSamsat: partialSnapshot.biayaSamsat,
+        totalBiaya: partialSnapshot.totalEstimasi,
+        costSnapshot: partialSnapshot,
+      }),
+    });
+    assert.strictEqual(createPartialOrderRes.status, 201, "Creating PARTIAL_ESTIMATE order should succeed");
+    const createdBody = (await createPartialOrderRes.json()) as any;
+    const partialOrderNo = createdBody?.data?.orderNo;
+    assert.ok(partialOrderNo, "Created PARTIAL_ESTIMATE order must have orderNo");
+
+    // Advance supervision approval flag so payment test isolates cost verification guard
+    dbOrderRepository.updateOrder(partialOrderNo, { approvedBySpv: "SVP G2 Guard" as any, currentStep: 6 });
+    const linkedInv = dbFinanceRepository.getInvoiceByOrderNo(partialOrderNo);
+    assert.ok(linkedInv, "Invoice must be generated for PARTIAL_ESTIMATE order");
+
+    const blockedPayRes = await fetch(`${baseUrl}/api/finance/invoices/${linkedInv.id}/pay`, {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({
+        amount: partialSnapshot.totalEstimasi,
+        metodePembayaran: "Transfer",
+      }),
+    });
+    assert.strictEqual(blockedPayRes.status, 400, "Finance payment on unverified PARTIAL_ESTIMATE must return HTTP 400");
+    const blockedPayJson = (await blockedPayRes.json()) as any;
+    assert.strictEqual(blockedPayJson?.error?.code, "COST_VERIFICATION_REQUIRED");
   });
 
   // ───────────────────────────────────────────────────────────────────────────
   // TEST C: Tarif Rp0 eksplisit
   // ───────────────────────────────────────────────────────────────────────────
-  await t.test("Test C — Tarif Rp0 eksplisit (ZERO_EXPLICIT vs UNCONFIGURED)", () => {
-    // Explicitly configure a Rp0 tariff
-    pricingStore.updateSamsatPrice(testSamsatId, "mutasi-cek-blokir", 0);
+  await t.test("Test C — Tarif Rp0 eksplisit (ZERO_EXPLICIT vs CONFIGURED_DEFAULT vs UNCONFIGURED)", async () => {
+    const prevPrice = pricingStore.getSamsatPrice(testSamsatId, "mutasi-cek-blokir");
+    // Explicitly configure a Rp0 tariff against isolated SQLite
+    await pricingStore.setSamsatOverride(testSamsatId, "mutasi-cek-blokir", 0);
     const price = pricingStore.getSamsatPrice(testSamsatId, "mutasi-cek-blokir");
     const status = pricingStore.getSamsatTariffStatus(testSamsatId, "mutasi-cek-blokir");
 
     assert.strictEqual(price, 0, "Explicit zero tariff must return numeric 0");
     assert.strictEqual(status, "ZERO_EXPLICIT", "Status must be ZERO_EXPLICIT, not UNCONFIGURED");
 
-    // Unconfigured item lookup must return null and status UNCONFIGURED
-    const unconfPrice = pricingStore.getSamsatPrice("samsat-unknown-xyz", "mutasi-cek-blokir");
-    const unconfStatus = pricingStore.getSamsatTariffStatus("samsat-unknown-xyz", "mutasi-cek-blokir");
-    assert.strictEqual(unconfPrice, null, "Unconfigured tariff must return null");
-    assert.strictEqual(unconfStatus, "UNCONFIGURED", "Status must be UNCONFIGURED");
+    // 2-Stage Pricing: unknown Samsat falls back to active National Default (25000, CONFIGURED) when master item is configured
+    const fallbackPrice = pricingStore.getSamsatPrice("samsat-unknown-xyz", "mutasi-cek-blokir");
+    const fallbackStatus = pricingStore.getSamsatTariffStatus("samsat-unknown-xyz", "mutasi-cek-blokir");
+    assert.strictEqual(fallbackPrice, 25000, "Configured National Default must serve as fallback for unknown Samsat");
+    assert.strictEqual(fallbackStatus, "CONFIGURED", "Fallback status must be CONFIGURED");
+
+    // Genuine unconfigured item (master isConfigured: false) with no override must return null and UNCONFIGURED
+    await pricingStore.updateNationalDefault("mutasi-cek-blokir", { isConfigured: false });
+    try {
+      const unconfPrice = pricingStore.getSamsatPrice("samsat-unknown-xyz", "mutasi-cek-blokir");
+      const unconfStatus = pricingStore.getSamsatTariffStatus("samsat-unknown-xyz", "mutasi-cek-blokir");
+      assert.strictEqual(unconfPrice, null, "Unconfigured tariff must return null");
+      assert.strictEqual(unconfStatus, "UNCONFIGURED", "Status must be UNCONFIGURED");
+    } finally {
+      await pricingStore.updateNationalDefault("mutasi-cek-blokir", { isConfigured: true });
+    }
+
+    if (prevPrice !== null && prevPrice !== 0) {
+      await pricingStore.setSamsatOverride(testSamsatId, "mutasi-cek-blokir", prevPrice);
+    } else {
+      await pricingStore.resetSamsatOverride(testSamsatId, "mutasi-cek-blokir");
+    }
   });
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -331,4 +460,9 @@ Terima kasih.`;
       "Difference between Antar Jemput and Datang Langsung must equal exactly biayaAntarJemput"
     );
   });
+  } finally {
+    process.env.AUTH_TOKEN = prevToken;
+    pricingRepository.setProvider(new ApiPricingProvider());
+    server.close();
+  }
 });

@@ -18,6 +18,7 @@ import { db, runInTransaction } from "../database/db";
 import { ApiError } from "../middleware/errorHandler";
 import { validateAndNormalizeBusinessDate } from "../utils/dateNormalizer";
 import { recalculateKasKantorRunningBalances } from "./cashLedgerCalculationService";
+import { resolveAuthenticatedDbActor, parsePositiveDbUserId } from "../utils/canonicalIdentity";
 
 export interface PaymentMethodSnapshot {
   id: string;
@@ -145,25 +146,23 @@ export function verifyInvoicePaymentAtomic(
 
   // 2. Execute inside runInTransaction with targetDb under reserved write lock (BEGIN IMMEDIATE)
   return runInTransaction(() => {
-    // 3. In-Transaction Actor Re-Validation Under Write Lock (TOCTOU Defense — FIX-03)
-    const actorRow = targetDb.prepare(`
-      SELECT id, nama, role, status
-      FROM users
-      WHERE id = ?
-    `).get(cleanActorId) as { id: number | string; nama: string; role: string; status: string } | undefined;
-
-    if (!actorRow) {
-      throw new ApiError(403, "FORBIDDEN_USER_NOT_FOUND", "Pengguna terautentikasi tidak ditemukan di database.");
+    // 3. In-Transaction Canonical Actor Re-Validation Under Write Lock (TOCTOU Defense — FIX-03)
+    const actorResolution = resolveAuthenticatedDbActor(cleanActorId, targetDb);
+    if (!actorResolution.ok) {
+      if (actorResolution.code === "FORBIDDEN_USER_NOT_FOUND") {
+        throw new ApiError(403, "FORBIDDEN_USER_NOT_FOUND", "Pengguna terautentikasi tidak ditemukan di database.");
+      }
+      if (actorResolution.code === "FORBIDDEN_USER_INACTIVE") {
+        throw new ApiError(403, "FORBIDDEN_USER_INACTIVE", "Akun pengguna tidak aktif.");
+      }
+      throw new ApiError(403, "FORBIDDEN", actorResolution.message);
     }
 
-    if (actorRow.status !== "Aktif") {
-      throw new ApiError(403, "FORBIDDEN_USER_INACTIVE", "Akun pengguna tidak aktif.");
-    }
-
-    const verifiedRole = String(actorRow.role || "").trim().toLowerCase();
-    const allowedRoles = ["admin", "administrator", "finance", "svp"];
+    const actor = actorResolution.actor;
+    const verifiedRole = actor.canonicalRole;
+    const allowedRoles = ["admin", "administrator", "finance"];
     if (!allowedRoles.includes(verifiedRole)) {
-      throw new ApiError(403, "FORBIDDEN", `Role '${actorRow.role}' tidak memiliki hak akses verifikasi pembayaran.`);
+      throw new ApiError(403, "FORBIDDEN", `Role '${verifiedRole}' tidak memiliki hak akses verifikasi pembayaran.`);
     }
 
     // 4. Resolve Canonical Invoice Identifier (Deterministic Resolver, No Ambiguous OR Queries)
@@ -278,7 +277,7 @@ export function verifyInvoicePaymentAtomic(
       paymentId: payment.id,
       paymentUuid: payment.payment_id || null,
       nominal: nominal,
-      actorId: cleanActorId,
+      actorId: actor.canonicalUserId,
     });
     const canonicalRequestHash = crypto.createHash("sha256").update(canonicalPayload).digest("hex");
 
@@ -309,7 +308,11 @@ export function verifyInvoicePaymentAtomic(
 
       // Validate Actor Ownership
       if (existingKey.user_id !== null && existingKey.user_id !== undefined) {
-        if (String(existingKey.user_id) !== String(cleanActorId)) {
+        const storedNumericId = parsePositiveDbUserId(existingKey.user_id);
+        const isActorMatch =
+          String(existingKey.user_id) === actor.canonicalUserId ||
+          (storedNumericId !== null && storedNumericId === actor.numericUserId);
+        if (!isActorMatch) {
           throw new ApiError(403, "IDEMPOTENCY_USER_MISMATCH", "Idempotency key milik pengguna lain.");
         }
       } else {
@@ -384,7 +387,7 @@ export function verifyInvoicePaymentAtomic(
       normalizedTanggal,
       `Penerimaan pembayaran invoice ${targetInvoice.invoice_no} (Payment #${payment.id})`,
       nominal,
-      actorRow.nama || cleanActorId,
+      actor.nama || actor.canonicalUserId,
       targetInvoice.order_no,
       targetInvoice.invoice_no,
       pmId,
@@ -400,7 +403,7 @@ export function verifyInvoicePaymentAtomic(
           verified_at = CURRENT_TIMESTAMP,
           verified_by = ?
       WHERE id = ?
-    `).run(newKasKantorId, cleanActorId, payment.id);
+    `).run(newKasKantorId, actor.canonicalUserId, payment.id);
 
     // 15. Recalculate kas_kantor running balances chronologically
     recalculateKasKantorRunningBalances(targetDb);
@@ -427,7 +430,7 @@ export function verifyInvoicePaymentAtomic(
     `).run(
       scopedKey,
       String(payment.id),
-      cleanActorId,
+      actor.canonicalUserId,
       canonicalRequestHash,
       JSON.stringify(responsePayload)
     );

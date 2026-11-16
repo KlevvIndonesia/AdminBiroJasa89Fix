@@ -67,15 +67,24 @@ test("PHASE 5: END-TO-END BUSINESS WORKFLOW VERIFICATION SUITE", async (t) => {
 
     // 3. Stage 3 -> Stage 4: Verifikasi Dokumen disetujui -> Proses Samsat
     const s4Order = orderService.advanceOrder(orderNo, "Proses Samsat", {
-      documentsVerified: true
+      documentsVerified: true,
+      samsatMessengerId: "EMP-0004",
+      samsatMessengerName: "Budi Santoso",
+      samsatProcesses: [{ id: "comp-1", name: "Cek Fisik", status: "COMPLETED" }],
     }, testAdmin);
     assert.strictEqual(s4Order.currentStep, 4);
     assert.strictEqual(s4Order.currentStageName, "Proses Samsat");
 
-    // 4. Stage 4 -> Stage 5: Selesaikan Proses Samsat -> Verifikasi Ulang
-    const s5Order = orderService.advanceOrder(orderNo, "Verifikasi Ulang", {
-      samsatCompletedAt: new Date().toISOString()
+    // 4. Stage 4 -> Stage 5: Selesaikan Proses Samsat & Jemput Hasil -> Verifikasi Ulang
+    orderService.completeSamsatProcess(orderNo, {
+      components: [{ id: "comp-1", name: "Cek Fisik", status: "COMPLETED", isCompleted: true }],
     }, testAdmin);
+    dbOrderRepository.updateOrder(orderNo, {
+      samsatPickupMessengerId: "EMP-0004",
+      samsatPickupMessengerName: "Budi Santoso",
+    });
+    orderService.completeSamsatPickupTask(orderNo, testAdmin, {});
+    const s5Order = orderService.advanceOrder(orderNo, "Verifikasi Ulang", {}, testAdmin);
     assert.strictEqual(s5Order.currentStep, 5);
     assert.strictEqual(s5Order.currentStageName, "Verifikasi Ulang");
 
@@ -87,7 +96,7 @@ test("PHASE 5: END-TO-END BUSINESS WORKFLOW VERIFICATION SUITE", async (t) => {
     assert.strictEqual(s6Order.currentStep, 6);
     assert.strictEqual(s6Order.currentStageName, "Supervisi");
 
-    // 6. Stage 6 -> Stage 7: Supervisi disetujui oleh SVP -> Pengantaran
+    // 6. Stage 6 -> Stage 7: Supervisi disetujui -> Pengantaran
     const s7Order = orderService.advanceOrder(orderNo, "Pengantaran", {
       approvedBySpv: "Supervisor SPV",
       messengerPengantar: "Ahmad Kurir",
@@ -97,10 +106,8 @@ test("PHASE 5: END-TO-END BUSINESS WORKFLOW VERIFICATION SUITE", async (t) => {
     assert.strictEqual(s7Order.currentStageName, "Pengantaran");
 
     // 7. Stage 7 -> Stage 8: Pengantaran Selesai -> Dokumen Telah Diterima
-    const s8Order = orderService.advanceOrder(orderNo, "Dokumen Telah Diterima", {
-      penerimaDokumen: "Hendro Wijaya (Langsung)",
-      recipientName: "Hendro Wijaya (Langsung)"
-    }, testAdmin);
+    orderService.completeDeliveryTask(orderNo, { receiverName: "Hendro Wijaya (Langsung)" }, testAdmin);
+    const s8Order = orderService.advanceOrder(orderNo, "Dokumen Telah Diterima", {}, testAdmin);
     assert.strictEqual(s8Order.currentStep, 8);
     assert.strictEqual(s8Order.currentStageName, "Dokumen Telah Diterima");
 

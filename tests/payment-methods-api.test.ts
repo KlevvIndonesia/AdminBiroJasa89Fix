@@ -434,32 +434,87 @@ test("Payment Methods API - Multi-Account & Conditional Master Data Invariants",
       assert.strictEqual(check, undefined, "Record must be deleted from SQLite");
     });
 
-    await t.test("Skenario 9B: DELETE soft-deactivates method when referenced in transactions", async () => {
-      // Insert an order referencing BCA method
+    await t.test("Skenario 9B: DELETE rejects referenced method with HTTP 409, explicit PATCH sets Nonaktif, historical snapshot preserved", async () => {
+      // Seed canonical financial reference in invoice_payments (table checked by isUsedInTransactions)
+      const bcaBefore = db.prepare("SELECT * FROM payment_methods WHERE id = ?").get(bcaId) as any;
+      assert.ok(bcaBefore, "BCA method must exist before delete attempt");
+      const snapshotJson = JSON.stringify({
+        id: bcaBefore.id,
+        nama_metode: bcaBefore.nama_metode,
+        tipe: "BANK",
+        bank: bcaBefore.bank,
+        nomor_rekening: bcaBefore.nomor_rekening,
+        nama_rekening: bcaBefore.nama_rekening,
+      });
+
       db.prepare(`
         INSERT INTO orders (
           order_no, customer, nomor_hp, layanan, nopol, total_biaya, created_at, data_json
         ) VALUES (
-          'ORD-TEST-PM-9B', 'Budi Santoso', '08123456789', 'Pajak Tahunan', 'B 8999 ABC', 350000, datetime('now'),
-          ?
+          'ORD-TEST-PM-9B', 'Budi Santoso', '08123456789', 'Pajak Tahunan', 'B 8999 ABC', 350000, datetime('now'), '{}'
         )
-      `).run(JSON.stringify({ metodePembayaran: "Transfer Bank", bank: "BCA", nomorRekening: "772-019-2831" }));
+      `).run();
 
-      // Now call DELETE on bcaId
-      const res = await fetch(`${baseUrl}/api/payment-methods/${bcaId}`, {
+      db.prepare(`
+        INSERT INTO finance_invoices (
+          invoice_no, order_no, customer, layanan, status, total_tagihan, dibayar, sisa, data_json, created_at, updated_at
+        ) VALUES (
+          'INV-TEST-PM-9B', 'ORD-TEST-PM-9B', 'Budi Santoso', 'Pajak Tahunan', 'PAID', 350000, 350000, 0, '{}', datetime('now'), datetime('now')
+        )
+      `).run();
+
+      db.prepare(`
+        INSERT INTO invoice_payments (
+          payment_id, invoice_no, order_no, nominal, metode_pembayaran, nama_bank, nomor_rekening,
+          tanggal_bayar, status_verifikasi, metode_pembayaran_id, payment_method_snapshot, is_void, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, date('now'), 'TERVERIFIKASI', ?, ?, 0, datetime('now'))
+      `).run(
+        "pay-test-pm-9b",
+        "INV-TEST-PM-9B",
+        "ORD-TEST-PM-9B",
+        350000,
+        bcaBefore.nama_metode,
+        bcaBefore.bank,
+        bcaBefore.nomor_rekening,
+        bcaId,
+        snapshotJson
+      );
+
+      // 1. DELETE on referenced method MUST return HTTP 409 CANNOT_DELETE_REFERENCED_PAYMENT_METHOD
+      const delRes = await fetch(`${baseUrl}/api/payment-methods/${bcaId}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${adminToken}` },
       });
+      assert.strictEqual(delRes.status, 409, "Referenced method DELETE must fail with HTTP 409 Conflict");
+      const delJson = (await delRes.json()) as any;
+      assert.strictEqual(delJson.success, false);
+      assert.strictEqual(delJson.error?.code, "CANNOT_DELETE_REFERENCED_PAYMENT_METHOD");
 
-      assert.strictEqual(res.status, 200);
-      const json = await res.json() as any;
-      assert.strictEqual(json.success, true);
-      assert.strictEqual(json.deactivated, true, "Referenced method must be soft-deactivated");
+      // 2. Method MUST still exist in DB with original status Aktif
+      const stillActive = db.prepare("SELECT * FROM payment_methods WHERE id = ?").get(bcaId) as any;
+      assert.ok(stillActive, "Referenced payment method must still exist after blocked DELETE");
+      assert.strictEqual(stillActive.status, "Aktif");
 
-      // Verify row still exists in DB with status Nonaktif
-      const bcaRow = db.prepare("SELECT * FROM payment_methods WHERE id = ?").get(bcaId) as any;
-      assert.ok(bcaRow, "Record must NOT be deleted from database");
-      assert.strictEqual(bcaRow.status, "Nonaktif", "Record status must be changed to Nonaktif");
+      // 3. Explicit soft-deactivation via PATCH /:id/status
+      const patchRes = await fetch(`${baseUrl}/api/payment-methods/${bcaId}/status`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify({ status: "Nonaktif" }),
+      });
+      assert.strictEqual(patchRes.status, 200);
+      const patchJson = (await patchRes.json()) as any;
+      assert.strictEqual(patchJson.success, true);
+      assert.strictEqual(patchJson.data.status, "Nonaktif");
+
+      // 4. Verify historical invoice_payments keeps canonical ID + frozen snapshot while method is Nonaktif
+      const histRow = db
+        .prepare("SELECT metode_pembayaran_id, payment_method_snapshot FROM invoice_payments WHERE payment_id = ?")
+        .get("pay-test-pm-9b") as any;
+      assert.strictEqual(histRow.metode_pembayaran_id, bcaId);
+      assert.strictEqual(JSON.parse(histRow.payment_method_snapshot).bank, bcaBefore.bank);
     });
   } finally {
     server.close();

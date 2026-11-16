@@ -20,6 +20,7 @@ import { dbFinanceRepository } from "../server/src/repositories/dbFinanceReposit
 import { generateToken } from "../server/src/utils/crypto";
 import { ApiFinanceProvider } from "../src/data/api/apiFinanceProvider";
 import { FinanceRepository } from "../src/data/repositories/financeRepository";
+import { permissionStore } from "../src/app/data/permissionStore";
 import type { InvoiceBillingRecord } from "../src/domain/finance/types";
 import {
   ActionApiError,
@@ -72,6 +73,7 @@ function setupMockBrowserStorage() {
   const prevSession = g.sessionStorage;
 
   local.setItem("auth_token", "test-finance-token");
+  local.setItem("auth_user", JSON.stringify({ role: "finance", email: "finance@test.local", nama: "Staff Finance" }));
   g.localStorage = local;
   g.sessionStorage = session;
   g.window = {
@@ -79,11 +81,13 @@ function setupMockBrowserStorage() {
     sessionStorage: session,
     dispatchEvent: () => true,
   };
+  permissionStore.hydrateSession("finance", { notify: false });
 
   return {
     local,
     session,
     restore() {
+      permissionStore.clearSession();
       if (prevWindow === undefined) delete g.window;
       else g.window = prevWindow;
       if (prevLocal === undefined) delete g.localStorage;
@@ -558,16 +562,16 @@ test("HTTP Integration: All 4 financial categories (Belum Bayar, Kurang Bayar, C
     `INSERT INTO users (email, password_hash, password_salt, nama, jabatan, role, status)
      VALUES (?, 'test-hash', 'test-salt', ?, ?, ?, 'Aktif')`
   );
-  const admRowId = Number(insertTestUser.run("adm-fin-int@test.local", "Admin Finance Integration", "ADMINISTRATOR", "administrator").lastInsertRowid);
+  const admRowId = Number(insertTestUser.run("adm-fin-int@test.local", "Admin Finance Integration", "SVP", "administrator").lastInsertRowid);
   const finRowId = Number(insertTestUser.run("fin-int@test.local", "Staff Finance", "FINANCE", "finance").lastInsertRowid);
-  const spvRowId = Number(insertTestUser.run("spv-fin-int@test.local", "Supervisor Finance", "SUPERVISOR", "supervisor").lastInsertRowid);
+  const spvRowId = Number(insertTestUser.run("spv-fin-int@test.local", "Supervisor Finance", "SVP", "svp").lastInsertRowid);
   const msgRowId = Number(insertTestUser.run("msg-fin-int@test.local", "Kurir Lapangan", "MESSENGER", "messenger").lastInsertRowid);
 
   const adminToken = generateToken({
     userId: `usr-${admRowId}`,
     email: "adm-fin-int@test.local",
     nama: "Admin Finance Integration",
-    jabatan: "ADMINISTRATOR",
+    jabatan: "SVP",
     role: "administrator",
   });
   const financeToken = generateToken({
@@ -581,8 +585,8 @@ test("HTTP Integration: All 4 financial categories (Belum Bayar, Kurang Bayar, C
     userId: `usr-${spvRowId}`,
     email: "spv-fin-int@test.local",
     nama: "Supervisor Finance",
-    jabatan: "SUPERVISOR",
-    role: "supervisor",
+    jabatan: "SVP",
+    role: "svp",
   });
   const messengerToken = generateToken({
     userId: `usr-${msgRowId}`,
@@ -728,6 +732,11 @@ test("HTTP Integration: All 4 financial categories (Belum Bayar, Kurang Bayar, C
     assert.strictEqual(classifyActionError(paidPayload).code, "BUSINESS_RULE_VIOLATION");
 
     // Kurang Bayar partial installment -> 200 + idempotency replay + 409 IDEMPOTENCY_CONFLICT
+    const activePm = db
+      .prepare("SELECT id, nama_metode, bank FROM payment_methods WHERE LOWER(status) = 'aktif' LIMIT 1")
+      .get() as { id: string; nama_metode: string; bank: string } | undefined;
+    assert.ok(activePm?.id, "At least one active payment method must exist in isolated DB");
+
     const key = "pay-kurang-key-1";
     const ok1 = await apiCall(
       financeToken,
@@ -736,7 +745,9 @@ test("HTTP Integration: All 4 financial categories (Belum Bayar, Kurang Bayar, C
       {
         amount: 300000,
         details: {
-          metodePembayaran: "Transfer BCA",
+          paymentMethodId: activePm.id,
+          metodePembayaran: activePm.nama_metode,
+          namaBank: activePm.bank || undefined,
           idempotencyKey: key,
           catatan: "Cicilan termin 2",
         },
@@ -750,7 +761,16 @@ test("HTTP Integration: All 4 financial categories (Belum Bayar, Kurang Bayar, C
       financeToken,
       `/finance/invoices/${kurangBayarInv.invoiceId}/pay`,
       "POST",
-      { amount: 300000, details: { metodePembayaran: "Transfer BCA", idempotencyKey: key } },
+      {
+        amount: 300000,
+        details: {
+          paymentMethodId: activePm.id,
+          metodePembayaran: activePm.nama_metode,
+          namaBank: activePm.bank || undefined,
+          idempotencyKey: key,
+          catatan: "Cicilan termin 2",
+        },
+      },
       { "Idempotency-Key": key }
     );
     assert.strictEqual(okReplay.status, 200);
@@ -765,7 +785,15 @@ test("HTTP Integration: All 4 financial categories (Belum Bayar, Kurang Bayar, C
       financeToken,
       `/finance/invoices/${kurangBayarInv.invoiceId}/pay`,
       "POST",
-      { amount: 250000, details: { metodePembayaran: "Transfer BCA", idempotencyKey: key } },
+      {
+        amount: 250000,
+        details: {
+          paymentMethodId: activePm.id,
+          metodePembayaran: activePm.nama_metode,
+          namaBank: activePm.bank || undefined,
+          idempotencyKey: key,
+        },
+      },
       { "Idempotency-Key": key }
     );
     assert.strictEqual(conflictRes.status, 409);

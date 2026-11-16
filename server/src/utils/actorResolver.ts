@@ -12,6 +12,17 @@
 
 import { db } from "../database/db";
 import { TokenPayload } from "./crypto";
+import { parsePositiveDbUserId } from "./canonicalIdentity";
+
+export {
+  parseStrictUserId,
+  parsePositiveDbUserId,
+  normalizeCanonicalUserId,
+  normalizeCanonicalRole,
+  resolveCanonicalRoleFromUser,
+  isCanonicalAdministrator,
+  resolveAuthenticatedDbActor,
+} from "./canonicalIdentity";
 
 /**
  * Resolves the canonical employees.id from the verified authenticated user context.
@@ -35,35 +46,21 @@ export function resolveCanonicalActorEmployeeId(user?: TokenPayload | null): str
     } catch {}
   }
 
-  // 2. Lookup via users table using the authenticated user's email or userId
+  // 2. Lookup via users table using the authenticated user's email or strict numeric userId
   if (user.email || user.userId) {
     try {
       const cleanEmail = user.email ? user.email.trim().toLowerCase() : "";
-      const numericId = user.userId && user.userId.startsWith("usr-") ? Number(user.userId.replace(/^usr-/, "")) : null;
+      const numericId = parsePositiveDbUserId(user.userId);
       const u = db.prepare(`
         SELECT u.employee_id 
         FROM users u 
         JOIN employees e ON u.employee_id = e.id 
-        WHERE (LOWER(u.email) = ? OR u.id = ?) AND u.employee_id IS NOT NULL
-      `).get(cleanEmail, numericId) as { employee_id: string } | undefined;
+        WHERE ((? <> '' AND LOWER(u.email) = ?) OR (? IS NOT NULL AND u.id = ?)) AND u.employee_id IS NOT NULL
+      `).get(cleanEmail, cleanEmail, numericId, numericId) as { employee_id: string } | undefined;
       if (u && u.employee_id) {
         return u.employee_id;
       }
     } catch {}
-  }
-
-  // 3. Fallback check: If userId is formatted like "usr-<id>", check if EMP-000<id> exists in employees
-  if (user.userId && user.userId.startsWith("usr-")) {
-    const numericPart = user.userId.replace(/^usr-/, "");
-    if (/^\d+$/.test(numericPart)) {
-      const formattedEmpId = `EMP-${numericPart.padStart(4, "0")}`;
-      try {
-        const emp = db.prepare("SELECT id FROM employees WHERE id = ?").get(formattedEmpId) as { id: string } | undefined;
-        if (emp && emp.id) {
-          return emp.id;
-        }
-      } catch {}
-    }
   }
 
   return null;

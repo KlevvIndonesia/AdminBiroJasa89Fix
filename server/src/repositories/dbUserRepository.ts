@@ -9,6 +9,12 @@
 
 import { db } from "../database/db";
 import { SystemUser } from "../../../src/domain/user/types";
+import {
+  parsePositiveDbUserId,
+  mapJabatanToCanonicalRole,
+  normalizeCanonicalRole,
+  resolveCanonicalRoleFromUser,
+} from "../utils/canonicalIdentity";
 
 export interface UserEntity {
   id: number;
@@ -27,14 +33,7 @@ export interface UserEntity {
 }
 
 function parseUserId(id: number | string): number | null {
-  if (typeof id === "number") return isNaN(id) ? null : id;
-  const str = String(id).trim();
-  if (str.startsWith("usr-")) {
-    const num = Number(str.replace(/^usr-/, ""));
-    return isNaN(num) ? null : num;
-  }
-  const num = Number(str);
-  return isNaN(num) ? null : num;
+  return parsePositiveDbUserId(id);
 }
 
 export class DbUserRepository {
@@ -230,14 +229,16 @@ export class DbUserRepository {
     tanggal_bergabung?: string;
     jenis_kelamin?: string;
   }): SystemUser {
-    const canonicalRoleMap: Record<string, string> = {
-      SVP: "administrator",
-      ADMIN: "admin",
-      FINANCE: "finance",
-      MESSENGER: "messenger",
-      KURIR: "messenger",
-    };
-    const role = userData.role || canonicalRoleMap[(userData.jabatan || "").toUpperCase().trim()] || "admin";
+    const resolvedRole =
+      (userData.role ? normalizeCanonicalRole(userData.role) : null) ||
+      mapJabatanToCanonicalRole(userData.jabatan);
+    if (!resolvedRole) {
+      throw new Error("Jabatan atau role pengguna harus salah satu dari 4 role kanonikal.");
+    }
+    const role = resolveCanonicalRoleFromUser(userData.jabatan, resolvedRole);
+    if (!role) {
+      throw new Error("Kombinasi jabatan dan role pengguna tidak konsisten.");
+    }
     const avatarUrl = userData.avatar_url || userData.avatarUrl || null;
     const employeeId = userData.employee_id || null;
 
@@ -308,14 +309,7 @@ export class DbUserRepository {
       userFields.push("jabatan = ?");
       userValues.push(updates.jabatan.trim());
       if (updates.role === undefined) {
-        const canonicalRoleMap: Record<string, string> = {
-          SVP: "administrator",
-          ADMIN: "admin",
-          FINANCE: "finance",
-          MESSENGER: "messenger",
-          KURIR: "messenger",
-        };
-        const mapped = canonicalRoleMap[updates.jabatan.trim().toUpperCase()];
+        const mapped = mapJabatanToCanonicalRole(updates.jabatan);
         if (mapped) {
           userFields.push("role = ?");
           userValues.push(mapped);
@@ -323,7 +317,14 @@ export class DbUserRepository {
       }
     }
     if (updates.email !== undefined) { userFields.push("email = ?"); userValues.push(updates.email.trim()); }
-    if (updates.role !== undefined) { userFields.push("role = ?"); userValues.push(updates.role); }
+    if (updates.role !== undefined) {
+      const normalizedRole = normalizeCanonicalRole(updates.role);
+      if (!normalizedRole) {
+        throw new Error(`Role '${updates.role}' tidak valid. Hanya role kanonikal yang diizinkan.`);
+      }
+      userFields.push("role = ?");
+      userValues.push(normalizedRole);
+    }
     if (updates.status !== undefined) { userFields.push("status = ?"); userValues.push(updates.status); }
     if (updates.avatar_url !== undefined || updates.avatarUrl !== undefined || updates.avatar !== undefined) {
       userFields.push("avatar_url = ?"); userValues.push(updates.avatar_url ?? updates.avatarUrl ?? updates.avatar ?? null);

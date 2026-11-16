@@ -3,29 +3,28 @@
  * Admin SUN89 — Biro Jasa Management System
  * 
  * Features:
- * - Direct integration with permissionStore (SSoT)
- * - Role selection: SVP, Admin, Finance, Messenger
+ * - Dynamic RBAC implementation authorized exclusively for SVP
+ * - Role selection: ADMIN and FINANCE in proportional 2-column layout
  * - Fine-grained View (Lihat) & Manage (Kelola) toggles per module
- * - Stage-level action controls for Order Tracking (Stage 4 & Stage 6)
- * - Authoritative "Simpan Hak Akses" persistence with toast "Hak akses berhasil disimpan."
- * - Audit logging of permission changes
- * - "Reset ke Standar" capability
+ * - Explicit Read-Only Default State with "Edit Hak Akses" control
+ * - Draft state isolation with unsaved changes detection
+ * - Role-switching guard dialog with discard confirmation
+ * - Authoritative persistence via PUT /api/permissions/:role
+ * - Concurrency conflict handling and real-time cache refresh
+ * - Immutable SVP protection and anti-escalation security invariants
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
 import { Switch } from "./ui/switch";
 import { Label } from "./ui/label";
 import { Badge } from "./ui/badge";
-import { Separator } from "./ui/separator";
 import {
   Shield,
   ShieldCheck,
-  ShieldAlert,
   Save,
   RotateCcw,
-  Check,
   LayoutDashboard,
   Wallet,
   Database,
@@ -36,6 +35,8 @@ import {
   Loader2,
   AlertTriangle,
   RefreshCw,
+  Sliders,
+  X,
 } from "lucide-react";
 import {
   AlertDialog,
@@ -137,67 +138,145 @@ export function AccessManagement({ currentUserId, currentUserName }: AccessManag
   const { matrix, error, isStale, refresh, resetToDefaults } = usePermissionStore();
 
   const [selectedRole, setSelectedRole] = useState<Role>("admin");
-  const [localPermissions, setLocalPermissions] = useState<RolePermissions>(() =>
-    JSON.parse(JSON.stringify(permissionStore.getRolePermissions("admin")))
+  const [isEditMode, setIsEditMode] = useState<boolean>(false);
+  const [isSaving, setIsSaving] = useState<boolean>(false);
+
+  // Canonical baseline from permissionStore
+  const canonicalPermissions = useMemo<RolePermissions>(() => {
+    const validRole = (["admin", "finance"] as Role[]).includes(selectedRole) ? selectedRole : "admin";
+    return JSON.parse(JSON.stringify(permissionStore.getRolePermissions(validRole)));
+  }, [selectedRole, matrix]);
+
+  // Working draft state for edits
+  const [draftPermissions, setDraftPermissions] = useState<RolePermissions>(() =>
+    JSON.parse(JSON.stringify(canonicalPermissions))
   );
-  const [hasChanges, setHasChanges] = useState(false);
+
+  // Synchronize draft when canonical snapshot changes and not actively in edit mode
+  useEffect(() => {
+    if (!isEditMode) {
+      setDraftPermissions(JSON.parse(JSON.stringify(canonicalPermissions)));
+    }
+  }, [canonicalPermissions, isEditMode]);
+
+  // Compute unsaved changes
+  const hasChanges = useMemo<boolean>(() => {
+    if (!isEditMode) return false;
+    return JSON.stringify(draftPermissions) !== JSON.stringify(canonicalPermissions);
+  }, [draftPermissions, canonicalPermissions, isEditMode]);
+
+  // Role switch confirmation state
+  const [isRoleSwitchModalOpen, setIsRoleSwitchModalOpen] = useState(false);
+  const [pendingTargetRole, setPendingTargetRole] = useState<Role | null>(null);
+
+  // Factory reset dialog state
   const [isResetDialogOpen, setIsResetDialogOpen] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
 
-  // Sync when selectedRole changes or external matrix updates
-  useEffect(() => {
-    const validRole = (["svp", "admin", "finance", "messenger"] as Role[]).includes(selectedRole) ? selectedRole : "admin";
-    if (validRole !== selectedRole) {
-      setSelectedRole(validRole);
-      return;
+  // Attempt role switch
+  const handleRoleSelect = (targetRole: Role) => {
+    if (targetRole === selectedRole) return;
+    if (hasChanges) {
+      setPendingTargetRole(targetRole);
+      setIsRoleSwitchModalOpen(true);
+    } else {
+      setSelectedRole(targetRole);
+      setIsEditMode(false);
     }
-    const canonical = permissionStore.getRolePermissions(validRole);
-    setLocalPermissions(JSON.parse(JSON.stringify(canonical)));
-    setHasChanges(false);
-  }, [selectedRole, matrix]);
-
-  const handleToggleView = (_moduleId: string) => {
-    // View-only static RBAC (BD-RBAC-06)
   };
 
-  const handleToggleManage = (_moduleId: string) => {
-    // View-only static RBAC (BD-RBAC-06)
+  const confirmRoleSwitchDiscard = () => {
+    if (pendingTargetRole) {
+      setSelectedRole(pendingTargetRole);
+    }
+    setIsEditMode(false);
+    setIsRoleSwitchModalOpen(false);
+    setPendingTargetRole(null);
+  };
+
+  const handleToggleView = (moduleId: string) => {
+    if (!isEditMode || isSaving) return;
+    setDraftPermissions((prev) => {
+      const current = prev.modules[moduleId] || { view: false, manage: false };
+      const nextView = !current.view;
+      return {
+        ...prev,
+        modules: {
+          ...prev.modules,
+          [moduleId]: {
+            view: nextView,
+            manage: nextView ? current.manage : false,
+          },
+        },
+      };
+    });
+  };
+
+  const handleToggleManage = (moduleId: string) => {
+    if (!isEditMode || isSaving) return;
+    // Anti-Privilege Escalation: access-management manage is locked to false for non-SVP
+    if (moduleId === "access-management") {
+      toast.warning("Hanya SVP yang berwenang mengelola konfigurasi Hak Akses.");
+      return;
+    }
+
+    setDraftPermissions((prev) => {
+      const current = prev.modules[moduleId] || { view: false, manage: false };
+      const nextManage = !current.manage;
+      return {
+        ...prev,
+        modules: {
+          ...prev.modules,
+          [moduleId]: {
+            view: nextManage ? true : current.view,
+            manage: nextManage,
+          },
+        },
+      };
+    });
+  };
+
+  const handleCancelEdit = () => {
+    setDraftPermissions(JSON.parse(JSON.stringify(canonicalPermissions)));
+    setIsEditMode(false);
+    toast.info("Perubahan sementara dibatalkan.");
   };
 
   const handleSave = async () => {
+    if (!hasChanges || isSaving) return;
     try {
-      await permissionStore.saveRolePermissions(selectedRole, localPermissions);
+      setIsSaving(true);
+      const res = await permissionStore.saveRolePermissions(selectedRole, draftPermissions);
 
       auditLog.log({
         userId: currentUserId || "usr-admin",
-        userName: currentUserName || "Administrator",
+        userName: currentUserName || "Administrator (SVP)",
         userRole: "administrator",
         action: "UPDATE",
         module: "Hak Akses",
-        details: `Memperbarui matriks hak akses untuk role ${selectedRole.toUpperCase()}`,
+        details: `Memperbarui matriks hak akses untuk role ${selectedRole.toUpperCase()} secara dinamis.`,
         metadata: {
           role: selectedRole,
-          permissions: localPermissions,
+          version: res.version,
+          permissions: draftPermissions,
         },
       });
 
-      toast.success("Hak akses berhasil disimpan.");
-      setHasChanges(false);
+      toast.success(`Hak akses untuk role ${selectedRole.toUpperCase()} berhasil disimpan.`);
+      setIsEditMode(false);
     } catch (err: any) {
       toast.error(err.message || "Gagal menyimpan hak akses.");
+    } finally {
+      setIsSaving(false);
     }
-  };
-
-  const handleReset = () => {
-    setIsResetDialogOpen(true);
   };
 
   const handleConfirmReset = async () => {
     try {
       setIsResetting(true);
       await resetToDefaults();
-      toast.success("Hak akses berhasil direset ke standar.");
-      setHasChanges(false);
+      toast.success("Hak akses berhasil direset ke standar pabrik.");
+      setIsEditMode(false);
       setIsResetDialogOpen(false);
     } catch (err: any) {
       toast.error(err.message || "Gagal mereset hak akses.");
@@ -207,27 +286,21 @@ export function AccessManagement({ currentUserId, currentUserName }: AccessManag
   };
 
   const roleMeta: Record<Role, { label: string; desc: string; badge: string; color: string }> = {
-    svp: {
+    administrator: {
       label: "Supervisi & SVP (Administrator)",
       desc: "Akses penuh (Full Access) ke seluruh modul keuangan, master data, konfigurasi hak akses, dan approval supervisi.",
       badge: "Full Privilege",
       color: "border-purple-500 text-purple-600 bg-purple-500/10",
     },
-    administrator: {
-      label: "Administrator",
-      desc: "Identik dengan role SVP.",
-      badge: "Full Privilege",
-      color: "border-purple-500 text-purple-600 bg-purple-500/10",
-    },
     admin: {
       label: "Admin Operasional",
-      desc: "Entri order, operasional dokumen, data karyawan, dan master data. View-only pada Stage 4 (Samsat) & Stage 6 (Supervisi). Tanpa akses Keuangan, Pengguna, dan Hak Akses.",
+      desc: "Akses penuh domain Order, Order Tracking (Stage 1-5 & 7-8), Rekap Order, Master Data, Data Karyawan, dan Messenger. Stage 6 (Supervisi) bersifat eksklusif untuk SVP.",
       badge: "Operasional Loket",
       color: "border-blue-500 text-blue-600 bg-blue-500/10",
     },
     finance: {
       label: "Finance & Kasir",
-      desc: "Akses penuh seluruh modul Keuangan (Profit, Kas Kantor, Kas Messenger, Pengeluaran, Tagihan, Laba Rugi). Tanpa akses mutasi operasional.",
+      desc: "Akses modul Keuangan (Profit, Kas Kantor, Kas Messenger, Pengeluaran, Tagihan, Laba Rugi). Izin dapat disesuaikan secara dinamis oleh SVP.",
       badge: "Financial Control",
       color: "border-emerald-500 text-emerald-600 bg-emerald-500/10",
     },
@@ -261,11 +334,57 @@ export function AccessManagement({ currentUserId, currentUserName }: AccessManag
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          <Badge variant="outline" className="h-8 px-3 text-xs gap-1.5 border-primary/40 bg-primary/5 text-primary font-medium">
-            <ShieldCheck className="w-3.5 h-3.5 text-primary" />
-            <span>Dokumentasi Hak Akses Statis</span>
-          </Badge>
+        {/* CONTROLS AREA: READ-ONLY vs EDIT MODE */}
+        <div className="flex items-center gap-2 self-start sm:self-center">
+          {!isEditMode ? (
+            <>
+              <Badge variant="outline" className="h-8 px-3 text-xs gap-1.5 border-primary/40 bg-primary/5 text-primary font-medium">
+                <ShieldCheck className="w-3.5 h-3.5 text-primary" />
+                <span>Mode Baca (Terkunci)</span>
+              </Badge>
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => setIsEditMode(true)}
+                className="h-8 text-xs gap-1.5 font-medium shadow-xs"
+              >
+                <Sliders className="w-3.5 h-3.5" />
+                <span>Edit Hak Akses</span>
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={isSaving}
+                onClick={handleCancelEdit}
+                className="h-8 text-xs gap-1 text-muted-foreground hover:text-foreground"
+              >
+                <X className="w-3.5 h-3.5" />
+                <span>Batal</span>
+              </Button>
+              <Button
+                variant="default"
+                size="sm"
+                disabled={isSaving || !hasChanges}
+                onClick={handleSave}
+                className="h-8 text-xs gap-1.5 font-medium shadow-xs bg-primary text-primary-foreground"
+              >
+                {isSaving ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Menyimpan...</span>
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-3.5 h-3.5" />
+                    <span>Simpan Hak Akses</span>
+                  </>
+                )}
+              </Button>
+            </>
+          )}
         </div>
       </div>
 
@@ -289,26 +408,15 @@ export function AccessManagement({ currentUserId, currentUserName }: AccessManag
         </div>
       )}
 
-      {/* STATIC RBAC DOCUMENTATION BANNER (BD-RBAC-06) */}
-      <div className="p-3.5 rounded-xl bg-blue-500/10 border border-blue-500/20 flex items-start gap-3 text-xs text-blue-700 dark:text-blue-400">
-        <Info className="w-4 h-4 shrink-0 mt-0.5 text-primary" />
-        <div>
-          <p className="font-semibold text-foreground">Kebijakan Hak Akses Statis (BD-RBAC-06)</p>
-          <p className="text-[11px] text-muted-foreground mt-0.5 leading-relaxed">
-            Matriks hak akses dan kewenangan sistem ditentukan secara terpusat oleh Backend sebagai Single Source of Truth (SSoT). Halaman ini berfungsi sebagai dokumentasi izin aktif untuk setiap role. Pengubahan izin secara dinamis telah dinonaktifkan untuk menjamin integritas tata kelola operasional dan kepatuhan RBAC.
-          </p>
-        </div>
-      </div>
-
-      {/* ROLE SELECTOR TABS (4 CANONICAL ROLES) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
-        {(["svp", "admin", "finance", "messenger"] as Role[]).map((role) => {
+      {/* ROLE SELECTOR TABS (ADMIN & FINANCE) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {(["admin", "finance"] as Role[]).map((role) => {
           const isSelected = selectedRole === role;
           const meta = roleMeta[role];
           return (
             <Card
               key={role}
-              onClick={() => setSelectedRole(role)}
+              onClick={() => handleRoleSelect(role)}
               className={`p-3.5 cursor-pointer transition-all border ${
                 isSelected
                   ? "border-primary bg-primary/5 shadow-xs ring-1 ring-primary/30"
@@ -340,6 +448,7 @@ export function AccessManagement({ currentUserId, currentUserName }: AccessManag
           <div>
             <h3 className="text-xs font-semibold text-foreground">
               Konfigurasi Matriks: <strong className="text-primary">{selectedRole.toUpperCase()}</strong>
+              {isEditMode && <span className="ml-2 text-primary font-medium">(Sedang Diedit)</span>}
             </h3>
             <p className="text-[11px] text-muted-foreground mt-0.5 max-w-2xl">
               {roleMeta[selectedRole].desc}
@@ -348,7 +457,7 @@ export function AccessManagement({ currentUserId, currentUserName }: AccessManag
         </div>
 
         {hasChanges && (
-          <Badge variant="outline" className="bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30 text-xs shrink-0 self-start sm:self-center">
+          <Badge variant="outline" className="bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30 text-xs shrink-0 self-start sm:self-center font-medium">
             Ada Perubahan Belum Disimpan
           </Badge>
         )}
@@ -377,14 +486,19 @@ export function AccessManagement({ currentUserId, currentUserName }: AccessManag
 
               <div className="space-y-2.5 divide-y divide-border/40">
                 {group.modules.map((mod) => {
-                  const perm = localPermissions.modules[mod.id] || { view: false, manage: false };
+                  const perm = draftPermissions.modules[mod.id] || { view: false, manage: false };
+                  const isManageRestricted = mod.id === "access-management";
+
                   return (
                     <div
                       key={mod.id}
                       className="pt-2.5 first:pt-0 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
                     >
                       <div className="space-y-0.5 max-w-xl">
-                        <Label className="text-xs font-medium text-foreground cursor-pointer" onClick={() => handleToggleView(mod.id)}>
+                        <Label
+                          className={`text-xs font-medium text-foreground ${isEditMode ? "cursor-pointer hover:text-primary transition-colors" : ""}`}
+                          onClick={() => handleToggleView(mod.id)}
+                        >
                           {mod.label}
                         </Label>
                         <p className="text-[11px] text-muted-foreground">{mod.description}</p>
@@ -396,7 +510,8 @@ export function AccessManagement({ currentUserId, currentUserName }: AccessManag
                           <span className="text-[10px] sm:hidden text-muted-foreground font-medium">Lihat:</span>
                           <Switch
                             checked={perm.view}
-                            disabled={true}
+                            disabled={!isEditMode || isSaving}
+                            onCheckedChange={() => handleToggleView(mod.id)}
                             aria-label={`View permission for ${mod.label}`}
                           />
                         </div>
@@ -406,7 +521,8 @@ export function AccessManagement({ currentUserId, currentUserName }: AccessManag
                           <span className="text-[10px] sm:hidden text-muted-foreground font-medium">Kelola:</span>
                           <Switch
                             checked={perm.manage}
-                            disabled={true}
+                            disabled={!isEditMode || isSaving || isManageRestricted}
+                            onCheckedChange={() => handleToggleManage(mod.id)}
                             aria-label={`Manage permission for ${mod.label}`}
                           />
                         </div>
@@ -421,12 +537,60 @@ export function AccessManagement({ currentUserId, currentUserName }: AccessManag
       </div>
 
       {/* BOTTOM INFO BAR */}
-      <div className="p-3 sm:p-3.5 bg-card/95 backdrop-blur-md rounded-xl border border-border/80 shadow-xs flex items-center gap-2 text-xs text-muted-foreground">
-        <Info className="w-4 h-4 text-primary shrink-0" />
-        <span>
-          Matriks hak akses bersifat statis dan mengikat seluruh pengguna sesuai role kanonikal masing-masing (SVP, Admin, Finance, Messenger) berdasarkan Backend SSoT.
-        </span>
+      <div className="p-3 sm:p-3.5 bg-card/95 backdrop-blur-md rounded-xl border border-border/80 shadow-xs flex items-center justify-between gap-2 text-xs text-muted-foreground">
+        <div className="flex items-center gap-2">
+          <Info className="w-4 h-4 text-primary shrink-0" />
+          <span>
+            Matriks hak akses role Admin dan Finance dikelola secara dinamis oleh SVP dengan penegakan backend terpusat dan riwayat audit lengkap.
+          </span>
+        </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setIsResetDialogOpen(true)}
+          className="h-7 text-[11px] gap-1 text-muted-foreground hover:text-destructive shrink-0"
+        >
+          <RotateCcw className="w-3 h-3" />
+          Reset Standar
+        </Button>
       </div>
+
+      {/* Confirmation Dialog: Discard Unsaved Changes on Role Switch */}
+      <AlertDialog open={isRoleSwitchModalOpen} onOpenChange={setIsRoleSwitchModalOpen}>
+        <AlertDialogContent className="border-border sm:max-w-md bg-card">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-sm sm:text-base font-semibold text-foreground flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-500" />
+              Perubahan Belum Disimpan
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-xs text-muted-foreground pt-1 space-y-2">
+              <p>
+                Terdapat perubahan konfigurasi hak akses yang belum disimpan untuk role <strong>{selectedRole.toUpperCase()}</strong>.
+              </p>
+              <p className="p-2.5 rounded-lg border border-amber-500/20 bg-amber-500/5 text-amber-700 dark:text-amber-400 text-[11px] font-medium leading-relaxed">
+                Jika Anda beralih ke role lain sekarang, seluruh perubahan yang belum disimpan akan dibuang.
+              </p>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="mt-4 gap-2">
+            <AlertDialogCancel
+              onClick={() => {
+                setIsRoleSwitchModalOpen(false);
+                setPendingTargetRole(null);
+              }}
+              className="text-xs h-8"
+            >
+              Tetap di Sini
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmRoleSwitchDiscard}
+              className="bg-destructive hover:bg-destructive/90 text-destructive-foreground text-xs h-8 font-semibold shadow-xs"
+            >
+              Buang & Ganti Role
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Confirmation Dialog: Reset Hak Akses ke Standar */}
       <AlertDialog open={isResetDialogOpen} onOpenChange={(open) => { if (!open && !isResetting) setIsResetDialogOpen(false); }}>

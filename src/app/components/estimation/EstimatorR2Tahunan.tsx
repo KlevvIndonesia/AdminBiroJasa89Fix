@@ -66,6 +66,7 @@ export function EstimatorR2Tahunan({
 
   // Template Config Dialog
   const [isConfigOpen, setIsConfigOpen] = useState(false);
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [configForm, setConfigForm] = useState({
     koefisienDenda: template.koefisienDenda.toString(),
     biayaJasa: template.biayaJasa.toString(),
@@ -130,33 +131,70 @@ export function EstimatorR2Tahunan({
     setIsConfigOpen(true);
   };
 
-  const handleSaveConfig = () => {
+  const handleSaveConfig = async () => {
+    if (isSavingConfig) return;
     const koef = parseFloat(configForm.koefisienDenda);
     const jasa = parseInt(configForm.biayaJasa, 10);
     const swd = parseInt(configForm.swdklljPokok, 10);
     const dendaSwd = parseInt(configForm.dendaSwdklljPokok, 10);
     const skp = parseInt(configForm.biayaCetakSkp, 10);
 
-    if (isNaN(koef) || koef < 0 || isNaN(jasa) || isNaN(swd) || isNaN(dendaSwd) || isNaN(skp)) {
+    if (
+      isNaN(koef) ||
+      !Number.isFinite(koef) ||
+      koef < 0 ||
+      koef > 1 ||
+      isNaN(jasa) ||
+      jasa < 0 ||
+      isNaN(swd) ||
+      swd < 0 ||
+      isNaN(dendaSwd) ||
+      dendaSwd < 0 ||
+      isNaN(skp) ||
+      skp < 0
+    ) {
       toast.error("Parameter konfigurasi tidak valid!");
       return;
     }
 
-    store.updateTemplateParams(template.id, {
-      koefisienDenda: koef,
-      biayaJasa: jasa,
-      swdklljPokok: swd,
-      dendaSwdklljPokok: dendaSwd,
-      biayaCetakSkp: skp,
-    });
-    setIsConfigOpen(false);
-    toast.success("Konfigurasi template R2 berhasil diperbarui!");
+    setIsSavingConfig(true);
+    try {
+      const res = await store.updateTemplateParamsAsync(template.id, {
+        koefisienDenda: koef,
+        biayaJasa: jasa,
+        swdklljPokok: swd,
+        dendaSwdklljPokok: dendaSwd,
+        biayaCetakSkp: skp,
+      });
+      if (!res.success) {
+        toast.error(res.error || "Gagal menyimpan konfigurasi template R2 ke server!");
+        return;
+      }
+      setIsConfigOpen(false);
+      toast.success("Konfigurasi template R2 berhasil diperbarui!");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Gagal menyimpan konfigurasi template R2.");
+    } finally {
+      setIsSavingConfig(false);
+    }
   };
 
-  const handleResetTemplate = () => {
-    store.resetToDefault(template.id);
-    setIsConfigOpen(false);
-    toast.success("Konfigurasi template R2 dikembalikan ke default Excel.");
+  const handleResetTemplate = async () => {
+    if (isSavingConfig) return;
+    setIsSavingConfig(true);
+    try {
+      const res = await store.resetToDefaultAsync(template.id);
+      if (!res.success) {
+        toast.error(res.error || "Gagal mereset konfigurasi template R2 di server!");
+        return;
+      }
+      setIsConfigOpen(false);
+      toast.success("Konfigurasi template R2 dikembalikan ke default Excel.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Gagal mereset konfigurasi template R2.");
+    } finally {
+      setIsSavingConfig(false);
+    }
   };
 
   return (
@@ -182,6 +220,7 @@ export function EstimatorR2Tahunan({
             type="button"
             variant="outline"
             size="sm"
+            disabled={isSavingConfig}
             onClick={handleOpenConfig}
             className="h-8 text-xs gap-1.5 text-foreground/80 hover:text-foreground"
           >
@@ -192,6 +231,7 @@ export function EstimatorR2Tahunan({
             type="button"
             variant="ghost"
             size="sm"
+            disabled={isSavingConfig}
             onClick={handleResetTemplate}
             className="h-8 text-xs gap-1.5 text-muted-foreground hover:text-foreground"
             title="Reset ke formula default"
@@ -604,7 +644,12 @@ export function EstimatorR2Tahunan({
       </div>
 
       {/* Config Dialog */}
-      <Dialog open={isConfigOpen} onOpenChange={setIsConfigOpen}>
+      <Dialog
+        open={isConfigOpen}
+        onOpenChange={(open) => {
+          if (!isSavingConfig) setIsConfigOpen(open);
+        }}
+      >
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="text-sm font-bold flex items-center gap-2">
@@ -622,6 +667,7 @@ export function EstimatorR2Tahunan({
               <Input
                 type="number"
                 step="0.01"
+                disabled={isSavingConfig}
                 value={configForm.koefisienDenda}
                 onChange={(e) => setConfigForm({ ...configForm, koefisienDenda: e.target.value })}
                 className="h-8 text-xs font-mono"
@@ -631,6 +677,7 @@ export function EstimatorR2Tahunan({
               <Label className="text-xs">Biaya Jasa Motor (default Rp 200.000)</Label>
               <Input
                 type="number"
+                disabled={isSavingConfig}
                 value={configForm.biayaJasa}
                 onChange={(e) => setConfigForm({ ...configForm, biayaJasa: e.target.value })}
                 className="h-8 text-xs font-mono"
@@ -640,6 +687,7 @@ export function EstimatorR2Tahunan({
               <Label className="text-xs">SWDKLLJ Pokok Motor (default Rp 35.000)</Label>
               <Input
                 type="number"
+                disabled={isSavingConfig}
                 value={configForm.swdklljPokok}
                 onChange={(e) => setConfigForm({ ...configForm, swdklljPokok: e.target.value })}
                 className="h-8 text-xs font-mono"
@@ -649,6 +697,7 @@ export function EstimatorR2Tahunan({
               <Label className="text-xs">Denda SWDKLLJ Pokok Motor (default Rp 32.000)</Label>
               <Input
                 type="number"
+                disabled={isSavingConfig}
                 value={configForm.dendaSwdklljPokok}
                 onChange={(e) => setConfigForm({ ...configForm, dendaSwdklljPokok: e.target.value })}
                 className="h-8 text-xs font-mono"
@@ -658,6 +707,7 @@ export function EstimatorR2Tahunan({
               <Label className="text-xs">Biaya Cetak SKP Motor (default Rp 50.000)</Label>
               <Input
                 type="number"
+                disabled={isSavingConfig}
                 value={configForm.biayaCetakSkp}
                 onChange={(e) => setConfigForm({ ...configForm, biayaCetakSkp: e.target.value })}
                 className="h-8 text-xs font-mono"
@@ -670,17 +720,21 @@ export function EstimatorR2Tahunan({
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => setIsConfigOpen(false)}
+              disabled={isSavingConfig}
+              onClick={() => {
+                if (!isSavingConfig) setIsConfigOpen(false);
+              }}
             >
               Batal
             </Button>
             <Button
               type="button"
               size="sm"
+              disabled={isSavingConfig}
               onClick={handleSaveConfig}
               className="bg-emerald-600 hover:bg-emerald-700 text-white"
             >
-              Simpan Konfigurasi
+              {isSavingConfig ? "Menyimpan..." : "Simpan Konfigurasi"}
             </Button>
           </DialogFooter>
         </DialogContent>

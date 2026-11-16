@@ -17,11 +17,23 @@ const badgeVariants = cva(
     variants: {
       variant: {
         default:
-          "border-slate-200 dark:border-slate-700/60 bg-slate-100 dark:bg-slate-800/60 text-slate-700 dark:text-slate-200",
+          "border-status-neutral-border bg-status-neutral-bg text-status-neutral-fg",
+        neutral:
+          "border-status-neutral-border bg-status-neutral-bg text-status-neutral-fg",
+        primary:
+          "border-primary-subtle-border bg-primary-subtle text-primary-subtle-foreground",
+        success:
+          "border-status-success-border bg-status-success-bg text-status-success-fg",
+        warning:
+          "border-status-warning-border bg-status-warning-bg text-status-warning-fg",
+        danger:
+          "border-status-danger-border bg-status-danger-bg text-status-danger-fg",
+        info:
+          "border-status-info-border bg-status-info-bg text-status-info-fg",
         secondary:
           "border-transparent bg-secondary text-secondary-foreground",
         destructive:
-          "border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300",
+          "border-status-error-border bg-status-error-bg text-status-error-fg",
         outline:
           "border-border bg-transparent text-foreground [a&]:hover:bg-accent",
       },
@@ -69,7 +81,7 @@ function Badge({
   const Comp = asChild ? Slot : "span";
   const isStatusBadge = status !== undefined && status !== null;
   const statusClass = isStatusBadge ? getStatusBadgeClass(status) : "";
-  const resolvedVariant = isStatusBadge && !variant ? undefined : variant;
+  const resolvedVariant = isStatusBadge && !variant ? null : variant;
 
   return (
     <Comp

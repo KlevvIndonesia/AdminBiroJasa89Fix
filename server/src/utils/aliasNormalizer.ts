@@ -161,6 +161,17 @@ export const PROTECTED_ROOT_FIELD_DESCRIPTIONS: Record<string, string> = {
   currentStep: "Posisi tahapan order (currentStep) hanya dapat dimajukan atau dimundurkan melalui endpoint /advance atau /rollback.",
   currentStageName: "Nama tahapan order (currentStageName) hanya dapat diubah melalui endpoint /advance atau /rollback.",
   stageBeforeCancel: "Status tahapan sebelum pembatalan dilindungi oleh sistem.",
+  pickupCompleted: "Status penyelesaian penjemputan dokumen hanya dapat diubah melalui endpoint tugas kurir /pickup/complete.",
+  pickupCompletedAt: "Waktu penyelesaian penjemputan dokumen dikelola otomatis oleh sistem.",
+  messengerTaskStatus: "Status tugas kurir hanya dapat diperbarui melalui jadwal resmi atau endpoint tugas kurir.",
+  isScheduled: "Status penjadwalan jemput hanya dapat ditetapkan melalui form penjadwalan dengan tanggal dan kurir yang valid.",
+  samsatStatus: "Status proses Samsat hanya dapat dimutasi melalui penjadwalan resmi atau endpoint /samsat/*.",
+  samsatCompletedAt: "Waktu penyelesaian Samsat dikelola otomatis oleh sistem.",
+  samsatPickupStatus: "Status jemput hasil Samsat hanya dapat dimutasi melalui penugasan resmi atau endpoint /samsat-pickup/*.",
+  samsatPickupCompletedAt: "Waktu jemput hasil Samsat dikelola otomatis oleh sistem.",
+  deliveryStatus: "Status pengantaran dokumen hanya dapat dimutasi melalui penjadwalan resmi atau endpoint /delivery/*.",
+  deliveryCompletedAt: "Waktu penyelesaian pengantaran dokumen dikelola otomatis oleh sistem.",
+  isReceived: "Status penerimaan dokumen hanya dapat ditetapkan melalui endpoint penyelesaian pengantaran /delivery/complete.",
 
   // Order Identity & Lifecycle
   orderNo: "Nomor order bersifat immutable dan tidak dapat diubah.",
@@ -257,6 +268,30 @@ export const PROTECTED_ROOT_ALIASES_MAP: Record<string, string> = {
   stage_name: "currentStageName",
   stageBeforeCancel: "stageBeforeCancel",
   stage_before_cancel: "stageBeforeCancel",
+
+  // Operational workflow completion & status protection
+  pickupCompleted: "pickupCompleted",
+  pickup_completed: "pickupCompleted",
+  pickupCompletedAt: "pickupCompletedAt",
+  pickup_completed_at: "pickupCompletedAt",
+  messengerTaskStatus: "messengerTaskStatus",
+  messenger_task_status: "messengerTaskStatus",
+  isScheduled: "isScheduled",
+  is_scheduled: "isScheduled",
+  samsatStatus: "samsatStatus",
+  samsat_status: "samsatStatus",
+  samsatCompletedAt: "samsatCompletedAt",
+  samsat_completed_at: "samsatCompletedAt",
+  samsatPickupStatus: "samsatPickupStatus",
+  samsat_pickup_status: "samsatPickupStatus",
+  samsatPickupCompletedAt: "samsatPickupCompletedAt",
+  samsat_pickup_completed_at: "samsatPickupCompletedAt",
+  deliveryStatus: "deliveryStatus",
+  delivery_status: "deliveryStatus",
+  deliveryCompletedAt: "deliveryCompletedAt",
+  delivery_completed_at: "deliveryCompletedAt",
+  isReceived: "isReceived",
+  is_received: "isReceived",
 
   // Identity & lifecycle
   orderNo: "orderNo",
@@ -464,13 +499,65 @@ export function assertNoProtectedFieldViolations(body: Record<string, any>, user
   }
 
   const isAuthorizedRole = Boolean(
-    user?.role && ["administrator", "admin", "finance", "svp"].includes(user.role.toLowerCase().trim())
+    user?.role && ["administrator", "admin", "finance"].includes(user.role.toLowerCase().trim())
+  );
+  const isOperationalOrderRole = Boolean(
+    user?.role && ["administrator", "admin"].includes(user.role.toLowerCase().trim())
   );
 
   // 1. Root fields check
   for (const [key, val] of Object.entries(body)) {
     if (val !== undefined && key in PROTECTED_ROOT_ALIASES_MAP) {
       const canonical = PROTECTED_ROOT_ALIASES_MAP[key];
+
+      // Legitimate Admin/SVP scheduling transitions via PUT /orders/:orderNo are strictly bounded
+      // to scheduling states only (never completion/in-progress/handover states) alongside valid assignment fields.
+      if (isOperationalOrderRole) {
+        if (
+          canonical === "isScheduled" &&
+          val === true &&
+          Boolean(body.tanggalJemput || body.tanggal_jemput) &&
+          Boolean(body.assignedMessengerId || body.assigned_messenger_id || body.messenger)
+        ) {
+          continue;
+        }
+        if (
+          canonical === "messengerTaskStatus" &&
+          typeof val === "string" &&
+          val.trim() === "Terjadwal Jemput" &&
+          Boolean(body.tanggalJemput || body.tanggal_jemput) &&
+          Boolean(body.assignedMessengerId || body.assigned_messenger_id || body.messenger)
+        ) {
+          continue;
+        }
+        if (
+          canonical === "samsatStatus" &&
+          typeof val === "string" &&
+          val.trim() === "Terjadwal Samsat" &&
+          Boolean(body.tanggalProsesSamsat || body.tanggal_proses_samsat) &&
+          Boolean(body.samsatMessengerId || body.samsat_messenger_id || body.samsatMessenger)
+        ) {
+          continue;
+        }
+        if (
+          canonical === "samsatPickupStatus" &&
+          typeof val === "string" &&
+          val.trim() === "Terjadwal Jemput Samsat" &&
+          Boolean(body.samsatPickupDate || body.samsat_pickup_date) &&
+          Boolean(body.samsatPickupMessengerId || body.samsat_pickup_messenger_id || body.samsatPickupMessengerNama)
+        ) {
+          continue;
+        }
+        if (
+          canonical === "deliveryStatus" &&
+          typeof val === "string" &&
+          val.trim() === "Terjadwal Antar" &&
+          Boolean(body.tanggalPengantaran || body.tanggal_pengantaran) &&
+          Boolean(body.messengerPengantar || body.deliveryMessengerId || body.assignedMessengerId || body.assignedMessengerName)
+        ) {
+          continue;
+        }
+      }
 
       // If authorized staff (admin/finance/svp) updates operational & financial parameters via authorized edit form, permit financial fields
       if (isAuthorizedRole) {

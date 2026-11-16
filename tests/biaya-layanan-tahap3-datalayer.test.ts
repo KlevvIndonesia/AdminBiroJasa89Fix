@@ -1,42 +1,85 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
+import { createApp } from "../server/src/app";
 import { pricingStore } from "../src/app/data/pricingStore";
 import { pricingRepository } from "../src/data/repositories/pricingRepository";
-import { MockPricingProvider } from "./fixtures/mock/mockPricingProvider";
+import { ApiPricingProvider } from "../src/data/api/apiPricingProvider";
+import type { IPricingDataProvider } from "../src/domain/pricing/types";
+
+function startTestServer(): Promise<{ server: http.Server; baseUrl: string }> {
+  return new Promise((resolve) => {
+    const app = createApp();
+    const server = http.createServer(app);
+    server.listen(0, () => {
+      const addr = server.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      resolve({ server, baseUrl: `http://localhost:${port}` });
+    });
+  });
+}
+
+async function loginAsSvp(baseUrl: string): Promise<string> {
+  const res = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "svp@birojasa.com", password: "admin123" }),
+  });
+  assert.strictEqual(res.status, 200);
+  const body = (await res.json()) as any;
+  return body.data.token;
+}
 
 test("Biaya Layanan Tahap 3: Frontend Data Layer & SSoT Synchronization Verification", async (t) => {
   const serviceId = "svc-perp-1th";
   const serviceName = "Perpanjangan 1 Tahun";
+  const { server, baseUrl } = await startTestServer();
+  const prevToken = process.env.AUTH_TOKEN;
 
-  await t.test("1. pricingRepository delegation to provider", async () => {
-    let calledParams: any = null;
-    const mockProvider = new MockPricingProvider();
-    mockProvider.batchReplicateServicePricing = async (params: any) => {
-      calledParams = params;
-      const isOverwrite = params.overridePolicy === "OVERWRITE_ALL";
-      const preservedCount = isOverwrite ? 0 : 15;
-      const updatedCount = isOverwrite ? 515 : 500;
-      return { success: true, updatedCount, preservedCount, totalCount: 515 };
-    };
+  try {
+    const token = await loginAsSvp(baseUrl);
+    process.env.AUTH_TOKEN = token;
 
-    pricingRepository.setProvider(mockProvider);
+    await t.test("1. pricingRepository delegation to provider", async () => {
+      let calledParams: any = null;
+      const providerDouble: IPricingDataProvider = {
+        getSamsatItems: () => [],
+        getSamsatItemById: () => undefined,
+        updateSamsatItem: () => false,
+        addSamsatItem: () => {
+          throw new Error("Unused");
+        },
+        subscribe: () => () => {},
+        batchReplicateServicePricing: async (params: any) => {
+          calledParams = params;
+          const isOverwrite = params.overridePolicy === "OVERWRITE_ALL";
+          const preservedCount = isOverwrite ? 0 : 15;
+          const updatedCount = isOverwrite ? 515 : 500;
+          return { success: true, updatedCount, preservedCount, totalCount: 515 };
+        },
+      };
 
-    const testPayload = {
-      serviceId,
-      serviceName,
-      sourceConfig: { biayaJasaLengkap: 260000, jasaLengkapEnabled: true },
-      scope: { applyBiayaLayanan: true, applyBiayaTambahan: false, applyBiayaLainnya: false },
-      overridePolicy: "PRESERVE_EXISTING_CUSTOM" as const,
-    };
+      pricingRepository.setProvider(providerDouble);
+      const testPayload = {
+        serviceId,
+        serviceName,
+        sourceConfig: { biayaJasaLengkap: 260000, jasaLengkapEnabled: true },
+        scope: { applyBiayaLayanan: true, applyBiayaTambahan: false, applyBiayaLainnya: false },
+        overridePolicy: "PRESERVE_EXISTING_CUSTOM" as const,
+      };
 
-    const res = await pricingRepository.batchReplicateServicePricing(testPayload);
-    assert.equal(res.success, true);
-    assert.equal(res.updatedCount, 500);
-    assert.equal(res.preservedCount, 15);
-    assert.deepEqual(calledParams, testPayload);
-  });
+      const res = await pricingRepository.batchReplicateServicePricing(testPayload);
+      assert.equal(res.success, true);
+      assert.equal(res.updatedCount, 500);
+      assert.equal(res.preservedCount, 15);
+      assert.deepEqual(calledParams, testPayload);
+    });
 
-  await t.test("2. pricingStore.applyConfigToAllSamsats with PRESERVE_EXISTING_CUSTOM", async () => {
+    const apiPricing = new ApiPricingProvider(`${baseUrl}/api`);
+    await apiPricing.initFromApi();
+    pricingRepository.setProvider(apiPricing);
+
+    await t.test("2. pricingStore.applyConfigToAllSamsats with PRESERVE_EXISTING_CUSTOM", async () => {
     const rows = pricingStore.getBiayaLayananRows().filter((r) => r.layanan === serviceName);
     assert.ok(rows.length > 5, "Rows should exist for " + serviceName);
 
@@ -133,4 +176,9 @@ test("Biaya Layanan Tahap 3: Frontend Data Layer & SSoT Synchronization Verifica
     assert.equal(customRowAfter.biayaJasa, 290000, "Overwritten row biayaJasa must now be 290000");
     assert.equal(customRowAfter.biayaAntarJemput, 60000);
   });
+  } finally {
+    process.env.AUTH_TOKEN = prevToken;
+    pricingRepository.setProvider(new ApiPricingProvider());
+    server.close();
+  }
 });

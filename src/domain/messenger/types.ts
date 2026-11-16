@@ -281,18 +281,6 @@ export interface MessengerHistoryItem {
   rawOrder: OperationalOrder;
 }
 
-export const KNOWN_MESSENGERS = [
-  "Ahmad Rizki",
-  "Budi Santoso",
-  "Citra Dewi",
-  "Dedi Cahyadi",
-  "Eko Prasetyo",
-  "Fandi Kurniawan",
-  "Gilang Ramadhan",
-  "Hendra Wijaya",
-  "Andi Pratama",
-] as const;
-
 // Helper to map code to display label
 export function getStatusDisplayLabel(status: MessengerTaskStatusCode | MessengerTaskStatus): string {
   switch (status) {

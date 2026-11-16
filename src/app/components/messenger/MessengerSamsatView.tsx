@@ -57,7 +57,7 @@ import {
   releaseSamsatTaskAction,
   startSamsatJourney,
   arriveAtSamsat,
-  updateSamsatSubprogress,
+  updateSamsatSubprogressAction,
   SAMSAT_WAITING_REASONS,
   getMasterSamsatComponents,
   acceptMessengerTaskAction,
@@ -141,6 +141,8 @@ export function MessengerSamsatView({
   const [selectedDurationMinutes, setSelectedDurationMinutes] = useState<number>(15);
   const [isCustomDaysActive, setIsCustomDaysActive] = useState(false);
   const [customDaysInputValue, setCustomDaysInputValue] = useState<string>("2");
+  const [isStartingComponent, setIsStartingComponent] = useState(false);
+  const [startingSamsatOrderNo, setStartingSamsatOrderNo] = useState<string | null>(null);
 
   // Finish Component Confirmation Dialog State
   const [isFinishConfirmOpen, setIsFinishConfirmOpen] = useState(false);
@@ -268,8 +270,8 @@ export function MessengerSamsatView({
   };
 
   // Confirm duration and start process
-  const handleConfirmStartProcess = () => {
-    if (!startProcessOrderNo || !startProcessComp) return;
+  const handleConfirmStartProcess = async () => {
+    if (!startProcessOrderNo || !startProcessComp || isStartingComponent) return;
 
     let finalMinutes = selectedDurationMinutes;
     let isCustom = false;
@@ -286,33 +288,46 @@ export function MessengerSamsatView({
       customDays = days;
     }
 
-    const res = updateMessengerComponent(
-      startProcessOrderNo,
-      startProcessComp.componentId,
-      {
-        status: "IN_PROGRESS",
-        estimatedDurationMinutes: finalMinutes,
-        isCustomDuration: isCustom,
-        customDurationDays: customDays,
-        startedAt: new Date().toISOString(),
-      },
-      currentUser
-    );
+    setIsStartingComponent(true);
+    try {
+      const res = await updateSamsatSubprogressAction(
+        startProcessOrderNo,
+        {
+          subprogress: startProcessComp.name,
+          componentId: startProcessComp.componentId,
+          componentUpdate: {
+            name: startProcessComp.name,
+            category: startProcessComp.category,
+            masterPrice: startProcessComp.masterPrice,
+            nominal: startProcessComp.nominal,
+            actualOrderPrice: startProcessComp.actualOrderPrice,
+            isCustom: startProcessComp.isCustom,
+            status: "IN_PROGRESS",
+            estimatedDurationMinutes: finalMinutes,
+            isCustomDuration: isCustom,
+            customDurationDays: customDays,
+            startedAt: new Date().toISOString(),
+          },
+        },
+        currentUser
+      );
 
-    if (res.success) {
-      updateSamsatSubprogress(startProcessOrderNo, startProcessComp.name, currentUser);
-      const durText =
-        finalMinutes === 15
-          ? "Segera (< 30 Menit)"
-          : finalMinutes >= 1440
-          ? `${Math.floor(finalMinutes / 1440)} Hari`
-          : `${Math.floor(finalMinutes / 60)} Jam`;
-      toast.success(`Proses "${startProcessComp.name}" dimulai (Estimasi: ${durText})!`);
-      setIsStartProcessOpen(false);
-      setStartProcessOrderNo(null);
-      setStartProcessComp(null);
-    } else {
-      toast.error(res.error || "Gagal memulai proses komponen");
+      if (res.success) {
+        const durText =
+          finalMinutes === 15
+            ? "Segera (< 30 Menit)"
+            : finalMinutes >= 1440
+            ? `${Math.floor(finalMinutes / 1440)} Hari`
+            : `${Math.floor(finalMinutes / 60)} Jam`;
+        toast.success(`Proses "${startProcessComp.name}" dimulai (Estimasi: ${durText})!`);
+        setIsStartProcessOpen(false);
+        setStartProcessOrderNo(null);
+        setStartProcessComp(null);
+      } else {
+        toast.error(res.error || "Gagal memulai proses komponen");
+      }
+    } finally {
+      setIsStartingComponent(false);
     }
   };
 
@@ -497,8 +512,8 @@ export function MessengerSamsatView({
   };
 
   // Journey handlers
-  const handleStartJourney = (orderNo: string) => {
-    const res = startSamsatJourney(orderNo, currentUser);
+  const handleStartJourney = async (orderNo: string) => {
+    const res = await startSamsatJourney(orderNo, currentUser);
     if (res.success) {
       toast.success(`Perjalanan ke Samsat dimulai untuk order ${orderNo}!`);
     } else {
@@ -508,16 +523,22 @@ export function MessengerSamsatView({
 
   // Start Samsat Process (Scope 1)
   const handleStartSamsatProcess = async (orderNo: string) => {
-    const res = await startSamsatProcessAction(orderNo, currentUser);
-    if (res.success) {
-      toast.success("Proses Samsat dimulai! Seluruh komponen loket kini siap dikelola.");
-    } else {
-      toast.error(res.error || "Gagal memulai proses Samsat");
+    if (startingSamsatOrderNo === orderNo) return;
+    setStartingSamsatOrderNo(orderNo);
+    try {
+      const res = await startSamsatProcessAction(orderNo, currentUser);
+      if (res.success) {
+        toast.success("Proses Samsat dimulai! Seluruh komponen loket kini siap dikelola.");
+      } else {
+        toast.error(res.error || "Gagal memulai proses Samsat");
+      }
+    } finally {
+      setStartingSamsatOrderNo(null);
     }
   };
 
-  const handleArriveAtSamsat = (orderNo: string) => {
-    const res = arriveAtSamsat(orderNo, currentUser);
+  const handleArriveAtSamsat = async (orderNo: string) => {
+    const res = await arriveAtSamsat(orderNo, currentUser);
     if (res.success) {
       toast.success(`Tiba di Samsat! Order ${orderNo} siap diproses di loket.`);
     } else {
@@ -536,7 +557,7 @@ export function MessengerSamsatView({
     setIsSavingProgress(true);
     try {
       if (saveProgressReleaseToPool) {
-        const res = releaseSamsatTaskAction(
+        const res = await releaseSamsatTaskAction(
           currentSelectedTask.orderNo,
           currentUser
         );
@@ -594,7 +615,7 @@ export function MessengerSamsatView({
 
     try {
       // 1. Mark Samsat completed
-      const completeRes = completeSamsatProcess(finishSamsatOrderNo, currentUser);
+      const completeRes = await completeSamsatProcess(finishSamsatOrderNo, currentUser);
       if (!completeRes.success) {
         toast.error(completeRes.error || "Gagal menyelesaikan proses Samsat");
         return;
@@ -1170,11 +1191,12 @@ export function MessengerSamsatView({
           {!isProcessStarted ? (
             <Button
               size="default"
+              disabled={startingSamsatOrderNo === task.orderNo}
               onClick={() => handleStartSamsatProcess(task.orderNo)}
               className="w-full h-12 min-h-[48px] rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-bold text-sm sm:text-base flex items-center justify-center gap-2 shadow-sm transition-all"
             >
               <Play className="w-5 h-5 fill-current" />
-              <span>Mulai Proses Samsat</span>
+              <span>{startingSamsatOrderNo === task.orderNo ? "Memulai Proses..." : "Mulai Proses Samsat"}</span>
             </Button>
           ) : (
             <div className="flex items-center justify-between gap-2">
@@ -1392,6 +1414,7 @@ export function MessengerSamsatView({
               <Button
                 type="button"
                 variant="outline"
+                disabled={isStartingComponent}
                 onClick={() => setIsStartProcessOpen(false)}
                 className="min-h-[40px] text-xs sm:text-sm rounded-xl"
               >
@@ -1399,11 +1422,12 @@ export function MessengerSamsatView({
               </Button>
               <Button
                 type="button"
+                disabled={isStartingComponent}
                 onClick={handleConfirmStartProcess}
                 className="bg-primary text-primary-foreground font-bold min-h-[40px] text-xs sm:text-sm px-5 rounded-xl shadow-xs"
               >
                 <Play className="w-4 h-4 mr-1.5 fill-current" />
-                Mulai Proses
+                {isStartingComponent ? "Memproses..." : "Mulai Proses"}
               </Button>
             </DialogFooter>
           </div>

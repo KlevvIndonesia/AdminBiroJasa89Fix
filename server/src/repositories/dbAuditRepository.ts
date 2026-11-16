@@ -59,8 +59,9 @@ export class DbAuditRepository {
     }));
   }
 
-  public save(log: AuditLogRecord): void {
-    const stmt = (db as any).prepare(`
+  public save(log: AuditLogRecord, targetDb?: any): void {
+    const activeDb = targetDb ?? db;
+    const stmt = (activeDb as any).prepare(`
       INSERT INTO audit_logs (id, user_id, user_name, user_role, action, module, details, metadata_json, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);

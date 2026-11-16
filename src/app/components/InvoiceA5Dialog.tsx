@@ -224,14 +224,14 @@ Terima kasih.`;
                     alt="Logo Biro Jasa SUN89"
                     className="h-12 w-auto object-contain object-left mb-0.5"
                   />
-                  <p className="text-[9px] font-semibold text-slate-700 uppercase tracking-wide leading-tight">
-                    Jasa Pengurusan Dokumen Samsat &amp; Kendaraan Bermotor
+                  <p className="text-[9px] font-semibold text-slate-700 leading-tight">
+                    Jasa Pengurusan Dokumen Kendaraan
                   </p>
                   <p className="text-[9px] text-slate-500 leading-tight">
-                    Jl. Raya Sukahati No. 6, Kel. Sukahati, Kec. Cibinong, Bogor
+                    Jl. Muara Beres No.06, Sukahati, Kec. Cibinong, Bogor
                   </p>
                   <p className="text-[9px] text-slate-500 font-mono leading-tight">
-                    Telp / WhatsApp: 0812-3456-7890 • 021-83715981
+                    Telp / WhatsApp: 0812-1980-1888
                   </p>
                 </div>
 
@@ -262,20 +262,23 @@ Terima kasih.`;
               </div>
 
               {/* CLIENT & VEHICLE INFORMATION CARD */}
-              <div className="grid grid-cols-2 gap-2 my-2.5 p-2.5 bg-slate-50 rounded border border-slate-200 text-[10px]">
-                <div>
+              <div className="grid grid-cols-2 gap-3 my-2.5 p-2.5 bg-slate-50 rounded border border-slate-200 text-[10px]">
+                <div className="min-w-0">
                   <p className="text-slate-500 uppercase font-semibold text-[8px] tracking-wider mb-0.5">Informasi Customer</p>
-                  <p className="font-bold text-slate-900 text-xs">{customer}</p>
-                  <p className="text-slate-600">Pemilik STNK/BPKB: <strong className="text-slate-800">{namaPemilik}</strong></p>
-                  {data.nomorHP && <p className="text-slate-600 font-mono">Kontak: {data.nomorHP}</p>}
+                  <p className="font-bold text-slate-900 text-xs break-words">{customer}</p>
+                  <div className="mt-1 space-y-0.5">
+                    <p className="text-[9px] text-slate-500 leading-tight">Pemilik STNK/BPKB:</p>
+                    <p className="text-[10.5px] font-semibold text-slate-800 leading-snug break-words">{namaPemilik}</p>
+                  </div>
+                  {data.nomorHP && <p className="text-slate-600 font-mono mt-0.5 break-words">Kontak: {data.nomorHP}</p>}
                 </div>
-                <div className="text-right">
+                <div className="min-w-0 text-right">
                   <p className="text-slate-500 uppercase font-semibold text-[8px] tracking-wider mb-0.5">Detail Kendaraan &amp; Layanan</p>
                   <div className="inline-block bg-slate-900 text-white font-mono font-bold text-xs px-2 py-0.5 rounded tracking-widest mb-1">
                     {nopol.toUpperCase()}
                   </div>
-                  <p className="font-semibold text-slate-800">{layanan}</p>
-                  <p className="text-slate-500">Wilayah: {samsat}</p>
+                  <p className="font-semibold text-slate-800 break-words">{layanan}</p>
+                  <p className="text-[8.5px] text-slate-500 leading-tight mt-0.5 break-words">Wilayah: {samsat}</p>
                 </div>
               </div>
 

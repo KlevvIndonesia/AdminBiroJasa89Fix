@@ -18,9 +18,11 @@ test("Phase B2: Financial Logic Correction & Reconciliation Test Suite", async (
   };
 
   const spvUser = {
-    userId: "usr-spv-b2",
+    id: "usr-1",
+    userId: "usr-1",
     nama: "SPV B2",
-    role: "supervisor",
+    role: "administrator",
+    jabatan: "SVP",
     email: "spv@birojasa.com",
   };
 
@@ -44,15 +46,29 @@ test("Phase B2: Financial Logic Correction & Reconciliation Test Suite", async (
         completenessStatus: "COMPLETE",
       },
       payment: {
+        tipePembayaran: "Bayar di Awal",
         totalBiaya: 1000000,
         dibayar: 1000000,
         metodePembayaran: "Transfer Bank",
-        isPaymentVerified: true,
+        isPaymentVerified: false,
       },
     };
 
     const order = orderService.createOrder(orderPayload, adminUser);
+    const pendingInvoice = dbFinanceRepository.getInvoiceByOrderNo(order.orderNo);
+    assert.ok(pendingInvoice, "Invoice harus berhasil dibuat");
+    assert.strictEqual(pendingInvoice.dibayar, 0, "Unverified payment must have dibayar === 0 prior to verification");
+    assert.strictEqual(pendingInvoice.status, "UNPAID", "Unverified payment must remain UNPAID prior to verification");
+
+    financeService.verifyPayment({
+      orderNo: order.orderNo,
+      confirmedAmount: 1000000,
+      user: spvUser,
+      proofPayload: { fileName: "bukti_exact.jpg", fileType: "image" },
+    });
+
     const invoice = dbFinanceRepository.getInvoiceByOrderNo(order.orderNo);
+    const verifiedOrder = dbOrderRepository.getByOrderNo(order.orderNo)!;
 
     assert.ok(invoice, "Invoice harus berhasil dibuat");
     assert.strictEqual(invoice.totalTagihan, 1000000);
@@ -62,8 +78,8 @@ test("Phase B2: Financial Logic Correction & Reconciliation Test Suite", async (
     assert.strictEqual(invoice.status, "PAID");
     assert.strictEqual(invoice.settlementCondition, "BALANCED");
     assert.strictEqual(invoice.refundStatus, "NONE");
-    assert.strictEqual(order.payment.statusPembayaran, "Lunas");
-    assert.strictEqual(order.payment.kurang, 0);
+    assert.strictEqual(verifiedOrder.payment.statusPembayaran, "Lunas");
+    assert.strictEqual(verifiedOrder.payment.kurang, 0);
   });
 
   await t.test("Scenario 2: Order dengan pembayaran sebagian (partial payment)", () => {
@@ -86,6 +102,7 @@ test("Phase B2: Financial Logic Correction & Reconciliation Test Suite", async (
         completenessStatus: "COMPLETE",
       },
       payment: {
+        tipePembayaran: "Bayar di Awal",
         totalBiaya: 1000000,
         dibayar: 400000,
         metodePembayaran: "Transfer Bank",
@@ -93,7 +110,20 @@ test("Phase B2: Financial Logic Correction & Reconciliation Test Suite", async (
     };
 
     const order = orderService.createOrder(orderPayload, adminUser);
+    const pendingInvoice = dbFinanceRepository.getInvoiceByOrderNo(order.orderNo);
+    assert.ok(pendingInvoice, "Invoice harus berhasil dibuat");
+    assert.strictEqual(pendingInvoice.dibayar, 0);
+    assert.strictEqual(pendingInvoice.status, "UNPAID");
+
+    financeService.verifyPayment({
+      orderNo: order.orderNo,
+      confirmedAmount: 400000,
+      user: spvUser,
+      proofPayload: { fileName: "bukti_partial.jpg", fileType: "image" },
+    });
+
     const invoice = dbFinanceRepository.getInvoiceByOrderNo(order.orderNo);
+    const verifiedOrder = dbOrderRepository.getByOrderNo(order.orderNo)!;
 
     assert.ok(invoice, "Invoice harus berhasil dibuat");
     assert.strictEqual(invoice.totalTagihan, 1000000);
@@ -103,8 +133,8 @@ test("Phase B2: Financial Logic Correction & Reconciliation Test Suite", async (
     assert.strictEqual(invoice.status, "PARTIAL");
     assert.strictEqual(invoice.settlementCondition, "UNDERPAID");
     assert.strictEqual(invoice.refundStatus, "NONE");
-    assert.strictEqual(order.payment.statusPembayaran, "Kurang");
-    assert.strictEqual(order.payment.kurang, 600000);
+    assert.strictEqual(verifiedOrder.payment.statusPembayaran, "Kurang Bayar");
+    assert.strictEqual(verifiedOrder.payment.kurang, 600000);
   });
 
   await t.test("Scenario 3: Order dengan pembayaran lebih (overpayment)", () => {
@@ -127,6 +157,7 @@ test("Phase B2: Financial Logic Correction & Reconciliation Test Suite", async (
         completenessStatus: "COMPLETE",
       },
       payment: {
+        tipePembayaran: "Bayar di Awal",
         totalBiaya: 862000,
         dibayar: 10000000, // Bayar 10 juta untuk tagihan 862 ribu
         metodePembayaran: "Transfer Bank",
@@ -134,7 +165,21 @@ test("Phase B2: Financial Logic Correction & Reconciliation Test Suite", async (
     };
 
     const order = orderService.createOrder(orderPayload, adminUser);
+    const pendingInvoice = dbFinanceRepository.getInvoiceByOrderNo(order.orderNo);
+    assert.ok(pendingInvoice, "Invoice harus berhasil dibuat");
+    assert.strictEqual(pendingInvoice.dibayar, 0);
+    assert.strictEqual(pendingInvoice.status, "UNPAID");
+
+    financeService.verifyPayment({
+      orderNo: order.orderNo,
+      confirmedAmount: 10000000,
+      user: spvUser,
+      proofPayload: { fileName: "bukti_overpay.jpg", fileType: "image" },
+    });
+    dbFinanceRepository.updateInvoice(pendingInvoice.id, { refundStatus: "PENDING" });
+
     const invoice = dbFinanceRepository.getInvoiceByOrderNo(order.orderNo);
+    const verifiedOrder = dbOrderRepository.getByOrderNo(order.orderNo)!;
 
     assert.ok(invoice, "Invoice harus berhasil dibuat");
     assert.strictEqual(invoice.totalTagihan, 862000);
@@ -144,8 +189,8 @@ test("Phase B2: Financial Logic Correction & Reconciliation Test Suite", async (
     assert.strictEqual(invoice.status, "OVERPAID");
     assert.strictEqual(invoice.settlementCondition, "OVERPAID");
     assert.strictEqual(invoice.refundStatus, "PENDING");
-    assert.strictEqual(order.payment.statusPembayaran, "Kelebihan Bayar");
-    assert.strictEqual(order.payment.overpayment, 9138000);
+    assert.strictEqual(verifiedOrder.payment.statusPembayaran, "Lunas");
+    assert.strictEqual(verifiedOrder.payment.overpayment, 9138000);
   });
 
   await t.test("Scenario 4: Overpayment tidak menambah profit perusahaan", () => {
@@ -168,12 +213,24 @@ test("Phase B2: Financial Logic Correction & Reconciliation Test Suite", async (
         completenessStatus: "COMPLETE",
       },
       payment: {
+        tipePembayaran: "Bayar di Awal",
         totalBiaya: 862000,
         dibayar: 10000000,
       },
     };
 
     const order = orderService.createOrder(orderPayload, adminUser);
+    const pendingInvoice = dbFinanceRepository.getInvoiceByOrderNo(order.orderNo)!;
+    assert.strictEqual(pendingInvoice.dibayar, 0);
+    assert.strictEqual(pendingInvoice.profit, 0);
+
+    financeService.verifyPayment({
+      orderNo: order.orderNo,
+      confirmedAmount: 10000000,
+      user: spvUser,
+      proofPayload: { fileName: "bukti_profit.jpg", fileType: "image" },
+    });
+
     const invoice = dbFinanceRepository.getInvoiceByOrderNo(order.orderNo);
 
     assert.ok(invoice);
@@ -230,6 +287,26 @@ test("Phase B2: Financial Logic Correction & Reconciliation Test Suite", async (
       bank: "BCA",
       catatan: "Cicilan 2",
     }, adminUser);
+
+    // Sebelum verifikasi, invoice masih UNPAID / dibayar 0
+    const invBeforeVerif = dbFinanceRepository.getInvoiceById(invoice.id)!;
+    assert.strictEqual(invBeforeVerif.dibayar, 0);
+    assert.strictEqual(invBeforeVerif.status, "UNPAID");
+
+    const pendingPayments = dbFinanceRepository.getPaymentsByInvoiceNo(invoice.invoiceNo);
+    assert.strictEqual(pendingPayments.length, 2);
+    financeService.verifyPayment({
+      invoiceId: invoice.id,
+      paymentId: pendingPayments[0].payment_id || String(pendingPayments[0].id),
+      user: spvUser,
+      proofPayload: { fileName: "bukti_cicil_1.jpg", fileType: "image" },
+    });
+    financeService.verifyPayment({
+      invoiceId: invoice.id,
+      paymentId: pendingPayments[1].payment_id || String(pendingPayments[1].id),
+      user: spvUser,
+      proofPayload: { fileName: "bukti_cicil_2.jpg", fileType: "image" },
+    });
 
     const invAfterPay2 = dbFinanceRepository.getInvoiceById(invoice.id)!;
     assert.strictEqual(invAfterPay2.dibayar, 1000000);
@@ -300,6 +377,16 @@ test("Phase B2: Financial Logic Correction & Reconciliation Test Suite", async (
       catatan: "Transfer lebih",
     }, adminUser);
 
+    const invPending = dbFinanceRepository.getInvoiceById(invoice.id)!;
+    assert.strictEqual(invPending.dibayar, 0);
+    assert.strictEqual(invPending.status, "UNPAID");
+
+    financeService.verifyPayment({
+      invoiceId: invoice.id,
+      user: spvUser,
+      proofPayload: { fileName: "bukti_overpay_void.jpg", fileType: "image" },
+    });
+
     const invOverpaid = dbFinanceRepository.getInvoiceById(invoice.id)!;
     assert.strictEqual(invOverpaid.overpayment, 500000);
     assert.strictEqual(invOverpaid.settlementCondition, "OVERPAID");
@@ -350,6 +437,7 @@ test("Phase B2: Financial Logic Correction & Reconciliation Test Suite", async (
         completenessStatus: "COMPLETE",
       },
       payment: {
+        tipePembayaran: "Bayar di Awal",
         totalBiaya: 500000,
         dibayar: 500000,
         statusPembayaran: "Belum Lunas", // Form mentah yang salah
@@ -357,11 +445,23 @@ test("Phase B2: Financial Logic Correction & Reconciliation Test Suite", async (
     };
 
     const order = orderService.createOrder(orderPayload, adminUser);
-    const invoice = dbFinanceRepository.getInvoiceByOrderNo(order.orderNo)!;
+    const pendingInvoice = dbFinanceRepository.getInvoiceByOrderNo(order.orderNo)!;
+    assert.strictEqual(pendingInvoice.dibayar, 0);
+    assert.strictEqual(pendingInvoice.status, "UNPAID");
 
-    // Sistem harus menolak status mentah yang salah dan menetapkan Lunas / PAID
+    financeService.verifyPayment({
+      orderNo: order.orderNo,
+      confirmedAmount: 500000,
+      user: spvUser,
+      proofPayload: { fileName: "bukti_sync.jpg", fileType: "image" },
+    });
+
+    const invoice = dbFinanceRepository.getInvoiceByOrderNo(order.orderNo)!;
+    const verifiedOrder = dbOrderRepository.getByOrderNo(order.orderNo)!;
+
+    // Sistem harus menolak status mentah yang salah dan menetapkan Lunas / PAID setelah verifikasi
     assert.strictEqual(invoice.status, "PAID");
-    assert.strictEqual(order.payment.statusPembayaran, "Lunas");
+    assert.strictEqual(verifiedOrder.payment.statusPembayaran, "Lunas");
   });
 
   await t.test("Scenario 8: Idempotency key melindungi retry pembayaran", () => {
@@ -396,35 +496,47 @@ test("Phase B2: Financial Logic Correction & Reconciliation Test Suite", async (
 
     const idempotencyKey = "PAY-IDEM-KEY-UNIQUE-001";
 
-    // Request pertama: bayar 400.000
+    // Request pertama: bayar 400.000 (recorded as pending verification)
     const res1 = financeService.recordPayment(invoice.id, 400000, {
       idempotencyKey,
-      metodePembayaran: "Transfer BCA",
+      metodePembayaran: "Transfer Bank",
       bank: "BCA",
     }, adminUser);
 
-    assert.strictEqual(res1.dibayar, 400000);
+    assert.strictEqual(res1.dibayar, 0, "Pending unverified payment leaves dibayar at 0");
+    assert.strictEqual(res1.status, "UNPAID");
 
     // Request retry identik: harus sukses tanpa double-charge
     const res2 = financeService.recordPayment(invoice.id, 400000, {
       idempotencyKey,
-      metodePembayaran: "Transfer BCA",
+      metodePembayaran: "Transfer Bank",
       bank: "BCA",
     }, adminUser);
 
-    assert.strictEqual(res2.dibayar, 400000, "Retry tidak boleh menduplikasi uang masuk");
+    assert.strictEqual(res2.dibayar, 0, "Retry tidak boleh menduplikasi uang masuk");
+    assert.strictEqual(dbFinanceRepository.getPaymentsByInvoiceNo(invoice.invoiceNo).length, 1);
 
     // Request dengan key sama tapi nominal berbeda harus ditolak 409
     assert.throws(
       () => {
         financeService.recordPayment(invoice.id, 500000, {
           idempotencyKey,
-          metodePembayaran: "Transfer BCA",
+          metodePembayaran: "Transfer Bank",
           bank: "BCA",
         }, adminUser);
       },
       (err: any) => err instanceof ApiError && err.statusCode === 409
     );
+
+    // Setelah diverifikasi, dibayar terkonfirmasi 400.000
+    financeService.verifyPayment({
+      invoiceId: invoice.id,
+      user: spvUser,
+      proofPayload: { fileName: "bukti_idem.jpg", fileType: "image" },
+    });
+    const verifiedInv = dbFinanceRepository.getInvoiceById(invoice.id)!;
+    assert.strictEqual(verifiedInv.dibayar, 400000);
+    assert.strictEqual(verifiedInv.status, "PARTIAL");
   });
 
   await t.test("Scenario 9: Explicit zero Samsat cost tetap 0, bukan fallback", () => {
@@ -438,21 +550,35 @@ test("Phase B2: Financial Logic Correction & Reconciliation Test Suite", async (
       totalBiaya: 250000,
       wilayahSamsatAsal: "Jakarta Barat",
       isCostVerified: true,
+      isExplicitZero: true,
       costCompletenessStatus: "COMPLETE",
       costSnapshot: {
         totalEstimasi: 250000,
         biayaJasa: 250000,
         biayaSamsat: 0, // Eksplisit Rp 0
         biayaAntarJemput: 0,
+        isExplicitZero: true,
         completenessStatus: "COMPLETE",
       },
       payment: {
+        tipePembayaran: "Bayar di Awal",
         totalBiaya: 250000,
         dibayar: 250000,
       },
     };
 
     const order = orderService.createOrder(orderPayload, adminUser);
+    const pendingInvoice = dbFinanceRepository.getInvoiceByOrderNo(order.orderNo)!;
+    assert.strictEqual(pendingInvoice.dibayar, 0);
+    assert.strictEqual(pendingInvoice.status, "UNPAID");
+
+    financeService.verifyPayment({
+      orderNo: order.orderNo,
+      confirmedAmount: 250000,
+      user: spvUser,
+      proofPayload: { fileName: "bukti_zero.jpg", fileType: "image" },
+    });
+
     const invoice = dbFinanceRepository.getInvoiceByOrderNo(order.orderNo)!;
 
     // Biaya Samsat 0 TIDAK boleh diubah menjadi totalTagihan * 0.75 (187.500)

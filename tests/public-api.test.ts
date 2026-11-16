@@ -535,6 +535,16 @@ test("Admin Regression - Admin login and internal order management remain operat
 
 test("PUB-01: Stage mapping correctly separates internal steps 5, 6, 7, and 8", async () => {
   const adminToken = await getAdminToken();
+  const courierLoginRes = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email: "budi.messenger@birojasa.com",
+      password: "messenger123",
+    }),
+  });
+  assert.strictEqual(courierLoginRes.status, 200, "Messenger login must succeed");
+  const courierToken = ((await courierLoginRes.json()) as any).data.token as string;
   const nopol = "B 5566 STG";
 
   // 1. Create order
@@ -564,53 +574,142 @@ test("PUB-01: Stage mapping correctly separates internal steps 5, 6, 7, and 8", 
   assert.strictEqual(trackData.timeline[0].status, "IN_PROGRESS");
   assert.strictEqual(trackData.timeline[4].status, "WAITING"); // Step 5 (Pengantaran)
 
-  // Advance to Step 2 (Penjadwalan)
-  await fetch(`${baseUrl}/api/orders/${orderNo}/advance`, {
+  // Advance to Step 2 (Penjadwalan) and assign courier legitimately
+  const step1to2Res = await fetch(`${baseUrl}/api/orders/${orderNo}/advance`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
-    body: JSON.stringify({ targetStage: "Penjadwalan" }),
+    body: JSON.stringify({
+      targetStage: "Penjadwalan",
+      updates: {
+        isVerified: true,
+        tanggalJemput: "2026-11-12",
+        messenger: "Budi Santoso",
+        assignedMessengerName: "Budi Santoso",
+        assignedMessengerId: "EMP-0004",
+      },
+    }),
   });
+  assert.strictEqual(step1to2Res.status, 200, "Step 1 -> 2 must succeed");
+
+  const schedPickupRes = await fetch(`${baseUrl}/api/orders/${orderNo}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({
+      isScheduled: true,
+      messengerTaskStatus: "Terjadwal Jemput",
+      tanggalJemput: "2026-11-12",
+      assignedMessengerId: "EMP-0004",
+      assignedMessengerName: "Budi Santoso",
+    }),
+  });
+  assert.strictEqual(schedPickupRes.status, 200, "Scheduling pickup must succeed");
   trackRes = await fetch(`${baseUrl}/api/v1/public/orders/${orderNo}/tracking?nopol=${nopol}`);
   trackData = (await trackRes.json() as any).data;
   assert.strictEqual(trackData.publicStageName, "Penjadwalan");
   assert.strictEqual(trackData.timeline[0].status, "COMPLETED");
   assert.strictEqual(trackData.timeline[1].status, "IN_PROGRESS");
 
+  // Complete genuine courier pickup workflow before advancing Step 2 -> 3
+  const pickupStartRes = await fetch(`${baseUrl}/api/orders/${orderNo}/pickup/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${courierToken}` },
+    body: JSON.stringify({}),
+  });
+  assert.strictEqual(pickupStartRes.status, 200, "Courier pickup start must succeed");
+
+  const pickupCompleteRes = await fetch(`${baseUrl}/api/orders/${orderNo}/pickup/complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${courierToken}` },
+    body: JSON.stringify({ pickupChecklist: { stnkAsli: true, bpkbAsli: true, ktpAsli: true } }),
+  });
+  assert.strictEqual(pickupCompleteRes.status, 200, "Courier pickup complete must succeed");
+
   // Advance to Step 3 (Verifikasi Dokumen)
-  await fetch(`${baseUrl}/api/orders/${orderNo}/advance`, {
+  const step2to3Res = await fetch(`${baseUrl}/api/orders/${orderNo}/advance`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
-    body: JSON.stringify({ targetStage: "Verifikasi Dokumen", updates: { pickupCompleted: true } }),
+    body: JSON.stringify({ targetStage: "Verifikasi Dokumen" }),
   });
+  assert.strictEqual(step2to3Res.status, 200, "Step 2 -> 3 must succeed after pickup/complete");
   trackRes = await fetch(`${baseUrl}/api/v1/public/orders/${orderNo}/tracking?nopol=${nopol}`);
   trackData = (await trackRes.json() as any).data;
   assert.strictEqual(trackData.publicStageName, "Verifikasi Dokumen");
   assert.strictEqual(trackData.timeline[2].status, "IN_PROGRESS");
 
-  // Advance to Step 4 (Proses Samsat)
-  await fetch(`${baseUrl}/api/orders/${orderNo}/advance`, {
+  // Advance to Step 4 (Proses Samsat) with assigned Samsat courier
+  const step3to4Res = await fetch(`${baseUrl}/api/orders/${orderNo}/advance`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
-    body: JSON.stringify({ targetStage: "Proses Samsat", updates: { documentsVerified: true } }),
+    body: JSON.stringify({
+      targetStage: "Proses Samsat",
+      updates: {
+        documentsVerified: true,
+        samsatMessengerId: "EMP-0004",
+        samsatMessengerName: "Budi Santoso",
+        samsatProcesses: [
+          { id: "comp-1", name: "Pendaftaran Samsat", status: "COMPLETED" },
+          { id: "comp-2", name: "Kasir Pembayaran", status: "COMPLETED" },
+        ],
+      },
+    }),
   });
+  assert.strictEqual(step3to4Res.status, 200, "Step 3 -> 4 must succeed");
   trackRes = await fetch(`${baseUrl}/api/v1/public/orders/${orderNo}/tracking?nopol=${nopol}`);
   trackData = (await trackRes.json() as any).data;
   assert.strictEqual(trackData.publicStageName, "Proses Samsat");
   assert.strictEqual(trackData.timeline[3].status, "IN_PROGRESS");
   assert.strictEqual(trackData.timeline[4].status, "WAITING");
 
-  // Advance to Step 5 (Verifikasi Ulang)
-  // CRITICAL REQUIREMENT: Step 5 must NOT show as Pengantaran or Completed!
-  await fetch(`${baseUrl}/api/orders/${orderNo}/advance`, {
+  // Execute genuine Samsat process + Jemput Hasil Samsat completion before advancing Step 4 -> 5
+  const samsatCompRes = await fetch(`${baseUrl}/api/orders/${orderNo}/samsat/complete`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${courierToken}` },
     body: JSON.stringify({
-      targetStage: "Verifikasi Ulang",
-      updates: {
-        samsatProcesses: [{ id: "p1", name: "Cek Fisik", status: "COMPLETED" }],
-      },
+      components: [
+        { id: "comp-1", name: "Pendaftaran Samsat", status: "COMPLETED", isCompleted: true },
+        { id: "comp-2", name: "Kasir Pembayaran", status: "COMPLETED", isCompleted: true },
+      ],
     }),
   });
+  assert.strictEqual(samsatCompRes.status, 200, "Samsat complete must succeed");
+
+  const schedJemputRes = await fetch(`${baseUrl}/api/orders/${orderNo}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({
+      samsatPickupStatus: "Terjadwal Jemput Samsat",
+      samsatPickupDate: "2026-11-12",
+      samsatPickupMessenger: "Budi Santoso",
+      samsatPickupMessengerId: "EMP-0004",
+    }),
+  });
+  assert.strictEqual(schedJemputRes.status, 200, "Scheduling Jemput Hasil Samsat must succeed");
+
+  const acceptJemputRes = await fetch(
+    `${baseUrl}/api/orders/${orderNo}/tasks/${encodeURIComponent("Jemput Hasil Samsat")}/accept`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${courierToken}` },
+      body: JSON.stringify({}),
+    }
+  );
+  assert.strictEqual(acceptJemputRes.status, 200, "Accepting Jemput Hasil Samsat must succeed");
+
+  const compJemputRes = await fetch(`${baseUrl}/api/orders/${orderNo}/samsat-pickup/complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${courierToken}` },
+    body: JSON.stringify({}),
+  });
+  assert.strictEqual(compJemputRes.status, 200, "Completing Jemput Hasil Samsat must succeed");
+
+  // Advance to Step 5 (Verifikasi Ulang)
+  // CRITICAL REQUIREMENT: Step 5 must NOT show as Pengantaran or Completed!
+  const step4to5Res = await fetch(`${baseUrl}/api/orders/${orderNo}/advance`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ targetStage: "Verifikasi Ulang" }),
+  });
+  assert.strictEqual(step4to5Res.status, 200, "Step 4 -> 5 must succeed after Samsat & Jemput Hasil Samsat completion");
   trackRes = await fetch(`${baseUrl}/api/v1/public/orders/${orderNo}/tracking?nopol=${nopol}`);
   trackData = (await trackRes.json() as any).data;
   assert.strictEqual(trackData.publicStageName, "Proses Samsat selesai, pemeriksaan ulang di kantor");
@@ -622,7 +721,7 @@ test("PUB-01: Stage mapping correctly separates internal steps 5, 6, 7, and 8", 
 
   // Advance to Step 6 (Supervisi)
   // CRITICAL REQUIREMENT: Step 6 must NOT show as Selesai or Pengantaran!
-  await fetch(`${baseUrl}/api/orders/${orderNo}/advance`, {
+  const step5to6Res = await fetch(`${baseUrl}/api/orders/${orderNo}/advance`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
     body: JSON.stringify({
@@ -630,6 +729,7 @@ test("PUB-01: Stage mapping correctly separates internal steps 5, 6, 7, and 8", 
       updates: { documentsVerified: true },
     }),
   });
+  assert.strictEqual(step5to6Res.status, 200, "Step 5 -> 6 must succeed");
   trackRes = await fetch(`${baseUrl}/api/v1/public/orders/${orderNo}/tracking?nopol=${nopol}`);
   trackData = (await trackRes.json() as any).data;
   assert.strictEqual(trackData.publicStageName, "Menunggu persetujuan supervisi di kantor");
@@ -640,14 +740,21 @@ test("PUB-01: Stage mapping correctly separates internal steps 5, 6, 7, and 8", 
 
   // Advance to Step 7 (Pengantaran)
   // CRITICAL REQUIREMENT: Step 7 shows Pengantaran IN_PROGRESS, but NOT Dokumen Telah Diterima!
-  await fetch(`${baseUrl}/api/orders/${orderNo}/advance`, {
+  const step6to7Res = await fetch(`${baseUrl}/api/orders/${orderNo}/advance`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
     body: JSON.stringify({
       targetStage: "Pengantaran",
-      updates: { approvedBySpv: true },
+      updates: {
+        approvedBySpv: true,
+        tanggalPengantaran: "2026-11-12",
+        messengerPengantar: "Budi Santoso",
+        deliveryMessengerId: "EMP-0004",
+        deliveryMessengerName: "Budi Santoso",
+      },
     }),
   });
+  assert.strictEqual(step6to7Res.status, 200, "Step 6 -> 7 must succeed");
   trackRes = await fetch(`${baseUrl}/api/v1/public/orders/${orderNo}/tracking?nopol=${nopol}`);
   trackData = (await trackRes.json() as any).data;
   assert.strictEqual(trackData.publicStageName, "Pengantaran sedang berlangsung");
@@ -658,11 +765,12 @@ test("PUB-01: Stage mapping correctly separates internal steps 5, 6, 7, and 8", 
 
   // Rollback from Step 7 to Step 6
   // CRITICAL REQUIREMENT: Rollback properly reverts Pengantaran to WAITING and clears waktuSelesai
-  await fetch(`${baseUrl}/api/orders/${orderNo}/rollback`, {
+  const rollbackRes = await fetch(`${baseUrl}/api/orders/${orderNo}/rollback`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
     body: JSON.stringify({ targetStage: "Supervisi", alasan: "Pemeriksaan ulang berkas fisik" }),
   });
+  assert.strictEqual(rollbackRes.status, 200, "Rollback Step 7 -> 6 must succeed");
   trackRes = await fetch(`${baseUrl}/api/v1/public/orders/${orderNo}/tracking?nopol=${nopol}`);
   trackData = (await trackRes.json() as any).data;
   assert.strictEqual(trackData.publicStageName, "Menunggu persetujuan supervisi di kantor");
@@ -670,20 +778,39 @@ test("PUB-01: Stage mapping correctly separates internal steps 5, 6, 7, and 8", 
   assert.strictEqual(trackData.timeline[4].waktuSelesai, null);
   assert.strictEqual(trackData.isCompleted, false);
 
-  // Re-advance to Step 7 and advance to Step 8 (Dokumen Telah Diterima)
-  await fetch(`${baseUrl}/api/orders/${orderNo}/advance`, {
+  // Re-advance to Step 7, complete genuine delivery via /delivery/complete, and advance to Step 8
+  const reStep6to7Res = await fetch(`${baseUrl}/api/orders/${orderNo}/advance`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
     body: JSON.stringify({
       targetStage: "Pengantaran",
-      updates: { approvedBySpv: true },
+      updates: {
+        approvedBySpv: true,
+        tanggalPengantaran: "2026-11-12",
+        messengerPengantar: "Budi Santoso",
+        deliveryMessengerId: "EMP-0004",
+        deliveryMessengerName: "Budi Santoso",
+      },
     }),
   });
-  await fetch(`${baseUrl}/api/orders/${orderNo}/advance`, {
+  assert.strictEqual(reStep6to7Res.status, 200, "Re-advancing Step 6 -> 7 must succeed");
+
+  const completeDeliveryRes = await fetch(`${baseUrl}/api/orders/${orderNo}/delivery/complete`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
-    body: JSON.stringify({ targetStage: "Dokumen Telah Diterima", updates: { deliveryCompleted: true } }),
+    body: JSON.stringify({
+      recipientName: "Customer Workflow Tester",
+      recipientRelation: "Pemilik",
+    }),
   });
+  assert.strictEqual(completeDeliveryRes.status, 200, "Completing delivery via /delivery/complete must succeed");
+
+  const step7to8Res = await fetch(`${baseUrl}/api/orders/${orderNo}/advance`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ targetStage: "Dokumen Telah Diterima" }),
+  });
+  assert.strictEqual(step7to8Res.status, 200, "Step 7 -> 8 must succeed after /delivery/complete");
   trackRes = await fetch(`${baseUrl}/api/v1/public/orders/${orderNo}/tracking?nopol=${nopol}`);
   trackData = (await trackRes.json() as any).data;
   assert.strictEqual(trackData.publicStageName, "Selesai");

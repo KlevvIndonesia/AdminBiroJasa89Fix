@@ -24,9 +24,57 @@ export interface RolePermissions {
   stages: StageActionPermissions;
 }
 
+export const ALL_CANONICAL_MODULES: readonly string[] = [
+  "dashboard",
+  "finance",
+  "finance-profit",
+  "finance-kas-messenger",
+  "finance-kas-kantor",
+  "finance-pengeluaran",
+  "finance-penjualan",
+  "finance-tagihan",
+  "finance-laba-rugi",
+  "finance-belum-bayar",
+  "finance-profit-pending",
+  "finance-cashback-pending",
+  "master-data",
+  "master-layanan",
+  "master-samsat",
+  "master-biaya-layanan",
+  "master-harga-dasar-samsat",
+  "master-metode-pembayaran",
+  "manajemen",
+  "manajemen-karyawan",
+  "master-karyawan",
+  "manajemen-pengguna",
+  "master-pengguna",
+  "access-management",
+  "audit-log",
+  "messenger-menu",
+  "messenger-task",
+  "messenger-history",
+  "order-menu",
+  "buat-order",
+  "order-tracking",
+  "order-history",
+  "settings",
+  "profile",
+] as const;
+
+export const ALL_STAGE_KEYS: readonly (keyof StageActionPermissions)[] = [
+  "stage1_verifikasi",
+  "stage2_penjadwalan",
+  "stage3_verifikasiFisik",
+  "stage4_prosesSamsat",
+  "stage5_verifikasiUlang",
+  "stage6_supervisi",
+  "stage7_pengantaran",
+  "stage8_diterima",
+] as const;
+
 export const CANONICAL_PERMISSIONS: Record<string, RolePermissions> = {
   // 1. SVP (Super User / Administrator) — PERMANENT FULL PRIVILEGE (NON-EDITABLE)
-  svp: {
+  administrator: {
     modules: {
       dashboard: { view: true, manage: true },
       finance: { view: true, manage: true },
@@ -37,6 +85,9 @@ export const CANONICAL_PERMISSIONS: Record<string, RolePermissions> = {
       "finance-penjualan": { view: true, manage: true },
       "finance-tagihan": { view: true, manage: true },
       "finance-laba-rugi": { view: true, manage: true },
+      "finance-belum-bayar": { view: true, manage: true },
+      "finance-profit-pending": { view: true, manage: true },
+      "finance-cashback-pending": { view: true, manage: true },
       "master-data": { view: true, manage: true },
       "master-layanan": { view: true, manage: true },
       "master-samsat": { view: true, manage: true },
@@ -76,14 +127,17 @@ export const CANONICAL_PERMISSIONS: Record<string, RolePermissions> = {
   admin: {
     modules: {
       dashboard: { view: true, manage: true },
-      finance: { view: false, manage: false },
+      finance: { view: true, manage: true },
       "finance-profit": { view: false, manage: false },
-      "finance-kas-messenger": { view: false, manage: false },
+      "finance-kas-messenger": { view: true, manage: true },
       "finance-kas-kantor": { view: false, manage: false },
       "finance-pengeluaran": { view: false, manage: false },
       "finance-penjualan": { view: false, manage: false },
       "finance-tagihan": { view: false, manage: false },
       "finance-laba-rugi": { view: false, manage: false },
+      "finance-belum-bayar": { view: false, manage: false },
+      "finance-profit-pending": { view: false, manage: false },
+      "finance-cashback-pending": { view: false, manage: false },
       "master-data": { view: true, manage: true },
       "master-layanan": { view: true, manage: true },
       "master-samsat": { view: true, manage: true },
@@ -111,9 +165,9 @@ export const CANONICAL_PERMISSIONS: Record<string, RolePermissions> = {
       stage1_verifikasi: true,
       stage2_penjadwalan: true,
       stage3_verifikasiFisik: true,
-      stage4_prosesSamsat: false, // Admin view-only
+      stage4_prosesSamsat: true,
       stage5_verifikasiUlang: true,
-      stage6_supervisi: false,    // Admin view-only
+      stage6_supervisi: false, // Security Invariant: Stage 6 Supervisi is strictly SVP-only
       stage7_pengantaran: true,
       stage8_diterima: true,
     },
@@ -131,6 +185,9 @@ export const CANONICAL_PERMISSIONS: Record<string, RolePermissions> = {
       "finance-penjualan": { view: true, manage: true },
       "finance-tagihan": { view: true, manage: true },
       "finance-laba-rugi": { view: true, manage: true },
+      "finance-belum-bayar": { view: true, manage: true },
+      "finance-profit-pending": { view: true, manage: true },
+      "finance-cashback-pending": { view: true, manage: true },
       "master-data": { view: false, manage: false },
       "master-layanan": { view: false, manage: false },
       "master-samsat": { view: false, manage: false },
@@ -178,6 +235,9 @@ export const CANONICAL_PERMISSIONS: Record<string, RolePermissions> = {
       "finance-penjualan": { view: false, manage: false },
       "finance-tagihan": { view: false, manage: false },
       "finance-laba-rugi": { view: false, manage: false },
+      "finance-belum-bayar": { view: false, manage: false },
+      "finance-profit-pending": { view: false, manage: false },
+      "finance-cashback-pending": { view: false, manage: false },
       "master-data": { view: false, manage: false },
       "master-layanan": { view: false, manage: false },
       "master-samsat": { view: false, manage: false },

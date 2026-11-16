@@ -20,6 +20,8 @@ import { createApp } from "../server/src/app";
 import { APP_CONFIG } from "../src/app/config/appConfig";
 import { permissionStore, normalizeRole } from "../src/app/data/permissionStore";
 import { generateToken } from "../server/src/utils/crypto";
+import { dbPermissionRepository } from "../server/src/repositories/dbPermissionRepository";
+import { CANONICAL_PERMISSIONS } from "../server/src/config/defaultPermissions";
 
 class MemoryStorage {
   private store = new Map<string, string>();
@@ -77,6 +79,10 @@ test("PHASE 3B: RBAC & ACCESS CONTROL INTEGRATION & UNIT SUITE", async (t) => {
   const financeAuth = await loginUser(baseUrl, "finance@birojasa.com", "finance123");
   const courier1Auth = await loginUser(baseUrl, "budi.messenger@birojasa.com", "messenger123"); // EMP-0004, Budi Santoso
   const courier3Auth = await loginUser(baseUrl, "andi.messenger@birojasa.com", "messenger123"); // EMP-0005, Andi Pratama
+
+  // Initialize isolated sandbox with canonical RBAC policy
+  dbPermissionRepository.saveRole("admin", JSON.parse(JSON.stringify(CANONICAL_PERMISSIONS.admin)));
+  dbPermissionRepository.saveRole("finance", JSON.parse(JSON.stringify(CANONICAL_PERMISSIONS.finance)));
 
   t.after(() => {
     APP_CONFIG.apiBaseUrl = originalApiBaseUrl;
@@ -167,16 +173,15 @@ test("PHASE 3B: RBAC & ACCESS CONTROL INTEGRATION & UNIT SUITE", async (t) => {
   });
 
   // =========================================================================
-  // SUBTEST 3: BD-RBAC-02 — Order Deletion Restricted to SVP
+  // SUBTEST 3: BD-RBAC-02 — Order Deletion Shared Parity (SVP & Admin) vs Finance/Messenger/Revoked Admin Denied
   // =========================================================================
-  await t.test("BD-RBAC-02: Order deletion strictly restricted to SVP (Admin, Finance, Messenger denied with 403)", async () => {
-    const nonSvpActors = [
-      { role: "Admin", token: adminAuth.token },
+  await t.test("BD-RBAC-02: Order deletion authorized for Admin & SVP; Finance, Messenger & revoked Admin denied with 403", async () => {
+    const blockedActors = [
       { role: "Finance", token: financeAuth.token },
       { role: "Messenger", token: courier1Auth.token },
     ];
 
-    for (const actor of nonSvpActors) {
+    for (const actor of blockedActors) {
       // 1. DELETE /api/orders/:orderNo
       const delOrder = await fetch(`${baseUrl}/api/orders/NONEXISTENT-ORD-999`, {
         method: "DELETE",
@@ -210,6 +215,40 @@ test("PHASE 3B: RBAC & ACCESS CONTROL INTEGRATION & UNIT SUITE", async (t) => {
         `Expected 403 for DELETE /api/orders/archive/clear-all as ${actor.role}, got ${clearAllArchived.status}`
       );
     }
+
+    // Admin allowed under Rekap Order parity (returns 404 for non-existent order, 200 on clear-all)
+    const adminDel = await fetch(`${baseUrl}/api/orders/NONEXISTENT-ORD-999`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${adminAuth.token}` },
+    });
+    assert.strictEqual(
+      adminDel.status,
+      404,
+      `Expected 404 for non-existent order as Admin (authorized past RBAC), got ${adminDel.status}`
+    );
+
+    // Revoking order-history.manage denies Admin delete archive / clear-all with 403
+    // Revoking order-menu.manage denies Admin hard-delete order with 403
+    const origAdminPerms = dbPermissionRepository.getByRole("admin")!;
+    dbPermissionRepository.saveRole("admin", {
+      ...origAdminPerms,
+      modules: {
+        ...origAdminPerms.modules,
+        "order-menu": { view: true, manage: false },
+        "order-history": { view: true, manage: false },
+      },
+    });
+    const revokedAdminDel = await fetch(`${baseUrl}/api/orders/NONEXISTENT-ORD-999`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${adminAuth.token}` },
+    });
+    assert.strictEqual(revokedAdminDel.status, 403, "Admin with order-menu.manage=false must receive 403 on hard delete");
+    const revokedAdminDelArchive = await fetch(`${baseUrl}/api/orders/NONEXISTENT-ORD-999/archive`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${adminAuth.token}` },
+    });
+    assert.strictEqual(revokedAdminDelArchive.status, 403, "Admin with order-history.manage=false must receive 403 on archive delete");
+    dbPermissionRepository.saveRole("admin", JSON.parse(JSON.stringify(CANONICAL_PERMISSIONS.admin)));
 
     // SVP allowed (returns 404 for non-existent order, proving authorization succeeded and was not 403)
     const svpDel = await fetch(`${baseUrl}/api/orders/NONEXISTENT-ORD-999`, {
@@ -554,11 +593,25 @@ test("PHASE 3B: RBAC & ACCESS CONTROL INTEGRATION & UNIT SUITE", async (t) => {
   });
 
   // =========================================================================
-  // SUBTEST 10: BD-RBAC-04 — Stage 6 Supervisi & Rollback Gating
+  // SUBTEST 10: BD-RBAC-04 — Stage 6 Supervisi Strictly SVP-Only & Rollback Lock
   // =========================================================================
-  await t.test("BD-RBAC-04: Admin cannot approve or advance orders in Stage 6 (Supervisi) & rollback past Stage 6", async () => {
-    // Admin attempting to advance order at Stage 6
-    const advanceStage6 = await fetch(`${baseUrl}/api/orders/NONEXISTENT/advance`, {
+  await t.test("BD-RBAC-04: Finance/Messenger/Admin cannot manage Stage 6 (Supervisi) & rollback past Stage 6; only SVP allowed", async () => {
+    // Finance attempting Stage 6 -> 403
+    const financeStage6 = await fetch(`${baseUrl}/api/orders/NONEXISTENT/advance`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${financeAuth.token}`,
+      },
+      body: JSON.stringify({
+        currentStage: "Supervisi",
+        targetStage: "Pengantaran",
+      }),
+    });
+    assert.strictEqual(financeStage6.status, 403);
+
+    // Admin attempting Stage 6 -> 403 FORBIDDEN (Stage 6 is strictly SVP-only)
+    const adminStage6 = await fetch(`${baseUrl}/api/orders/NONEXISTENT/advance`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -569,11 +622,47 @@ test("PHASE 3B: RBAC & ACCESS CONTROL INTEGRATION & UNIT SUITE", async (t) => {
         targetStage: "Pengantaran",
       }),
     });
-    assert.strictEqual(advanceStage6.status, 403);
-    const body = await advanceStage6.json();
+    assert.strictEqual(adminStage6.status, 403, "Admin must be denied at Stage 6 Supervisi");
+    const adminBody = await adminStage6.json();
+    assert.strictEqual(adminBody.error?.code, "FORBIDDEN");
+
+    // SVP passes Stage 6 RBAC (404 for nonexistent order, NOT 403)
+    const svpStage6 = await fetch(`${baseUrl}/api/orders/NONEXISTENT/advance`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${svpAuth.token}`,
+      },
+      body: JSON.stringify({
+        currentStage: "Supervisi",
+        targetStage: "Pengantaran",
+      }),
+    });
+    assert.notStrictEqual(svpStage6.status, 403, "SVP passes Stage 6 RBAC");
+
+    // Normalization ensures Admin cannot escalate into stage6_supervisi via persistence
+    const origAdminPerms = dbPermissionRepository.getByRole("admin")!;
+    dbPermissionRepository.saveRole("admin", {
+      ...origAdminPerms,
+      stages: { ...origAdminPerms.stages, stage6_supervisi: true },
+    });
+    assert.strictEqual(dbPermissionRepository.getByRole("admin")?.stages.stage6_supervisi, false);
+
+    const forgedAdvanceStage6 = await fetch(`${baseUrl}/api/orders/NONEXISTENT/advance`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${adminAuth.token}`,
+      },
+      body: JSON.stringify({
+        currentStage: "Supervisi",
+        targetStage: "Pengantaran",
+      }),
+    });
+    assert.strictEqual(forgedAdvanceStage6.status, 403);
+    const body = await forgedAdvanceStage6.json();
     assert.strictEqual(body.error?.code, "FORBIDDEN");
 
-    // Admin attempting to rollback order past Stage 6
     const rollbackPastStage6 = await fetch(`${baseUrl}/api/orders/ORD-1126-001/rollback`, {
       method: "POST",
       headers: {
@@ -583,10 +672,13 @@ test("PHASE 3B: RBAC & ACCESS CONTROL INTEGRATION & UNIT SUITE", async (t) => {
       body: JSON.stringify({
         targetStep: 5,
         targetStage: "Verifikasi Dokumen",
-        reason: "Test rollback attempt by admin",
+        reason: "Test rollback attempt by admin across Stage 6",
       }),
     });
     assert.strictEqual(rollbackPastStage6.status, 403);
+
+    // Restore canonical Admin permissions
+    dbPermissionRepository.saveRole("admin", JSON.parse(JSON.stringify(CANONICAL_PERMISSIONS.admin)));
   });
 
   // =========================================================================
@@ -643,11 +735,26 @@ test("PHASE 3B: RBAC & ACCESS CONTROL INTEGRATION & UNIT SUITE", async (t) => {
   });
 
   // =========================================================================
-  // SUBTEST 12: BD-RBAC-06 — Static RBAC Policy Enforcement
+  // SUBTEST 12: BD-RBAC-06 — Dynamic RBAC Policy Enforcement (Approved Evolution)
   // =========================================================================
-  await t.test("BD-RBAC-06: Dynamic permission mutations disabled with 405 STATIC_RBAC_ENFORCED", async () => {
-    // 1. PUT /api/permissions/:role
-    const putPerm = await fetch(`${baseUrl}/api/permissions/admin`, {
+  await t.test("BD-RBAC-06: Dynamic RBAC policy enforcement for Admin & Finance with immutable SVP", async () => {
+    // 1. Operational Admin cannot mutate permissions (403 Forbidden)
+    const adminPutAttempt = await fetch(`${baseUrl}/api/permissions/admin`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${adminAuth.token}`,
+      },
+      body: JSON.stringify({
+        modules: { dashboard: { view: false, manage: false } },
+      }),
+    });
+    assert.strictEqual(adminPutAttempt.status, 403, "Operational admin must be forbidden from updating permissions");
+    const adminPutBody = await adminPutAttempt.json();
+    assert.strictEqual(adminPutBody.error?.code, "FORBIDDEN");
+
+    // 2. SVP cannot be modified via mutation endpoint (403 Forbidden - Security Invariant)
+    const svpPutAttempt = await fetch(`${baseUrl}/api/permissions/svp`, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
@@ -657,32 +764,49 @@ test("PHASE 3B: RBAC & ACCESS CONTROL INTEGRATION & UNIT SUITE", async (t) => {
         modules: { dashboard: { view: false, manage: false } },
       }),
     });
-    assert.strictEqual(putPerm.status, 405);
-    const putBody = await putPerm.json();
-    assert.strictEqual(putBody.error?.code, "STATIC_RBAC_ENFORCED");
+    assert.strictEqual(svpPutAttempt.status, 403, "SVP role must be immutable and cannot be modified");
 
-    // 2. POST /api/permissions/reset
+    // 3. Authorized SVP can update Admin permissions (200 OK)
+    const putPerm = await fetch(`${baseUrl}/api/permissions/admin`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${svpAuth.token}`,
+      },
+      body: JSON.stringify({
+        modules: {
+          dashboard: { view: true, manage: true },
+          "manajemen-karyawan": { view: true, manage: true },
+        },
+      }),
+    });
+    assert.strictEqual(putPerm.status, 200, "SVP must be able to update Admin permissions");
+    const putBody = await putPerm.json();
+    assert.strictEqual(putBody.success, true);
+    assert.strictEqual(putBody.data?.modules?.dashboard?.view, true);
+
+    // 4. POST /api/permissions/reset by SVP restores canonical defaults
     const resetPerm = await fetch(`${baseUrl}/api/permissions/reset`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${svpAuth.token}`,
       },
     });
-    assert.strictEqual(resetPerm.status, 405);
+    assert.strictEqual(resetPerm.status, 200, "SVP must be able to reset permissions to defaults");
     const resetBody = await resetPerm.json();
-    assert.strictEqual(resetBody.error?.code, "STATIC_RBAC_ENFORCED");
+    assert.strictEqual(resetBody.success, true);
 
-    // 3. GET /api/permissions remains readable as view-only static documentation
+    // 5. GET /api/permissions remains readable as authoritative matrix
     const getPerm = await fetch(`${baseUrl}/api/permissions`, {
       headers: { Authorization: `Bearer ${svpAuth.token}` },
     });
     assert.strictEqual(getPerm.status, 200);
     const getBody = await getPerm.json();
     assert.strictEqual(getBody.success, true);
-    assert.ok(getBody.data?.svp, "Expected svp permissions in static matrix");
-    assert.ok(getBody.data?.admin, "Expected admin permissions in static matrix");
-    assert.ok(getBody.data?.finance, "Expected finance permissions in static matrix");
-    assert.ok(getBody.data?.messenger, "Expected messenger permissions in static matrix");
+    assert.ok(getBody.data?.administrator, "Expected administrator permissions in canonical matrix");
+    assert.ok(getBody.data?.admin, "Expected admin permissions in canonical matrix");
+    assert.ok(getBody.data?.finance, "Expected finance permissions in canonical matrix");
+    assert.ok(getBody.data?.messenger, "Expected messenger permissions in canonical matrix");
   });
 
   // =========================================================================
@@ -697,8 +821,8 @@ test("PHASE 3B: RBAC & ACCESS CONTROL INTEGRATION & UNIT SUITE", async (t) => {
     assert.strictEqual(normalizeRole("supervisor"), "unknown");
     assert.strictEqual(normalizeRole("staff"), "unknown");
     assert.strictEqual(normalizeRole("spv"), "unknown"); // phantom role fails closed
-    assert.strictEqual(normalizeRole("administrator"), "svp");
-    assert.strictEqual(normalizeRole("svp"), "svp");
+    assert.strictEqual(normalizeRole("administrator"), "administrator");
+    assert.strictEqual(normalizeRole("svp"), "unknown"); // legacy alias fails closed on frontend
     assert.strictEqual(normalizeRole("admin"), "admin");
     assert.strictEqual(normalizeRole("finance"), "finance");
     assert.strictEqual(normalizeRole("messenger"), "messenger");
@@ -721,29 +845,41 @@ test("PHASE 3B: RBAC & ACCESS CONTROL INTEGRATION & UNIT SUITE", async (t) => {
   // SUBTEST 15: Frontend Permission Store — Stage 6 Gating & Mutation Lock
   // =========================================================================
   await t.test("Frontend Permission Store: Stage 6 gating & mutation lock", async () => {
-    // Admin cannot mutate Stage 6
+    // Admin canonical Stage 4 authority is true, while Stage 6 is strictly SVP-only (false)
+    assert.strictEqual(permissionStore.canManageStage("admin", 4), true);
     assert.strictEqual(permissionStore.canManageStage("admin", 6), false);
+    // Access Management remains locked for Admin
+    assert.strictEqual(permissionStore.canManageModule("admin", "access-management"), false);
     // Messenger cannot mutate Stage 6
     assert.strictEqual(permissionStore.canManageStage("messenger", 6), false);
     // Finance cannot mutate Stage 6
     assert.strictEqual(permissionStore.canManageStage("finance", 6), false);
-    // SVP can mutate Stage 6
-    assert.strictEqual(permissionStore.canManageStage("svp", 6), true);
+    // SVP (administrator) can mutate Stage 6
+    assert.strictEqual(permissionStore.canManageStage("administrator", 6), true);
 
-    // Dynamic save must throw error
+    // SVP (administrator) role is immutable (Security Invariant)
+    await assert.rejects(
+      async () => {
+        await permissionStore.saveRolePermissions("administrator", {} as any);
+      },
+      /SVP/i
+    );
+
+    // Dynamic save requires valid session
+    mockStorage.removeItem("auth_token");
     await assert.rejects(
       async () => {
         await permissionStore.saveRolePermissions("admin", {} as any);
       },
-      /kebijakan hak akses bersifat statis/i
+      /login/i
     );
 
-    // Dynamic reset must throw error
+    // Dynamic reset requires valid session
     await assert.rejects(
       async () => {
         await permissionStore.resetToDefaults();
       },
-      /kebijakan hak akses bersifat statis/i
+      /login/i
     );
   });
 });

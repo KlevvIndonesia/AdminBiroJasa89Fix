@@ -9,6 +9,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { TablePagination } from "./ui/TablePagination";
 import { EmptyState } from "./ui/empty-state";
+import { DataTableShell, DataTableEmptyRow } from "./ui/data-table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "./ui/dialog";
 import { DocumentPreviewModal } from "./DocumentPreviewModal";
 import {
@@ -855,7 +856,7 @@ export function MessengerHistory() {
                         <span className="text-xs sm:text-sm font-bold font-mono text-foreground tabular-nums truncate block mt-1" title={formatRupiah(m.totalDisetujui)}>
                           {formatRupiah(m.totalDisetujui)}
                         </span>
-                        <span className="text-[9px] text-muted-foreground block truncate">
+                        <span className="text-[11px] text-muted-foreground block truncate">
                           {m.totalDibayar > 0 ? `Rp ${m.totalDibayar.toLocaleString("id-ID")} cair` : "Belum dicairkan"}
                         </span>
                       </div>
@@ -1090,7 +1091,16 @@ export function MessengerHistory() {
           </Card>
 
           {/* Completed Tasks Table */}
-          <div className="rounded-xl border border-border/80 bg-card overflow-hidden shadow-xs flex-1 flex flex-col min-h-0">
+          <DataTableShell
+            footer={
+              <TablePagination
+                currentPage={taskPage}
+                totalItems={filteredMessengerTasks.length}
+                itemsPerPage={itemsPerPage}
+                onPageChange={setTaskPage}
+              />
+            }
+          >
             <div className="w-full flex-1 flex flex-col min-h-0">
               <Table 
                 containerClassName="overflow-y-auto overflow-x-auto max-h-[calc(100vh-320px)] sm:max-h-[calc(100vh-340px)] min-h-[160px]"
@@ -1203,30 +1213,18 @@ export function MessengerHistory() {
                       );
                     })
                   ) : (
-                    <TableRow>
-                      <TableCell colSpan={9} className="h-44 text-center">
-                        <EmptyState
-                          icon={CheckCircle2}
-                          title="Belum Ada Tugas Selesai"
-                          description="Belum ada riwayat tugas selesai yang sesuai dengan kriteria filter yang Anda pilih."
-                        />
-                      </TableCell>
-                    </TableRow>
+                    <DataTableEmptyRow
+                      colSpan={9}
+                      icon={CheckCircle2}
+                      title="Belum Ada Tugas Selesai"
+                      description="Belum ada riwayat tugas selesai yang sesuai dengan kriteria filter yang Anda pilih."
+                      cellClassName="h-44 text-center"
+                    />
                   )}
                 </TableBody>
               </Table>
             </div>
-
-            {/* Task Pagination */}
-            <div className="border-t border-border/80 p-3 bg-card shrink-0 mt-auto">
-              <TablePagination
-                currentPage={taskPage}
-                totalItems={filteredMessengerTasks.length}
-                itemsPerPage={itemsPerPage}
-                onPageChange={setTaskPage}
-              />
-            </div>
-          </div>
+          </DataTableShell>
         </motion.div>
       )}
 
@@ -1432,11 +1430,11 @@ export function MessengerHistory() {
                         <div className="flex items-center gap-2 pt-1 text-[11px]">
                           <span className="text-muted-foreground">Pelaku:</span>
                           <span className="font-medium text-foreground">{ev.author}</span>
-                          <Badge variant="outline" className="text-[9px] py-0 px-1 bg-muted">
+                          <Badge variant="outline" className="text-[11px] py-0 px-1.5 bg-muted">
                             {ev.role}
                           </Badge>
                           {ev.badge && (
-                            <Badge variant="outline" className="text-[9px] py-0 px-1 border-primary/30 text-primary">
+                            <Badge variant="outline" className="text-[11px] py-0 px-1.5 border-primary/30 text-primary">
                               {ev.badge}
                             </Badge>
                           )}
@@ -1474,7 +1472,7 @@ export function MessengerHistory() {
                           </div>
                         </div>
                         <div>
-                          <Badge variant="outline" className="text-[9px] py-0 px-1.5 mb-1 bg-muted">
+                          <Badge variant="outline" className="text-[11px] py-0 px-1.5 mb-1 bg-muted">
                             {att.category}
                           </Badge>
                           <h5 className="font-medium text-xs text-foreground truncate" title={att.name}>
@@ -1629,10 +1627,11 @@ export function MessengerHistory() {
                             <TableCell className="text-center">
                               {r.receiptUrl ? (
                                 <Button
-                                  size="sm"
+                                  size="icon-sm"
                                   variant="ghost"
                                   onClick={() => handleOpenReimbursement(r)}
-                                  className="h-8 w-8 p-0 text-muted-foreground hover:text-primary hover:bg-primary/10"
+                                  className="text-muted-foreground hover:text-primary hover:bg-primary/10"
+                                  aria-label={`Lihat struk dan rincian ${r.id}`}
                                   title="Lihat Struk & Rincian Lengkap"
                                 >
                                   <Receipt className="w-4 h-4" />

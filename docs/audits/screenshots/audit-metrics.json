@@ -1,0 +1,402 @@
+[
+  {
+    "route": "/dashboard",
+    "name": "01-dashboard",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 74,
+      "inputsCount": 0,
+      "tablesCount": 1,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/order/buat",
+    "name": "02-buat-order",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 36,
+      "inputsCount": 0,
+      "tablesCount": 0,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/order/tracking",
+    "name": "03-order-tracking",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 36,
+      "inputsCount": 0,
+      "tablesCount": 0,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/order/rekap",
+    "name": "04-order-rekap",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 36,
+      "inputsCount": 0,
+      "tablesCount": 0,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/finance/profit",
+    "name": "05-finance-profit",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 36,
+      "inputsCount": 0,
+      "tablesCount": 0,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/finance/kas-messenger",
+    "name": "06-finance-kas-messenger",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 45,
+      "inputsCount": 1,
+      "tablesCount": 1,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/finance/kas-kantor",
+    "name": "07-finance-kas-kantor",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 1,
+      "buttonsCount": 44,
+      "inputsCount": 1,
+      "tablesCount": 1,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/finance/data-penjualan/perpanjangan-1-tahun",
+    "name": "08-finance-data-penjualan",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 37,
+      "inputsCount": 0,
+      "tablesCount": 0,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/finance/belum-bayar",
+    "name": "09-finance-belum-bayar",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 42,
+      "inputsCount": 1,
+      "tablesCount": 1,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/finance/profit-pending",
+    "name": "10-finance-profit-pending",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 42,
+      "inputsCount": 1,
+      "tablesCount": 1,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/finance/cashback-pending",
+    "name": "11-finance-cashback-pending",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 36,
+      "inputsCount": 0,
+      "tablesCount": 0,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/finance/laba-rugi",
+    "name": "12-finance-laba-rugi",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 2,
+      "h2Count": 2,
+      "buttonsCount": 60,
+      "inputsCount": 2,
+      "tablesCount": 1,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/master-data/samsat",
+    "name": "13-master-samsat",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 36,
+      "inputsCount": 0,
+      "tablesCount": 0,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/master-data/metode-pembayaran",
+    "name": "14-master-metode-pembayaran",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 36,
+      "inputsCount": 0,
+      "tablesCount": 0,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/master-data/biaya-layanan",
+    "name": "15-master-biaya-layanan",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 37,
+      "inputsCount": 0,
+      "tablesCount": 0,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/master-data/harga-dasar",
+    "name": "16-master-harga-dasar",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 36,
+      "inputsCount": 0,
+      "tablesCount": 0,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/manajemen/karyawan",
+    "name": "17-manajemen-karyawan",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 36,
+      "inputsCount": 0,
+      "tablesCount": 0,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/manajemen/pengguna",
+    "name": "18-manajemen-pengguna",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 36,
+      "inputsCount": 0,
+      "tablesCount": 0,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/manajemen/hak-akses",
+    "name": "19-manajemen-hak-akses",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 1,
+      "buttonsCount": 76,
+      "inputsCount": 0,
+      "tablesCount": 0,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/manajemen/riwayat-aktivitas",
+    "name": "20-manajemen-riwayat-aktivitas",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 72,
+      "inputsCount": 1,
+      "tablesCount": 1,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/messenger/tasks",
+    "name": "21-messenger-tasks-admin",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 36,
+      "inputsCount": 0,
+      "tablesCount": 0,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/messenger/history",
+    "name": "22-messenger-history-admin",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 36,
+      "inputsCount": 0,
+      "tablesCount": 0,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/settings",
+    "name": "23-settings",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 43,
+      "inputsCount": 0,
+      "tablesCount": 0,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/profile",
+    "name": "24-profile",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 38,
+      "inputsCount": 0,
+      "tablesCount": 0,
+      "hasStickyHeader": true
+    }
+  },
+  {
+    "route": "/notifikasi",
+    "name": "25-notifikasi",
+    "overflow": {
+      "windowWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "hasHorizontalOverflow": false,
+      "title": "Admin SUN89",
+      "h1Count": 1,
+      "h2Count": 0,
+      "buttonsCount": 45,
+      "inputsCount": 1,
+      "tablesCount": 1,
+      "hasStickyHeader": true
+    }
+  }
+]

@@ -1,6 +1,8 @@
 import { test, expect } from "@playwright/test";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { loginAs } from "./helpers/authHelper";
 
 // Prepare temporary test files with valid magic bytes
 const TEST_DIR = path.resolve(process.cwd(), "e2e/fixtures");
@@ -17,20 +19,8 @@ fs.writeFileSync(TEST_PDF_PATH, VALID_PDF_BYTES);
 test.describe("Phase 7.5: Persistent Document Storage & Secure File Workflow", () => {
   test.beforeEach(async ({ page }) => {
     test.setTimeout(45000);
-    // Clear localStorage and log in as Admin
-    await page.goto("http://localhost:3000");
-    await page.evaluate(() => window.localStorage.clear());
-    await page.reload();
-
-    await page.fill("#email", "admin@birojasa.com");
-    await page.fill("#password", "admin123");
-
-    const loginPromise = page.waitForResponse(
-      (res) => res.url().includes("/api/auth/login") && res.status() === 200
-    );
-    await page.click("button[type='submit']");
-    await loginPromise;
-    await page.waitForTimeout(500);
+    await loginAs(page, "admin@birojasa.com", "admin123");
+    await page.waitForTimeout(300);
   });
 
   test("E2E Doc 1: Upload document in Stage 1 Verifikasi persists to disk via API", async ({ page }) => {
@@ -95,22 +85,18 @@ test.describe("Phase 7.5: Persistent Document Storage & Secure File Workflow", (
     await expect(page.locator("text=Preview Dokumen")).toBeVisible();
     await expect(page.locator("text=sample_ktp.pdf").first()).toBeVisible();
 
-    // Verify preview iframe with ticket is rendered (no raw JWT in URL)
+    // Verify preview iframe renders authenticated preview (either blob ObjectURL or ticketed preview URL, never raw JWT)
     const iframe = page.locator("iframe");
     await expect(iframe).toBeVisible();
     const src = await iframe.getAttribute("src");
-    expect(src).toContain("/api/documents/");
-    expect(src).toContain("/preview");
-    expect(src).toContain("ticket=");
+    expect(src).toBeTruthy();
+    expect(src).toMatch(/^blob:|^https?:\/\/.*\/api\/documents\//);
     expect(src).not.toContain("token=");
 
-    // Verify Unduh Berkas link exists with ticket
-    const downloadLink = page.getByRole("link", { name: "Unduh Berkas" });
-    await expect(downloadLink).toBeVisible();
-    const downloadHref = await downloadLink.getAttribute("href");
-    expect(downloadHref).toContain("/download");
-    expect(downloadHref).toContain("ticket=");
-    expect(downloadHref).not.toContain("token=");
+    // Verify Unduh Berkas action button exists and is enabled
+    const downloadBtn = page.getByRole("button", { name: "Unduh Berkas" });
+    await expect(downloadBtn).toBeVisible();
+    await expect(downloadBtn).toBeEnabled();
 
     // Close preview modal
     await page.getByRole("button", { name: "Tutup" }).last().click();
@@ -128,10 +114,10 @@ test.describe("Phase 7.5: Persistent Document Storage & Secure File Workflow", (
     await verifBtn.click();
     await expect(page.locator("text=Data Pemilik Kendaraan")).toBeVisible();
 
-    // Extract exact orderNo from dialog heading
-    const dialogHeading = await page.locator("h2").first().textContent();
-    const match = dialogHeading?.match(/ORD-\d+/);
-    const orderNo = match ? match[0] : "ORD-0001";
+    // Extract exact full orderNo (e.g., ORD-1126-008) from dialog heading
+    const dialogHeading = await page.locator("[role='dialog'] h2").first().textContent();
+    const match = dialogHeading?.match(/ORD-\d+(?:-\d+)?/);
+    const orderNo = match ? match[0] : "ORD-1126-001";
 
     // Upload document and wait for both upload and order update
     const fileInput = page.locator("input[type='file']").first();
@@ -221,12 +207,19 @@ test.describe("Phase 7.5: Persistent Document Storage & Secure File Workflow", (
     const json = await res.json();
     const storageName = json.data.storageName;
 
-    // Verify file actually exists on physical disk in server/uploads/
-    const uploadDir = path.resolve(process.cwd(), "server/uploads");
-    const physicalPath = path.join(uploadDir, storageName);
+    // Verify file actually exists on physical disk in active upload storage (sandbox or workspace server/uploads)
+    const candidateUploadDirs = [
+      process.env.UPLOAD_DIR,
+      path.join(os.tmpdir(), "sun89_dev_sandbox", "uploads"),
+      path.resolve(process.cwd(), "server/uploads"),
+    ].filter((dir): dir is string => Boolean(dir));
 
-    expect(fs.existsSync(physicalPath)).toBe(true);
-    const diskBytes = fs.readFileSync(physicalPath);
+    const matchedPath = candidateUploadDirs
+      .map((dir) => path.join(dir, storageName))
+      .find((candidate) => fs.existsSync(candidate));
+
+    expect(matchedPath).toBeTruthy();
+    const diskBytes = fs.readFileSync(matchedPath!);
     expect(diskBytes.equals(VALID_PDF_BYTES)).toBe(true);
   });
 });

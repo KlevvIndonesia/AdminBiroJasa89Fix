@@ -34,7 +34,7 @@ test("Biaya Layanan Tahap 4: UI Apply All Dialog, Override Policy & Feedback Ver
     );
     assert.match(
       componentSource,
-      /customCount\s*=\s*rowsForService\.filter\(\(item\)\s*=>\s*isRowCustomOrOverridden\(item\)\)\.length/,
+      /customCount\s*=\s*rowsForService\.filter\(\(item\)\s*=>\s*isRowCustomOrOverridden\(item(?:,\s*tableVehicle)?\)\)\.length/,
       "applyAllMetrics must accurately count custom tariff offices using isRowCustomOrOverridden"
     );
   });

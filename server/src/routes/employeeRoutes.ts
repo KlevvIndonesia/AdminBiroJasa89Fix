@@ -12,15 +12,16 @@ import {
   updateEmployee,
   deleteEmployee,
 } from "../controllers/employeeController";
-import { requireAuth, requireRoles } from "../middleware/auth";
+import { requireAuth, requireRoles, requirePermission } from "../middleware/auth";
 
 export const employeeRouter = Router();
 
-// List all employees (Administrator & Admin only)
+// List all employees (Administrator & Admin only, dynamic permission gated)
 employeeRouter.get(
   "/",
   requireAuth,
   requireRoles("administrator", "admin"),
+  requirePermission("manajemen-karyawan", "view"),
   getEmployees
 );
 
@@ -29,6 +30,7 @@ employeeRouter.get(
   "/next-id",
   requireAuth,
   requireRoles("administrator", "admin"),
+  requirePermission("manajemen-karyawan", "view"),
   getNextEmployeeId
 );
 
@@ -37,6 +39,7 @@ employeeRouter.get(
   "/:id",
   requireAuth,
   requireRoles("administrator", "admin"),
+  requirePermission("manajemen-karyawan", "view"),
   getEmployeeById
 );
 
@@ -45,6 +48,7 @@ employeeRouter.post(
   "/",
   requireAuth,
   requireRoles("administrator", "admin"),
+  requirePermission("manajemen-karyawan", "manage"),
   createEmployee
 );
 
@@ -53,6 +57,7 @@ employeeRouter.put(
   "/:id",
   requireAuth,
   requireRoles("administrator", "admin"),
+  requirePermission("manajemen-karyawan", "manage"),
   updateEmployee
 );
 
@@ -61,5 +66,6 @@ employeeRouter.delete(
   "/:id",
   requireAuth,
   requireRoles("administrator", "admin"),
+  requirePermission("manajemen-karyawan", "manage"),
   deleteEmployee
 );

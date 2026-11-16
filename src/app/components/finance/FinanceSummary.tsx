@@ -65,7 +65,7 @@ export function FinanceSummary({
             <div className="mt-1">
               <h4
                 className={cn(
-                  "text-base sm:text-lg font-bold font-mono tracking-tight tabular-nums truncate",
+                  "text-lg sm:text-xl font-bold font-mono tracking-tight tabular-nums truncate",
                   valueColor
                 )}
               >

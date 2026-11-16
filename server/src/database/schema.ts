@@ -1158,6 +1158,10 @@ export function applySchemaMigrations(targetDb: DatabaseSync): void {
   addColumnIfNotExists(targetDb, "invoice_payments", "reversal_kas_id", "INTEGER REFERENCES kas_kantor(id)");
   // Phase 4B Batch 2B Step B: Canonical Payment Identity
   addColumnIfNotExists(targetDb, "invoice_payments", "payment_id", "TEXT");
+  // Batch 4: Cashback Persistent Completion & Audit Tracking
+  addColumnIfNotExists(targetDb, "finance_invoices", "cashback_completion_status", "TEXT DEFAULT 'PENDING'");
+  addColumnIfNotExists(targetDb, "finance_invoices", "cashback_completed_at", "TEXT");
+  addColumnIfNotExists(targetDb, "finance_invoices", "cashback_completed_by", "TEXT");
 
   try {
     targetDb.exec(`
@@ -1466,7 +1470,7 @@ export function consolidateEmployeesAndUsersMigration(targetDb: DatabaseSync): v
             const role = (
               u.role ||
               (rawJabatan === "SVP"
-                ? "svp"
+                ? "administrator"
                 : rawJabatan === "FINANCE"
                 ? "finance"
                 : rawJabatan === "MESSENGER"

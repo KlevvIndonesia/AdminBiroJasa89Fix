@@ -13,7 +13,7 @@ export const auditRouter = Router();
 auditRouter.get(
   "/",
   requireAuth,
-  requireRoles("administrator", "svp", "admin"),
+  requireRoles("administrator", "admin"),
   getAuditLogs
 );
 

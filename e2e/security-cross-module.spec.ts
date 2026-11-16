@@ -1,15 +1,11 @@
 import { test, expect } from "@playwright/test";
+import { loginAs } from "./helpers/authHelper";
 
 test.describe("E2E Tests 8, 11, 12: Security Enforcement & Cross-Module Synchronization", () => {
   test("E2E Test 8: Cross-Module Payment Synchronization across Finance and Order", async ({ page }) => {
     // 1. Login as Finance user (authorized for invoices & payments)
-    await page.goto("http://localhost:3000");
-    await page.fill("#email", "finance@birojasa.com");
-    await page.fill("#password", "finance123");
-    const loginPromise = page.waitForResponse(r => r.url().includes("/api/auth/login") && r.status() === 200);
-    await page.click("button[type='submit']");
-    await loginPromise;
-    await page.waitForTimeout(500);
+    await loginAs(page, "finance@birojasa.com", "finance123");
+    await page.waitForTimeout(300);
 
     // Retrieve token
     const token = await page.evaluate(() => window.localStorage.getItem("auth_token"));
@@ -23,8 +19,8 @@ test.describe("E2E Tests 8, 11, 12: Security Enforcement & Cross-Module Synchron
     const invoices = (await invRes.json()).data;
     expect(invoices.length).toBeGreaterThan(0);
 
-    // Pick an invoice with linked order
-    const targetInvoice = invoices.find((inv: any) => inv.orderNo);
+    // Pick an invoice with linked order that has outstanding balance
+    const targetInvoice = invoices.find((inv: any) => inv.orderNo && inv.status !== "PAID" && (inv.sisa ?? 0) > 0) || invoices.find((inv: any) => inv.orderNo);
     expect(targetInvoice).toBeTruthy();
 
     // 3. Record payment on target invoice
@@ -36,26 +32,22 @@ test.describe("E2E Tests 8, 11, 12: Security Enforcement & Cross-Module Synchron
     });
     expect(payRes.ok()).toBeTruthy();
 
-    // 4. Verify linked order updated atomically in SQLite
+    // 4. Verify linked order received synchronized pending payment record in SQLite (two-step verification keeps dibayar at 0 until verify-payment)
     const orderRes = await page.request.get(`http://localhost:3001/api/orders/${targetInvoice.orderNo}`, {
       headers: { Authorization: `Bearer ${token}` }
     });
     expect(orderRes.ok()).toBeTruthy();
     const orderData = (await orderRes.json()).data;
-    expect(orderData.payment.dibayar).toBeGreaterThan(0);
+    expect(Array.isArray(orderData.payment?.paymentRecords)).toBe(true);
+    expect(orderData.payment.paymentRecords.length).toBeGreaterThan(0);
   });
 
   test("E2E Test 11: Role Security Matrix strictly enforced by Express server", async ({ page }) => {
     test.setTimeout(60000);
 
     // 1. Messenger token
-    await page.goto("http://localhost:3000");
-    await page.fill("#email", "budi.messenger@birojasa.com");
-    await page.fill("#password", "messenger123");
-    const msgLoginPromise = page.waitForResponse(r => r.url().includes("/api/auth/login") && r.status() === 200);
-    await page.click("button[type='submit']");
-    await msgLoginPromise;
-    await page.waitForTimeout(500);
+    await loginAs(page, "budi.messenger@birojasa.com", "messenger123");
+    await page.waitForTimeout(300);
     const messengerToken = await page.evaluate(() => window.localStorage.getItem("auth_token"));
     expect(messengerToken).toBeTruthy();
 
@@ -69,19 +61,23 @@ test.describe("E2E Tests 8, 11, 12: Security Enforcement & Cross-Module Synchron
     expect(msgOrderRes.status()).toBe(403);
 
     // 2. Finance token
-    await page.evaluate(() => window.localStorage.clear());
-    await page.goto("http://localhost:3000");
-    await page.fill("#email", "finance@birojasa.com");
-    await page.fill("#password", "finance123");
-    const finLoginPromise = page.waitForResponse(r => r.url().includes("/api/auth/login") && r.status() === 200);
-    await page.click("button[type='submit']");
-    await finLoginPromise;
-    await page.waitForTimeout(500);
+    await loginAs(page, "finance@birojasa.com", "finance123");
+    await page.waitForTimeout(300);
     const financeToken = await page.evaluate(() => window.localStorage.getItem("auth_token"));
     expect(financeToken).toBeTruthy();
 
+    // Pick a real existing order from SQLite so RBAC returns 403 rather than 404
+    const ordersListRes = await page.request.get("http://localhost:3001/api/orders", {
+      headers: { Authorization: `Bearer ${financeToken}` },
+    });
+    expect(ordersListRes.ok()).toBeTruthy();
+    const groupedOrders = (await ordersListRes.json()).data || {};
+    const existingOrders = Object.values(groupedOrders).flat() as any[];
+    expect(existingOrders.length).toBeGreaterThan(0);
+    const existingOrderNo = existingOrders[0].orderNo;
+
     // Finance attempting operational stage advance (Stage 2 Penjadwalan) -> 403 Forbidden
-    const finAdvanceRes = await page.request.post("http://localhost:3001/api/orders/ORD-0101/advance", {
+    const finAdvanceRes = await page.request.post(`http://localhost:3001/api/orders/${existingOrderNo}/advance`, {
       headers: {
         Authorization: `Bearer ${financeToken}`,
       },
@@ -90,23 +86,17 @@ test.describe("E2E Tests 8, 11, 12: Security Enforcement & Cross-Module Synchron
     expect(finAdvanceRes.status()).toBe(403);
 
     // 3. Admin token
-    await page.evaluate(() => window.localStorage.clear());
-    await page.goto("http://localhost:3000");
-    await page.fill("#email", "admin@birojasa.com");
-    await page.fill("#password", "admin123");
-    const admLoginPromise = page.waitForResponse(r => r.url().includes("/api/auth/login") && r.status() === 200);
-    await page.click("button[type='submit']");
-    await admLoginPromise;
-    await page.waitForTimeout(500);
+    await loginAs(page, "admin@birojasa.com", "admin123");
+    await page.waitForTimeout(300);
     const adminToken = await page.evaluate(() => window.localStorage.getItem("auth_token"));
     expect(adminToken).toBeTruthy();
 
     // Admin attempting Stage 6 Supervisi -> 403 Forbidden (SVP only)
-    const adminSupervisiRes = await page.request.post("http://localhost:3001/api/orders/ORD-0101/advance", {
+    const adminSupervisiRes = await page.request.post(`http://localhost:3001/api/orders/${existingOrderNo}/advance`, {
       headers: {
         Authorization: `Bearer ${adminToken}`,
       },
-      data: { targetStage: "Supervisi", updates: {} },
+      data: { stage: "Supervisi", targetStage: "Pengantaran", updates: {} },
     });
     expect(adminSupervisiRes.status()).toBe(403);
   });

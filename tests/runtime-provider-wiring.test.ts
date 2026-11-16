@@ -1,14 +1,14 @@
 /**
  * Runtime Data Provider Wiring and Final Source-of-Truth Integration Tests
  * Admin SUN89 — Biro Jasa Management System
- * 
+ *
  * Verifies:
- * 1. FinanceStore runtime wiring to financeRepository in API mode
- * 2. Dynamic P&L calculation from live invoices and cash transactions
+ * 1. FinanceStore runtime wiring to SQLite ApiFinanceProvider
+ * 2. Dynamic P&L calculation from live SQLite invoices and cash transactions
  * 3. Dashboard financial KPIs source-of-truth derivation
- * 4. PricingStore runtime wiring and snapshot immutability in API mode
- * 5. User management adapter (karyawanPenggunaAdapter) wiring to userRepository
- * 6. Messenger active roster wiring with zero mock leakage in API mode
+ * 4. PricingStore runtime wiring and snapshot immutability against SQLite
+ * 5. User management adapter (karyawanPenggunaAdapter) wiring to SQLite
+ * 6. Messenger active roster wiring with zero mock leakage
  * 7. Loading and error states on repositories
  * 8. SQLite database persistence consistency and zero orphan invoices
  */
@@ -24,15 +24,11 @@ import { karyawanPenggunaAdapter } from "../src/app/data/karyawanPenggunaAdapter
 import { financeRepository, FinanceRepository } from "../src/data/repositories/financeRepository";
 import { pricingRepository, PricingRepository } from "../src/data/repositories/pricingRepository";
 import { userRepository, UserRepository } from "../src/data/repositories/userRepository";
-import { MockFinanceProvider } from "./fixtures/mock/mockFinanceProvider";
 import { ApiFinanceProvider } from "../src/data/api/apiFinanceProvider";
-import { MockPricingProvider } from "./fixtures/mock/mockPricingProvider";
 import { ApiPricingProvider } from "../src/data/api/apiPricingProvider";
-import { MockUserProvider } from "./fixtures/mock/mockUserProvider";
 import { ApiUserProvider } from "../src/data/api/apiUserProvider";
 import { getFinancialKPIs } from "../src/app/data/dashboardAdapter";
 import { dbFinanceRepository } from "../server/src/repositories/dbFinanceRepository";
-import { dbOrderRepository } from "../server/src/repositories/dbOrderRepository";
 
 function startTestServer(): Promise<{ server: http.Server; baseUrl: string }> {
   return new Promise((resolve) => {
@@ -46,145 +42,157 @@ function startTestServer(): Promise<{ server: http.Server; baseUrl: string }> {
   });
 }
 
-test("Phase 7.2D - FinanceStore Runtime Wiring & Synchronization", async () => {
-  // Save initial state
-  const mockProvider = new MockFinanceProvider();
-  const repo = new FinanceRepository(mockProvider);
-  
-  // Verify loading and error states exist
-  assert.strictEqual(repo.isLoading(), false);
-  assert.strictEqual(repo.getError(), null);
+async function loginAsSvp(baseUrl: string): Promise<string> {
+  const res = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "svp@birojasa.com", password: "admin123" }),
+  });
+  assert.strictEqual(res.status, 200);
+  const body = (await res.json()) as any;
+  return body.data.token;
+}
 
-  // Switch financeStore to API mode
-  financeStore.setApiMode(true);
-  financeStore.syncFromRepository();
+test("Phase 7.2D - End-to-End Runtime Provider Wiring & SQLite Source-of-Truth", async (t) => {
+  const { server, baseUrl } = await startTestServer();
+  const prevToken = process.env.AUTH_TOKEN;
 
-  const invoices = financeStore.getInvoices();
-  assert.ok(Array.isArray(invoices), "Invoices must be an array");
+  try {
+    const token = await loginAsSvp(baseUrl);
+    process.env.AUTH_TOKEN = token;
 
-  // Verify dynamic monthly P&L is computed from invoices, not static array
-  const labaRugi = financeStore.getLabaRugiData();
-  assert.ok(Array.isArray(labaRugi), "Dynamic P&L must be an array");
-  assert.ok(labaRugi.length > 0, "Dynamic P&L must have generated months");
-  assert.ok(labaRugi[0].bulan, "Dynamic P&L month must have bulan name");
-  assert.ok(typeof labaRugi[0].pendapatan === "number", "Dynamic P&L must have numeric revenue");
+    // Seed an authoritative order & invoice in isolated SQLite
+    const createOrderRes = await fetch(`${baseUrl}/api/orders`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        customer: "PT Wiring SQLite",
+        namaPemilik: "Pemilik Wiring",
+        nomorHP: "081200009999",
+        layanan: "Perpanjangan 1 Tahun",
+        nopol: "B 7722 WRN",
+        wilayahSamsatAsal: "Jakarta Timur",
+        biayaJasa: 250000,
+        totalEstimasi: 850000,
+      }),
+    });
+    assert.strictEqual(createOrderRes.status, 201);
 
-  // Reset to mock mode for other tests
-  financeStore.setApiMode(false);
-});
+    await t.test("FinanceStore Runtime Wiring & Dynamic P&L", async () => {
+      const apiFin = new ApiFinanceProvider(`${baseUrl}/api`);
+      await apiFin.initFromApi();
+      financeRepository.setProvider(apiFin);
+      financeStore.syncFromRepository();
 
-test("Phase 7.2D - Dashboard Financial KPIs derive canonically from store state", () => {
-  const invoices = financeStore.getInvoices();
-  const kasKantor = financeStore.getKasKantorList();
-  const profitData = financeStore.getProfitList();
+      const repo = new FinanceRepository(apiFin);
+      assert.strictEqual(repo.isLoading(), false);
+      assert.strictEqual(repo.getError(), null);
 
-  const kpis = getFinancialKPIs(invoices, kasKantor, profitData);
+      const invoices = financeStore.getInvoices();
+      assert.ok(Array.isArray(invoices), "Invoices must be an array");
+      assert.ok(invoices.some((i) => i.customer === "PT Wiring SQLite"), "SQLite invoice must load into financeStore");
 
-  assert.ok(typeof kpis.revenueTotal === "number", "Total revenue must be numeric");
-  assert.ok(typeof kpis.outstandingTotal === "number", "Outstanding must be numeric");
-  assert.ok(typeof kpis.realizedProfitTotal === "number", "Realized profit must be numeric");
-  assert.ok(typeof kpis.saldoKasKantor === "number", "Cash balance must be numeric");
+      const labaRugi = financeStore.getLabaRugiData();
+      assert.ok(Array.isArray(labaRugi), "Dynamic P&L must be an array");
+      assert.ok(labaRugi.length > 0, "Dynamic P&L must have generated months");
+      assert.ok(labaRugi[0].bulan, "Dynamic P&L month must have bulan name");
+      assert.ok(typeof labaRugi[0].pendapatan === "number", "Dynamic P&L must have numeric revenue");
+    });
 
-  // Verify calculation consistency: revenueTotal must equal sum of payments
-  const expectedPaid = invoices.reduce((sum, inv) => sum + (inv.terbayar || 0), 0);
-  assert.strictEqual(kpis.revenueTotal, expectedPaid);
-});
+    await t.test("Dashboard Financial KPIs derive canonically from store state", () => {
+      const invoices = financeStore.getInvoices();
+      const kasKantor = financeStore.getKasKantorList();
+      const profitData = financeStore.getProfitList();
 
-test("Phase 7.2D - PricingStore Runtime Wiring & Snapshot Immutability", () => {
-  const mockPricing = new MockPricingProvider();
-  const repo = new PricingRepository(mockPricing);
-  pricingRepository.setProvider(mockPricing);
+      const kpis = getFinancialKPIs(invoices, kasKantor, profitData);
+      assert.ok(typeof kpis.revenueTotal === "number");
+      assert.ok(typeof kpis.outstandingTotal === "number");
+      assert.ok(typeof kpis.realizedProfitTotal === "number");
+      assert.ok(typeof kpis.saldoKasKantor === "number");
 
-  // Verify loading and error methods
-  assert.strictEqual(repo.isLoading(), false);
-  assert.strictEqual(repo.getError(), null);
+      const expectedPaid = invoices.reduce((sum, inv) => sum + (inv.terbayar || 0), 0);
+      assert.strictEqual(kpis.revenueTotal, expectedPaid);
+    });
 
-  // Enable API mode on pricingStore
-  pricingStore.setApiMode(true);
+    await t.test("PricingStore Runtime Wiring against SQLite", async () => {
+      const apiPricing = new ApiPricingProvider(`${baseUrl}/api`);
+      await apiPricing.initFromApi();
+      pricingRepository.setProvider(apiPricing);
 
-  // Update a Samsat Price
-  const targetItem = "mutasi-cf";
-  const newPrice = 75000;
-  pricingStore.updateSamsatPrice("samsat-jakarta-timur", targetItem, newPrice);
+      const repo = new PricingRepository(apiPricing);
+      assert.strictEqual(repo.isLoading(), false);
+      assert.strictEqual(repo.getError(), null);
 
-  const updatedPrice = pricingStore.getSamsatPrice("samsat-jakarta-timur", targetItem);
-  assert.strictEqual(updatedPrice, newPrice, "PricingStore must reflect updated price");
+      const targetItem = "mutasi-cf";
+      const newPrice = 75000;
+      await pricingStore.setSamsatOverride("samsat-jakarta-timur", targetItem, newPrice);
+      const updatedPrice = pricingStore.getSamsatPrice("samsat-jakarta-timur", targetItem);
+      assert.strictEqual(updatedPrice, newPrice, "PricingStore must reflect updated price");
+    });
 
-  // Reset to mock mode
-  pricingStore.setApiMode(false);
-});
+    await t.test("User Management Adapter (karyawanPenggunaAdapter) SQLite Wiring", async () => {
+      const apiUser = new ApiUserProvider(`${baseUrl}/api`);
+      await apiUser.initFromApi();
+      userRepository.setProvider(apiUser);
 
-test("Phase 7.2D - User Management Adapter (karyawanPenggunaAdapter) Wiring", () => {
-  const mockUser = new MockUserProvider();
-  const repo = new UserRepository(mockUser);
-  userRepository.setProvider(mockUser);
+      const repo = new UserRepository(apiUser);
+      assert.strictEqual(repo.isLoading(), false);
+      assert.strictEqual(repo.getError(), null);
 
-  // Verify loading and error states
-  assert.strictEqual(repo.isLoading(), false);
-  assert.strictEqual(repo.getError(), null);
+      await karyawanPenggunaAdapter.refresh({ target: "all" });
+      const penggunas = karyawanPenggunaAdapter.getPengguna();
+      assert.ok(Array.isArray(penggunas), "Pengguna list must be an array");
+      assert.ok(penggunas.length > 0, "Pengguna list must not be empty from SQLite");
 
-  // Enable API mode
-  karyawanPenggunaAdapter._setApiMode(true);
+      const target = penggunas[0];
+      if (target.statusAkun === "Aktif") {
+        karyawanPenggunaAdapter.deactivateAccount(target.id);
+        const updated = karyawanPenggunaAdapter.getPengguna().find((p) => p.id === target.id);
+        assert.strictEqual(updated?.statusAkun, "Nonaktif");
 
-  const penggunas = karyawanPenggunaAdapter.getPengguna();
-  assert.ok(Array.isArray(penggunas), "Pengguna list must be an array");
-  assert.ok(penggunas.length > 0, "Pengguna list must not be empty in API mode");
+        karyawanPenggunaAdapter.activateAccount(target.id);
+        const reactivated = karyawanPenggunaAdapter.getPengguna().find((p) => p.id === target.id);
+        assert.strictEqual(reactivated?.statusAkun, "Aktif");
+      }
+    });
 
-  // Find user and deactivate
-  const target = penggunas[0];
-  const originalStatus = target.statusAkun;
-  
-  if (originalStatus === "Aktif") {
-    karyawanPenggunaAdapter.deactivateAccount(target.id);
-    const updated = karyawanPenggunaAdapter.getPengguna().find((p) => p.id === target.id);
-    assert.strictEqual(updated?.statusAkun, "Nonaktif");
-    
-    // Reactivate
-    karyawanPenggunaAdapter.activateAccount(target.id);
-    const reactivated = karyawanPenggunaAdapter.getPengguna().find((p) => p.id === target.id);
-    assert.strictEqual(reactivated?.statusAkun, "Aktif");
+    await t.test("Messenger Active Roster derives strictly from SQLite employees", () => {
+      const allKaryawan = karyawanPenggunaAdapter.getKaryawan();
+      const activeMessengers = allKaryawan
+        .filter((k) => k.jabatan === "MESSENGER" && k.status === "Aktif")
+        .map((k) => k.nama);
+
+      assert.ok(Array.isArray(activeMessengers));
+      assert.ok(!activeMessengers.includes("MOCK_FALLBACK"));
+    });
+
+    await t.test("SQLite Database Consistency & Zero Orphan Records", () => {
+      const kasRows = dbFinanceRepository.getAllKasKantor();
+      assert.ok(kasRows.length > 0, "kas_kantor table must have seeded rows");
+      assert.ok(kasRows[0].saldo !== undefined || kasRows[0].total !== undefined);
+
+      const orphanResult = db
+        .prepare(`
+          SELECT COUNT(*) as orphan_count
+          FROM finance_invoices f
+          LEFT JOIN orders o ON f.order_no = o.order_no
+          WHERE o.order_no IS NULL
+        `)
+        .get() as { orphan_count: number };
+      assert.strictEqual(orphanResult.orphan_count, 0, "There must be 0 orphan invoices without matching order");
+
+      const orderCount = (db.prepare("SELECT COUNT(*) as count FROM orders").get() as { count: number }).count;
+      const invoiceCount = (db.prepare("SELECT COUNT(*) as count FROM finance_invoices").get() as { count: number }).count;
+      assert.ok(invoiceCount > 0 && orderCount >= invoiceCount, "SQLite orders & invoices must exist cleanly");
+    });
+  } finally {
+    process.env.AUTH_TOKEN = prevToken;
+    financeRepository.setProvider(new ApiFinanceProvider());
+    pricingRepository.setProvider(new ApiPricingProvider());
+    userRepository.setProvider(new ApiUserProvider());
+    server.close();
   }
-
-  // Reset adapter to mock mode
-  karyawanPenggunaAdapter._setApiMode(false);
-});
-
-test("Phase 7.2D - Messenger Active Roster has zero mock leakage in API mode", () => {
-  // In API mode, assignableMessengers derivation:
-  // When active karyawan messengers are queried, only active ones with jabatan === 'MESSENGER' are returned.
-  const allKaryawan = karyawanPenggunaAdapter.getKaryawan();
-  const activeMessengers = allKaryawan
-    .filter((k) => k.jabatan === "MESSENGER" && k.status === "Aktif")
-    .map((k) => k.nama);
-
-  // In API mode, if activeMessengers is empty, it returns [] (NOT falling back to KNOWN_MESSENGERS)
-  const isApi = true;
-  const assignableInApi = activeMessengers.length > 0 ? activeMessengers : (isApi ? [] : ["MOCK_FALLBACK"]);
-  
-  // Ensure that no mock fallback strings leak into API mode
-  assert.ok(!assignableInApi.includes("MOCK_FALLBACK"));
-});
-
-test("Phase 7.2D - SQLite Database Consistency & Zero Orphan Records", () => {
-  // 1. Verify kas_kantor table is seeded and populated
-  const kasRows = dbFinanceRepository.getAllKasKantor();
-  assert.ok(kasRows.length > 0, "kas_kantor table must have seeded rows");
-  assert.ok(kasRows[0].saldo !== undefined || kasRows[0].total !== undefined, "kas_kantor rows must have valid balance");
-
-  // 2. Verify 0 orphan records between finance_invoices and orders
-  const orphanStmt = db.prepare(`
-    SELECT COUNT(*) as orphan_count 
-    FROM finance_invoices f 
-    LEFT JOIN orders o ON f.order_no = o.order_no 
-    WHERE o.order_no IS NULL
-  `);
-  const orphanResult = orphanStmt.get() as { orphan_count: number };
-  assert.strictEqual(orphanResult.orphan_count, 0, "There must be exactly 0 orphan invoices without a matching order");
-
-  // 3. Verify total invoice count matches order count
-  const orderCountStmt = db.prepare("SELECT COUNT(*) as count FROM orders");
-  const invoiceCountStmt = db.prepare("SELECT COUNT(*) as count FROM finance_invoices");
-  const orderCount = (orderCountStmt.get() as { count: number }).count;
-  const invoiceCount = (invoiceCountStmt.get() as { count: number }).count;
-  assert.ok(invoiceCount > 0 && orderCount >= invoiceCount, "Invoices and orders must exist in SQLite with no orphan invoices");
 });

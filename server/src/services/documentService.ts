@@ -271,7 +271,7 @@ export class DocumentService {
 
     // Only administrator, admin, or the original uploader can delete
     const isOwner = doc.uploadedById === uid;
-    const isAdmin = role === "administrator" || role === "admin" || role === "svp";
+    const isAdmin = role === "administrator" || role === "admin";
 
     if (!isAdmin && !isOwner) {
       throw new ApiError(403, "FORBIDDEN", "Anda tidak berwenang untuk menghapus dokumen ini.");
@@ -326,7 +326,7 @@ export class DocumentService {
     const uid = String(user.userId || (user as any).id || "");
 
     // Superadmin and SVP have unrestricted access
-    if (role === "administrator" || role === "svp") {
+    if (role === "administrator") {
       return;
     }
 

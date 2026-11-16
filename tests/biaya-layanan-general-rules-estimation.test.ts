@@ -1,19 +1,47 @@
 import test from "node:test";
 import assert from "node:assert";
-import { DatabaseSync } from "node:sqlite";
+import http from "node:http";
+import { createApp } from "../server/src/app";
 import { GENERAL_SECTIONS } from "../src/app/components/BiayaLayanan";
 import { pricingStore, MASTER_PRICING_ITEMS } from "../src/app/data/pricingStore";
+import { pricingRepository } from "../src/data/repositories/pricingRepository";
+import { ApiPricingProvider } from "../src/data/api/apiPricingProvider";
 import { estimationStore } from "../src/app/data/estimationStore";
 import { calculateEstimation } from "../src/domain/estimation/estimationEngine";
 import { DEFAULT_R4_ANNUAL_TEMPLATE, DEFAULT_R2_ANNUAL_TEMPLATE } from "../src/domain/estimation/defaultTemplates";
 
-test("Biaya Layanan - Aturan Estimasi & Komponen General Verification", async (t) => {
-  const dbPath = process.env.DB_PATH || "server/data/database.sqlite";
-  const db = new DatabaseSync(dbPath, { readOnly: true });
-
-  t.after(() => {
-    db.close();
+function startTestServer(): Promise<{ server: http.Server; baseUrl: string }> {
+  return new Promise((resolve) => {
+    const app = createApp();
+    const server = http.createServer(app);
+    server.listen(0, () => {
+      const addr = server.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      resolve({ server, baseUrl: `http://localhost:${port}` });
+    });
   });
+}
+
+async function loginAsSvp(baseUrl: string): Promise<string> {
+  const res = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "svp@birojasa.com", password: "admin123" }),
+  });
+  assert.strictEqual(res.status, 200);
+  const body = (await res.json()) as any;
+  return body.data.token;
+}
+
+test("Biaya Layanan - Aturan Estimasi & Komponen General Verification", async (t) => {
+  const { server, baseUrl } = await startTestServer();
+  const prevToken = process.env.AUTH_TOKEN;
+
+  try {
+    const token = await loginAsSvp(baseUrl);
+    process.env.AUTH_TOKEN = token;
+    pricingRepository.setProvider(new ApiPricingProvider(`${baseUrl}/api`));
+    await pricingStore.initFromApi();
 
   await t.test("1. Verifikasi 4 Bagian Aturan General (Parameter, Mutasi Masuk, Mutasi Keluar, Ringkasan)", () => {
     assert.strictEqual(GENERAL_SECTIONS.length, 4, "General sections must have exactly 4 sections");
@@ -190,7 +218,7 @@ test("Biaya Layanan - Aturan Estimasi & Komponen General Verification", async (t
     assert.strictEqual(grandTotal, expectedTotal, `Grand total ringkasan (${grandTotal}) harus sama dengan ekspektasi (${expectedTotal})`);
   });
 
-  await t.test("5. Replikasi Seragam Komponen Mutasi ke Seluruh Samsat via applyConfigToAllSamsats", () => {
+  await t.test("5. Replikasi Seragam Komponen Mutasi ke Seluruh Samsat via applyConfigToAllSamsats", async () => {
     const serviceName = "Mutasi Antar Samsat";
     const testComponents = {
       "mutasi-cf": true,
@@ -198,7 +226,7 @@ test("Biaya Layanan - Aturan Estimasi & Komponen General Verification", async (t
       "mutasi-acak": true,
     };
 
-    pricingStore.applyConfigToAllSamsats(
+    await pricingStore.applyConfigToAllSamsats(
       serviceName,
       {
         biayaJasaLengkap: 800000,
@@ -233,4 +261,13 @@ test("Biaya Layanan - Aturan Estimasi & Komponen General Verification", async (t
     assert.strictEqual(cfJaktim?.enabled, true, "Komponen mutasi-cf harus aktif seragam di Jaktim");
     assert.strictEqual(cfBandung?.enabled, true, "Komponen mutasi-cf harus aktif seragam di Bandung");
   });
+  } finally {
+    if (prevToken === undefined) {
+      delete process.env.AUTH_TOKEN;
+    } else {
+      process.env.AUTH_TOKEN = prevToken;
+    }
+    pricingRepository.setProvider(new ApiPricingProvider());
+    server.close();
+  }
 });

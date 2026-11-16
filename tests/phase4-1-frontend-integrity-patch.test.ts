@@ -220,38 +220,61 @@ test("PHASE 4.1 — TARGETED FRONTEND INTEGRITY & UI CONSISTENCY PATCH SUITE", a
     // Sync to store
     orderStore.updateOrder(orderNo, kendalaOrder);
 
-    // Admin executes recovery action
-    const res = await recoverSamsatPickupKendalaAction(orderNo, {
-      userId: adminUser.userId,
-      employeeId: adminUser.employeeId,
-      userName: adminUser.nama,
-      role: adminUser.role,
-    });
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const match = url.match(/\/orders\/([^/]+)\/samsat-pickup\/recover$/);
+      if (match && (init?.method || "GET").toUpperCase() === "POST") {
+        const targetOrderNo = decodeURIComponent(match[1]);
+        const recovered = orderService.recoverSamsatPickupKendala(targetOrderNo, {
+          userId: adminUser.userId,
+          nama: adminUser.nama,
+          role: "admin",
+        });
+        return new Response(JSON.stringify({ success: true, data: recovered }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return prevFetch(input, init);
+    }) as typeof fetch;
 
-    assert.equal(res.success, true, "Recovery action must succeed");
+    try {
+      // Admin executes recovery action
+      const res = await recoverSamsatPickupKendalaAction(orderNo, {
+        userId: adminUser.userId,
+        employeeId: adminUser.employeeId,
+        userName: adminUser.nama,
+        role: adminUser.role,
+      });
 
-    const updatedOrder = orderStore.getOrderByNo(orderNo)!;
-    assert.equal(updatedOrder.samsatPickupStatus, "Sedang Jemput Dokumen Samsat");
+      assert.equal(res.success, true, "Recovery action must succeed");
 
-    // Count recovery events in timeline
-    const recoveryEvents = (updatedOrder.messengerTimeline || []).filter(
-      (e) => e.title === "Kendala Jemput Hasil Dipulihkan"
-    );
-    assert.equal(recoveryEvents.length, 1, "Must contain exactly 1 recovery timeline event (no optimistic duplication)");
+      const updatedOrder = orderStore.getOrderByNo(orderNo)!;
+      assert.equal(updatedOrder.samsatPickupStatus, "Sedang Jemput Dokumen Samsat");
 
-    // Test retry idempotency
-    const retryRes = await recoverSamsatPickupKendalaAction(orderNo, {
-      userId: adminUser.userId,
-      employeeId: adminUser.employeeId,
-      userName: adminUser.nama,
-      role: adminUser.role,
-    });
-    assert.equal(retryRes.success, true, "Retry must succeed idempotently");
+      // Count recovery events in timeline
+      const recoveryEvents = (updatedOrder.messengerTimeline || []).filter(
+        (e) => e.title === "Kendala Jemput Hasil Dipulihkan"
+      );
+      assert.equal(recoveryEvents.length, 1, "Must contain exactly 1 recovery timeline event (no optimistic duplication)");
 
-    const afterRetryTimeline = (orderStore.getOrderByNo(orderNo)!.messengerTimeline || []).filter(
-      (e) => e.title === "Kendala Jemput Hasil Dipulihkan"
-    );
-    assert.equal(afterRetryTimeline.length, 1, "Retry must NOT create duplicate timeline events");
+      // Test retry idempotency
+      const retryRes = await recoverSamsatPickupKendalaAction(orderNo, {
+        userId: adminUser.userId,
+        employeeId: adminUser.employeeId,
+        userName: adminUser.nama,
+        role: adminUser.role,
+      });
+      assert.equal(retryRes.success, true, "Retry must succeed idempotently");
+
+      const afterRetryTimeline = (orderStore.getOrderByNo(orderNo)!.messengerTimeline || []).filter(
+        (e) => e.title === "Kendala Jemput Hasil Dipulihkan"
+      );
+      assert.equal(afterRetryTimeline.length, 1, "Retry must NOT create duplicate timeline events");
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
   });
 
   await t.test("Patch 3.2: Non-admin caller receives error and does not update state to success", async () => {

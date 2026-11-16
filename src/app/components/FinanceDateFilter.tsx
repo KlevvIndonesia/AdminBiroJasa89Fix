@@ -284,7 +284,9 @@ export function FinanceDateFilter({
                   <button
                     type="button"
                     onClick={() => setViewYear(y => y - 1)}
-                    className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
+                    aria-label="Tahun sebelumnya"
+                    title="Tahun sebelumnya"
+                    className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <ChevronLeft className="w-3.5 h-3.5" />
                   </button>
@@ -292,7 +294,9 @@ export function FinanceDateFilter({
                   <button
                     type="button"
                     onClick={() => setViewYear(y => y + 1)}
-                    className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
+                    aria-label="Tahun berikutnya"
+                    title="Tahun berikutnya"
+                    className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <ChevronRight className="w-3.5 h-3.5" />
                   </button>

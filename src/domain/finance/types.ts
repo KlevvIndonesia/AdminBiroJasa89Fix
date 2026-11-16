@@ -4,7 +4,8 @@
  */
 
 import { SettlementCondition, RefundStatus } from "../order/types";
-export type { RefundStatus };
+import { ProfitPaymentBreakdownEntry } from "./paymentMethodCanonical";
+export type { RefundStatus, ProfitPaymentBreakdownEntry };
 
 export type PaymentStatus = "Belum Bayar" | "Kurang Bayar" | "Lunas" | "Kelebihan Bayar" | "Belum Lunas" | "Kurang" | "CANCELLED" | "BATAL" | "Dibatalkan" | "PAID" | "UNPAID" | "OVERPAID" | "PARTIAL";
 export type RealizationStatus = "PENDING" | "REALIZED";
@@ -114,7 +115,7 @@ export interface InvoiceBillingRecord {
   isDraftEstimate?: boolean;
   isCostVerified?: boolean;
 
-  // Payout and Refund Tracking (Phase B2.2)
+  // Payout and Refund Tracking (Phase B2.2 & Batch 4)
   payoutHistory?: PayoutTransactionRecord[];
   payoutVersion?: number;
   riwayatPembayaran?: any[];
@@ -122,6 +123,12 @@ export interface InvoiceBillingRecord {
   refundedAmount?: number;
   remainingRefund?: number;
   cashbackPaidAmount?: number;
+  cashbackPaidAt?: string;
+  cashbackPaidBy?: string;
+  cashbackCompletionStatus?: "PENDING" | "PAID" | "COMPLETED" | "VOIDED" | string;
+  cashbackCompletedAt?: string;
+  cashbackCompletedBy?: string;
+  cashbackCompletionNotes?: string;
   costClassification?: CostClassificationType;
   isExplicitZero?: boolean;
 }
@@ -193,6 +200,14 @@ export interface ProfitItem {
   isNetDeficit?: boolean;
   biayaAntarJemput?: number;
   cashback?: number;
+  paymentMethodId?: string | null;
+  paymentMethodIds?: string[];
+  paymentMethodLabel?: string | null;
+  paymentMethodStatus?: string | null;
+  verifiedPaymentCount?: number;
+  paymentBreakdown?: ProfitPaymentBreakdownEntry[];
+  categoryKey?: string;
+  bankUangKeluar?: string;
 }
 
 export interface KasMessengerItem {
@@ -344,6 +359,8 @@ export type FinancialTransactionClassification =
   | "MESSENGER_OPERATIONAL"
   | "OFFICE_OPERATIONAL"
   | "PARTNER_COMMISSION"
+  | "CUSTOMER_REFUND"
+  | "CAPITAL_INJECTION"
   | "INTERNAL_TRANSFER";
 
 export function classifyFinancialTransaction(item: any): FinancialTransactionClassification {
@@ -355,7 +372,9 @@ export function classifyFinancialTransaction(item: any): FinancialTransactionCla
     explicit === "SAMSAT_PASS_THROUGH" ||
     explicit === "MESSENGER_OPERATIONAL" ||
     explicit === "OFFICE_OPERATIONAL" ||
-    explicit === "PARTNER_COMMISSION"
+    explicit === "PARTNER_COMMISSION" ||
+    explicit === "CUSTOMER_REFUND" ||
+    explicit === "CAPITAL_INJECTION"
   ) {
     return explicit;
   }
@@ -379,6 +398,31 @@ export function classifyFinancialTransaction(item: any): FinancialTransactionCla
     lowerKet.includes("setoran kas messenger")
   ) {
     return "INTERNAL_TRANSFER";
+  }
+
+  // 1.6 Capital Injection / Owner Equity Top-up (Non-operating balance sheet movement)
+  if (
+    lowerKategori === "modal" ||
+    lowerKategori.includes("modal") ||
+    lowerJenis.includes("modal") ||
+    lowerKet.includes("modal awal") ||
+    lowerKet.includes("setoran modal") ||
+    lowerKet.includes("penambahan modal") ||
+    lowerKet.includes("suntikan modal") ||
+    lowerKet.includes("top up modal")
+  ) {
+    return "CAPITAL_INJECTION";
+  }
+
+  // 1.7 Customer Overpayment Refund Liability settlement (Not an operating expense)
+  if (
+    lowerKategori.includes("kelebihan bayar") ||
+    lowerKategori.includes("refund") ||
+    lowerJenis.includes("refund") ||
+    lowerKet.includes("pengembalian kelebihan bayar") ||
+    lowerKet.includes("refund kelebihan")
+  ) {
+    return "CUSTOMER_REFUND";
   }
 
   // 2. Courier operational category or reimbursement
@@ -901,13 +945,20 @@ export interface IFinanceDataProvider {
   getPengeluaranList(): PengeluaranItem[];
   recordPayment(idOrInvoice: number | string, paymentAmount: number, details?: any): boolean | Promise<boolean>;
   resolveInvoice(id: number, details?: any): boolean;
-  completeInvoice(id: number, completedBy?: string): boolean;
+  completeInvoice(id: number, completedBy?: string): boolean | Promise<boolean>;
   payoutCashback?(id: number, payoutData: any): Promise<boolean> | boolean;
+  completeCashback?(id: number, payload?: { catatan?: string; idempotencyKey?: string; expectedVersion?: number }): Promise<InvoiceBillingRecord> | Promise<boolean>;
   voidInvoicePayment?(id: number, paymentId: number, reason: string): Promise<boolean> | boolean;
   voidCashbackPayout?(id: number, reason: string): Promise<boolean> | boolean;
   getVoidAuditHistory?(): Promise<{ payments: any[]; cashbacks: any[] }>;
   addKasKantor?(item: Omit<KasKantorItem, "id">): KasKantorItem | null;
+  addKasKantorAsync?(item: Omit<KasKantorItem, "id">): Promise<KasKantorItem>;
+  updateKasKantor?(id: number, updates: Partial<KasKantorItem> & { reason?: string }): Promise<KasKantorItem>;
   addKasMessenger?(item: Omit<KasMessengerItem, "id" | "total"> & { total?: number }): KasMessengerItem | null;
+  addKasMessengerAsync?(item: Omit<KasMessengerItem, "id" | "total"> & { total?: number }): Promise<KasMessengerItem>;
+  updateKasMessenger?(id: number, updates: Partial<KasMessengerItem> & { reason?: string }): Promise<KasMessengerItem>;
+  refreshKasKantor?(): Promise<void>;
+  refreshKasMessenger?(): Promise<void>;
   deleteKasKantor?(id: number, reason: string, idempotencyKey?: string): Promise<boolean> | boolean;
   deleteKasMessenger?(id: number, reason: string, idempotencyKey?: string): Promise<boolean> | boolean;
   addPengeluaran?(item: Omit<PengeluaranItem, "id">): PengeluaranItem | null;

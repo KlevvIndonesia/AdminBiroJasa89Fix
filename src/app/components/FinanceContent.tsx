@@ -53,7 +53,6 @@ import {
   MessageCircle,
   Undo2,
   History,
-  FileSpreadsheet,
   Building2,
   Users,
   ChevronDown,
@@ -65,8 +64,6 @@ import {
 import { InvoiceA5Dialog } from "./InvoiceA5Dialog";
 import { KwitansiA5Dialog } from "./KwitansiA5Dialog";
 import { VoucherRefundDialog } from "./VoucherRefundDialog";
-import { RekonsiliasiKasModal } from "./RekonsiliasiKasModal";
-import { exportToCSV } from "../utils/financeExport";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -120,6 +117,9 @@ import { Badge } from "./ui/badge";
 import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
 import { Label } from "./ui/label";
+import { Checkbox } from "./ui/checkbox";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
+import { EmptyState } from "./ui/empty-state";
 import type { ReimbursementRequest } from "../../domain/messenger/types";
 
 export const STANDARD_EXPENSE_CATEGORIES = [
@@ -209,8 +209,7 @@ export function renderPaymentMethodCell(item: {
       snap.bank?.toLowerCase() === "tunai";
     if (isTunai) {
       return (
-        <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-emerald-300/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 font-semibold text-[10px] whitespace-nowrap">
-          <span>💵</span>
+        <div className="inline-flex items-center px-2 py-0.5 rounded border border-emerald-300/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 font-semibold text-[10px] whitespace-nowrap">
           <span>{snap.nama_metode || "Tunai (Kas Fisik)"}</span>
         </div>
       );
@@ -222,7 +221,7 @@ export function renderPaymentMethodCell(item: {
             variant="outline"
             className="text-[10px] bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-300/40 font-bold uppercase tracking-wide px-1.5 py-0"
           >
-            🏦 {snap.bank || "BANK"}
+            {snap.bank || "BANK"}
           </Badge>
           {snap.nomor_rekening && (
             <span className="font-mono text-xs text-foreground font-bold tracking-tight">
@@ -242,10 +241,9 @@ export function renderPaymentMethodCell(item: {
   // Fallback if string payment method exists
   const rawMethod = item?.paymentMethod || item?.payment_method;
   if (rawMethod && typeof rawMethod === "string" && rawMethod !== "—" && rawMethod !== "-") {
-    const isCash = rawMethod.toLowerCase().includes("tunai");
     return (
       <Badge variant="outline" className="text-[10px] bg-muted text-muted-foreground font-medium">
-        {isCash ? "💵 " : "🏦 "} {rawMethod}
+        {rawMethod}
       </Badge>
     );
   }
@@ -267,7 +265,7 @@ export function FinanceContent({ tab }: FinanceContentProps) {
   const [isMessengerBreakdownOpen, setIsMessengerBreakdownOpen] = useState(false);
 
   // Authoritative employee records for messenger & responsible selectors
-  const { karyawan } = useKaryawanPengguna();
+  const { karyawan, isKaryawanLoading: isEmployeeLoading, karyawanError: employeeError } = useKaryawanPengguna();
 
   const allOrdersList = useMemo(() => {
     try {
@@ -291,16 +289,14 @@ export function FinanceContent({ tab }: FinanceContentProps) {
     const activeMessengers = karyawan.filter(
       (k) => (k.jabatan || "").toUpperCase() === "MESSENGER" && k.status === "Aktif"
     );
-    const names = activeMessengers.map((k) => k.nama);
-    return names.length > 0 ? names : ["Rudi Hartono", "Joko Prasetyo", "Budi Santoso", "Andi Pratama"];
+    return activeMessengers.map((k) => k.nama);
   }, [karyawan]);
 
   const responsibleOptions = useMemo(() => {
     const activeResponsible = karyawan.filter(
       (k) => (k.jabatan || "").toUpperCase() !== "MESSENGER" && k.status === "Aktif"
     );
-    const names = activeResponsible.map((k) => k.nama);
-    return names.length > 0 ? names : ["Siti Nurhaliza", "Andi Wijaya", "Dewi Lestari", "Maya Safitri"];
+    return activeResponsible.map((k) => k.nama);
   }, [karyawan]);
   
   // State for viewing detail mode (switches from table view to standalone FinanceDetailPage)
@@ -335,9 +331,9 @@ export function FinanceContent({ tab }: FinanceContentProps) {
   const [cashbackDate, setCashbackDate] = useState<string>(() => new Date().toISOString().split("T")[0]);
   const [cashbackIdempotencyKey, setCashbackIdempotencyKey] = useState<string>("");
   const [cashbackUnknownOutcome, setCashbackUnknownOutcome] = useState<boolean>(false);
-  const [paidCashbackIds, setPaidCashbackIds] = useState<Set<string | number>>(new Set());
-  const [dismissedCashbackIds, setDismissedCashbackIds] = useState<Set<string | number>>(new Set());
+  const [cashbackViewMode, setCashbackViewMode] = useState<"active" | "history">("active");
   const [selesaiInfoItem, setSelesaiInfoItem] = useState<any | null>(null);
+  const [cashbackCompletionNotes, setCashbackCompletionNotes] = useState<string>("");
   const [editingCashbackItem, setEditingCashbackItem] = useState<any | null>(null);
   const [editingCashbackForm, setEditingCashbackForm] = useState<any>({});
   const [isSavingEditCashback, setIsSavingEditCashback] = useState<boolean>(false);
@@ -464,7 +460,6 @@ export function FinanceContent({ tab }: FinanceContentProps) {
   const [isSubmittingPayout, setIsSubmittingPayout] = useState<boolean>(false);
 
   const [previewReceiptDoc, setPreviewReceiptDoc] = useState<{ url: string; title: string } | null>(null);
-  const [isRekonsiliasiOpen, setIsRekonsiliasiOpen] = useState(false);
 
   const handleOpenCashbackConfirm = async (item: any) => {
     if (cashbackOpeningRef.current) return;
@@ -475,7 +470,9 @@ export function FinanceContent({ tab }: FinanceContentProps) {
       return;
     }
     const isAlreadyPaid =
-      paidCashbackIds.has(item.id) || (item.orderNo && paidCashbackIds.has(item.orderNo)) || item.status === "Dibayar";
+      item.status === "Dibayar" ||
+      item.cashbackStatus === "REALIZED" ||
+      item.refundStatus === "PROCESSED";
     if (isAlreadyPaid) {
       toast.info(`Cashback untuk ${item.orderNo || item.invoice} sudah berstatus Dibayar.`);
       return;
@@ -588,7 +585,10 @@ export function FinanceContent({ tab }: FinanceContentProps) {
       return;
     }
 
-    const isPaid = editingCashbackItem.status === "Dibayar" || paidCashbackIds.has(editingCashbackItem.id);
+    const isPaid =
+      editingCashbackItem.status === "Dibayar" ||
+      editingCashbackItem.cashbackStatus === "REALIZED" ||
+      editingCashbackItem.refundStatus === "PROCESSED";
     const origTagihan = Number(editingCashbackItem.totalTagihan || 0);
     const origMasuk = Number(editingCashbackItem.uangMasuk ?? editingCashbackItem.terbayar ?? 0);
     const origKelebihan = Number(editingCashbackItem.nominalKelebihan ?? editingCashbackItem.jumlahCashback ?? 0);
@@ -607,43 +607,32 @@ export function FinanceContent({ tab }: FinanceContentProps) {
     try {
       setIsSavingEditCashback(true);
 
-      if (APP_CONFIG.dataProvider === "api") {
-        if (hasFinancialChange) {
-          throw new ActionApiError(
-            422,
-            "BUSINESS_RULE_VIOLATION",
-            "Perubahan nilai Total Tagihan, Uang Masuk, Kelebihan Bayar, atau Status cashback belum dapat disimpan dari formulir ini karena endpoint pembaruan finansial invoice belum tersedia di server. Gunakan aksi Cairkan / Void atau ubah biaya dari modul Order."
-          );
-        }
-        if (!validOrderNo) {
-          throw new ActionApiError(
-            422,
-            "BUSINESS_RULE_VIOLATION",
-            "Transaksi ini belum terhubung ke Nomor Order di server sehingga perubahan data tidak dapat disimpan permanen."
-          );
-        }
+      if (hasFinancialChange) {
+        throw new ActionApiError(
+          422,
+          "BUSINESS_RULE_VIOLATION",
+          "Perubahan nilai Total Tagihan, Uang Masuk, Kelebihan Bayar, atau Status cashback belum dapat disimpan dari formulir ini karena endpoint pembaruan finansial invoice belum tersedia di server. Gunakan aksi Cairkan / Void atau ubah biaya dari modul Order."
+        );
+      }
+      if (!validOrderNo) {
+        throw new ActionApiError(
+          422,
+          "BUSINESS_RULE_VIOLATION",
+          "Transaksi ini belum terhubung ke Nomor Order di server sehingga perubahan data tidak dapat disimpan permanen."
+        );
+      }
 
-        const orderUpdated = await orderStore.updateOrderAsync(validOrderNo, {
-          customer: trimmedCustomer,
-          nomorHP: String(editingCashbackForm.phone || "").trim(),
-          nopol: trimmedNopol.toUpperCase(),
-          tanggalMasukBerkas: editingCashbackForm.tanggalMasukBerkas,
-          alasanPending: editingCashbackForm.alasanPending,
-          alasan_pending: editingCashbackForm.alasanPending,
-        });
+      const orderUpdated = await orderStore.updateOrderAsync(validOrderNo, {
+        customer: trimmedCustomer,
+        nomorHP: String(editingCashbackForm.phone || "").trim(),
+        nopol: trimmedNopol.toUpperCase(),
+        tanggalMasukBerkas: editingCashbackForm.tanggalMasukBerkas,
+        alasanPending: editingCashbackForm.alasanPending,
+        alasan_pending: editingCashbackForm.alasanPending,
+      });
 
-        if (!orderUpdated) {
-          throw new ActionApiError(404, "NOT_FOUND", `Data order ${validOrderNo} tidak ditemukan di server.`);
-        }
-      } else if (validOrderNo) {
-        orderStore.updateOrder(validOrderNo, {
-          customer: trimmedCustomer,
-          nomorHP: String(editingCashbackForm.phone || "").trim(),
-          nopol: trimmedNopol.toUpperCase(),
-          tanggalMasukBerkas: editingCashbackForm.tanggalMasukBerkas,
-          alasanPending: editingCashbackForm.alasanPending,
-          alasan_pending: editingCashbackForm.alasanPending,
-        });
+      if (!orderUpdated) {
+        throw new ActionApiError(404, "NOT_FOUND", `Data order ${validOrderNo} tidak ditemukan di server.`);
       }
 
       const updates: any = {
@@ -654,15 +643,6 @@ export function FinanceContent({ tab }: FinanceContentProps) {
         alasan_pending: editingCashbackForm.alasanPending,
         alasan: editingCashbackForm.alasanPending,
       };
-
-      if (!isPaid && APP_CONFIG.dataProvider !== "api") {
-        updates.totalTagihan = totalTagihanNum;
-        updates.terbayar = uangMasukNum;
-        updates.dibayar = uangMasukNum;
-        updates.overpayment = nominalKelebihanNum;
-        updates.cashback = nominalKelebihanNum;
-        updates.statusCashback = editingCashbackForm.status;
-      }
 
       updateInvoice(editingCashbackItem.id, updates);
 
@@ -695,9 +675,9 @@ export function FinanceContent({ tab }: FinanceContentProps) {
     }
 
     const isAlreadyPaid =
-      paidCashbackIds.has(cashbackTargetItem.id) ||
-      (cashbackTargetItem.orderNo && paidCashbackIds.has(cashbackTargetItem.orderNo)) ||
-      cashbackTargetItem.status === "Dibayar";
+      cashbackTargetItem.status === "Dibayar" ||
+      cashbackTargetItem.cashbackStatus === "REALIZED" ||
+      cashbackTargetItem.refundStatus === "PROCESSED";
     if (isAlreadyPaid) {
       const err = new ActionApiError(
         409,
@@ -826,13 +806,7 @@ export function FinanceContent({ tab }: FinanceContentProps) {
         };
         setPrintVoucherData(voucherPayload);
 
-        // Mark as paid so status becomes "Dibayar" and button becomes "Selesai"
-        setPaidCashbackIds((prev) => {
-          const next = new Set(prev);
-          next.add(cashbackTargetItem.id);
-          if (cashbackTargetItem.orderNo) next.add(cashbackTargetItem.orderNo);
-          return next;
-        });
+        // Authoritative store & DB refresh updates item status to "Dibayar" / REALIZED
         setCashbackTargetItem(null);
         setCashbackProof(null);
         setCashbackIdempotencyKey("");
@@ -946,11 +920,9 @@ export function FinanceContent({ tab }: FinanceContentProps) {
         })
         .catch((err) => {
           setTargetPayments(fallbackPayments);
-          if (APP_CONFIG.dataProvider === "api") {
-            actionFeedback.setError("finance-lunas-history", err, {
-              actionLabel: "memuat riwayat pembayaran",
-            });
-          }
+          actionFeedback.setError("finance-lunas-history", err, {
+            actionLabel: "memuat riwayat pembayaran",
+          });
         })
         .finally(() => {
           setIsLoadingPayments(false);
@@ -1121,6 +1093,7 @@ export function FinanceContent({ tab }: FinanceContentProps) {
     belumBayarList: belumBayarData,
     profitPendingList: profitPendingData,
     cashbackPendingList: cashbackPendingData,
+    cashbackHistoryList: cashbackHistoryData = [],
     labaRugiData,
     getCanonicalLabaRugi,
     getCashFlowReconciliation,
@@ -1132,14 +1105,16 @@ export function FinanceContent({ tab }: FinanceContentProps) {
     voidInvoicePayment,
     voidCashbackPayout,
     getVoidAuditHistory,
-    dismissCashback,
+    completeCashback,
     addInvoice,
     updateInvoice,
     deleteInvoice,
     addKasKantor,
+    addKasKantorAsync,
     updateKasKantor,
     deleteKasKantor,
     addKasMessenger,
+    addKasMessengerAsync,
     updateKasMessenger,
     deleteKasMessenger,
     addPengeluaran,
@@ -1180,7 +1155,7 @@ export function FinanceContent({ tab }: FinanceContentProps) {
       if (!savedUserStr) return false;
       const user = JSON.parse(savedUserStr);
       const r = String(user?.role || "").trim().toLowerCase();
-      const allowedRoles = ["administrator", "supervisor", "spv", "svp"];
+      const allowedRoles = ["administrator"];
       return allowedRoles.includes(r);
     } catch {
       return false;
@@ -1287,7 +1262,10 @@ Terima kasih.`;
     const orderNo = item.orderNo || item.invoice || `ORD-${item.id}`;
     const nopol = item.nopol || "-";
     const nominal = Number(item.nominalKelebihan || item.jumlahCashback || item.overpayment || 0);
-    const isPaid = paidCashbackIds.has(item.id) || (item.orderNo && paidCashbackIds.has(item.orderNo)) || item.status === "Dibayar";
+    const isPaid =
+      item.status === "Dibayar" ||
+      item.cashbackStatus === "REALIZED" ||
+      item.refundStatus === "PROCESSED";
 
     if (!phone || !phone.trim() || phone === "-") {
       toast.warning(`Nomor WhatsApp tidak ditemukan pada data transaksi ${orderNo}.`);
@@ -1377,12 +1355,6 @@ Terima kasih.`;
       setIsSubmittingVoid(true);
       await voidCashbackPayout(voidTargetCashback.invoiceId, voidReasonText.trim());
       toast.success(`Pencairan cashback untuk ${voidTargetCashback.orderNo} berhasil dibatalkan (Void) dan kas kantor dikembalikan.`);
-      setPaidCashbackIds((prev) => {
-        const next = new Set(prev);
-        next.delete(voidTargetCashback.invoiceId);
-        next.delete(voidTargetCashback.orderNo);
-        return next;
-      });
       actionFeedback.clearError("finance-cashback-void");
       setVoidTargetCashback(null);
       setVoidReasonText("");
@@ -1437,7 +1409,11 @@ Terima kasih.`;
         } as any);
       }
 
-      completeInvoice(closingTargetItem.id, operatorName);
+      const completedOk = await completeInvoice(closingTargetItem.id, operatorName);
+      if (!completedOk) {
+        toast.error("Gagal menyimpan status closing transaksi ke database.");
+        return;
+      }
 
       toast.success(
         `Transaksi ${ordNo} (${closingTargetItem.customer}) berhasil di-closing. Dokumen fisik telah diserahkan dan laba telah direalisasikan ke Laba Rugi.`
@@ -1450,74 +1426,6 @@ Terima kasih.`;
     } finally {
       setIsSubmittingClosing(false);
     }
-  };
-
-  // CSV Exporters
-  const handleExportBelumBayarCSV = () => {
-    const cols = [
-      { key: "tanggalMasukBerkas", label: "Tanggal Masuk" },
-      { key: "orderNo", label: "Nomor Order" },
-      { key: "nopol", label: "Nomor Polisi" },
-      { key: "customer", label: "Customer" },
-      { key: "phone", label: "No. HP / WA" },
-      { key: "pengurusan", label: "Layanan" },
-      { key: "totalTagihan", label: "Total Tagihan" },
-      { key: "uangMasuk", label: "Sudah Dibayar" },
-      { key: "sisaTagihan", label: "Sisa Tagihan" },
-      { key: "status", label: "Status" },
-    ];
-    exportToCSV({
-      title: "Laporan Piutang Belum & Kurang Bayar",
-      columns: cols,
-      data: belumBayarData,
-      filename: `Piutang_Belum_Bayar_SUN89_${new Date().toISOString().slice(0, 10)}.csv`,
-    });
-    toast.success("Data Belum & Kurang Bayar berhasil diekspor ke format CSV.");
-  };
-
-  const handleExportCashbackCSV = () => {
-    const cols = [
-      { key: "tanggalMasukBerkas", label: "Tanggal Masuk" },
-      { key: "orderNo", label: "Nomor Order" },
-      { key: "nopol", label: "Nomor Polisi" },
-      { key: "customer", label: "Customer" },
-      { key: "phone", label: "No. HP / WA" },
-      { key: "pengurusan", label: "Layanan" },
-      { key: "uangMasuk", label: "Uang Masuk" },
-      { key: "totalTagihan", label: "Total Tagihan" },
-      { key: "nominalKelebihan", label: "Kelebihan Bayar" },
-      { key: "status", label: "Status" },
-    ];
-    exportToCSV({
-      title: "Laporan Cashback & Kelebihan Bayar",
-      columns: cols,
-      data: cashbackPendingData.filter((item: any) => !dismissedCashbackIds.has(item.id)),
-      filename: `Cashback_Terpending_SUN89_${new Date().toISOString().slice(0, 10)}.csv`,
-    });
-    toast.success("Data Cashback Terpending berhasil diekspor ke format CSV.");
-  };
-
-  const handleExportProfitPendingCSV = () => {
-    const cols = [
-      { key: "tanggal", label: "Tanggal Order" },
-      { key: "orderNo", label: "Nomor Order" },
-      { key: "nopol", label: "Nomor Polisi" },
-      { key: "customer", label: "Customer" },
-      { key: "pengurusan", label: "Layanan" },
-      { key: "totalTagihan", label: "Total Tagihan" },
-      { key: "totalUangMasuk", label: "Total Terbayar" },
-      { key: "danaTitipanPajak", label: "Biaya Pokok Samsat" },
-      { key: "totalUangKeluarAktual", label: "Uang Keluar Aktual" },
-      { key: "selisihKasSementara", label: "Selisih Kas" },
-      { key: "estimasiProfit", label: "Estimasi Profit" },
-    ];
-    exportToCSV({
-      title: "Laporan Profit Terpending",
-      columns: cols,
-      data: profitPendingData,
-      filename: `Profit_Terpending_SUN89_${new Date().toISOString().slice(0, 10)}.csv`,
-    });
-    toast.success("Data Profit Terpending berhasil diekspor ke format CSV.");
   };
 
   // Reusable Dialog Renderers
@@ -1606,88 +1514,96 @@ Terima kasih.`;
             </div>
           ) : voidHistoryTab === "payments" ? (
             voidHistoryData.payments && voidHistoryData.payments.length > 0 ? (
-              <div className="overflow-x-auto border border-border rounded-lg">
-                <table className="w-full text-xs text-left border-collapse">
-                  <thead className="bg-muted/50 border-b border-border text-[11px] font-semibold text-muted-foreground">
-                    <tr>
-                      <th className="p-2.5">Waktu Void</th>
-                      <th className="p-2.5">No. Invoice / Order</th>
-                      <th className="p-2.5">Customer</th>
-                      <th className="p-2.5 text-right">Nominal Void</th>
-                      <th className="p-2.5">Dibatalkan Oleh</th>
-                      <th className="p-2.5">Alasan Pembatalan</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-border">
+              <div className="border border-border rounded-lg overflow-hidden">
+                <Table className="finance-table text-xs">
+                  <TableHeader className="finance-table__header bg-muted/50 border-b border-border text-[11px] font-semibold text-muted-foreground">
+                    <TableRow className="hover:bg-transparent">
+                      <TableHead className="py-2 px-2.5 h-auto">Waktu Void</TableHead>
+                      <TableHead className="py-2 px-2.5 h-auto">No. Invoice / Order</TableHead>
+                      <TableHead className="py-2 px-2.5 h-auto">Customer</TableHead>
+                      <TableHead className="py-2 px-2.5 h-auto text-right">Nominal Void</TableHead>
+                      <TableHead className="py-2 px-2.5 h-auto">Dibatalkan Oleh</TableHead>
+                      <TableHead className="py-2 px-2.5 h-auto">Alasan Pembatalan</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody className="finance-table__body divide-y divide-border">
                     {voidHistoryData.payments.map((p: any, idx: number) => (
-                      <tr key={p.payment_id || idx} className="hover:bg-muted/20">
-                        <td className="p-2.5 text-[11px] font-mono text-muted-foreground whitespace-nowrap">
+                      <TableRow key={p.payment_id || idx} className="hover:bg-muted/20">
+                        <TableCell className="py-2 px-2.5 text-[11px] font-mono text-muted-foreground whitespace-nowrap">
                           {p.voided_at || "-"}
-                        </td>
-                        <td className="p-2.5 font-mono font-semibold text-primary">
+                        </TableCell>
+                        <TableCell className="py-2 px-2.5 font-mono font-semibold text-primary">
                           {p.invoice_no || p.order_no || "-"}
-                        </td>
-                        <td className="p-2.5 font-medium text-foreground">{p.customer || "-"}</td>
-                        <td className="p-2.5 text-right font-mono font-bold text-destructive">
+                        </TableCell>
+                        <TableCell className="py-2 px-2.5 font-medium text-foreground">{p.customer || "-"}</TableCell>
+                        <TableCell className="py-2 px-2.5 text-right font-mono font-bold text-destructive">
                           {formatRupiah(p.nominal || 0)}
-                        </td>
-                        <td className="p-2.5">
-                          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-primary/10 text-primary border border-primary/20">
+                        </TableCell>
+                        <TableCell className="py-2 px-2.5">
+                          <Badge variant="outline" className="text-[11px] font-semibold bg-primary/10 text-primary border-primary/20">
                             {p.voided_by || "Supervisor"}
-                          </span>
-                        </td>
-                        <td className="p-2.5 text-muted-foreground max-w-xs truncate" title={p.void_reason}>
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="py-2 px-2.5 text-muted-foreground max-w-xs truncate" title={p.void_reason}>
                           {p.void_reason || "-"}
-                        </td>
-                      </tr>
+                        </TableCell>
+                      </TableRow>
                     ))}
-                  </tbody>
-                </table>
+                  </TableBody>
+                </Table>
               </div>
             ) : (
-              <div className="p-6 text-center text-xs text-muted-foreground border border-dashed border-border rounded-lg">
-                Belum ada catatan pembatalan pembayaran invoice (Void).
+              <div className="border border-dashed border-border rounded-lg">
+                <EmptyState
+                  className="min-h-[140px] py-6"
+                  title="Belum ada riwayat pembatalan pembayaran"
+                  description="Belum ada catatan pembatalan pembayaran invoice (Void)."
+                />
               </div>
             )
           ) : (
             voidHistoryData.cashbacks && voidHistoryData.cashbacks.length > 0 ? (
-              <div className="overflow-x-auto border border-border rounded-lg">
-                <table className="w-full text-xs text-left border-collapse">
-                  <thead className="bg-muted/50 border-b border-border text-[11px] font-semibold text-muted-foreground">
-                    <tr>
-                      <th className="p-2.5">Waktu Void</th>
-                      <th className="p-2.5">Target / Referensi</th>
-                      <th className="p-2.5">Dibatalkan Oleh</th>
-                      <th className="p-2.5">Role</th>
-                      <th className="p-2.5">Alasan Pembatalan / Keterangan</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-border">
+              <div className="border border-border rounded-lg overflow-hidden">
+                <Table className="finance-table text-xs">
+                  <TableHeader className="finance-table__header bg-muted/50 border-b border-border text-[11px] font-semibold text-muted-foreground">
+                    <TableRow className="hover:bg-transparent">
+                      <TableHead className="py-2 px-2.5 h-auto">Waktu Void</TableHead>
+                      <TableHead className="py-2 px-2.5 h-auto">Target / Referensi</TableHead>
+                      <TableHead className="py-2 px-2.5 h-auto">Dibatalkan Oleh</TableHead>
+                      <TableHead className="py-2 px-2.5 h-auto">Role</TableHead>
+                      <TableHead className="py-2 px-2.5 h-auto">Alasan Pembatalan / Keterangan</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody className="finance-table__body divide-y divide-border">
                     {voidHistoryData.cashbacks.map((c: any, idx: number) => (
-                      <tr key={c.id || idx} className="hover:bg-muted/20">
-                        <td className="p-2.5 text-[11px] font-mono text-muted-foreground whitespace-nowrap">
+                      <TableRow key={c.id || idx} className="hover:bg-muted/20">
+                        <TableCell className="py-2 px-2.5 text-[11px] font-mono text-muted-foreground whitespace-nowrap">
                           {c.voided_at || "-"}
-                        </td>
-                        <td className="p-2.5 font-mono font-semibold text-primary">
+                        </TableCell>
+                        <TableCell className="py-2 px-2.5 font-mono font-semibold text-primary">
                           {c.invoice_no || "-"}
-                        </td>
-                        <td className="p-2.5">
-                          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-primary/10 text-primary border border-primary/20">
+                        </TableCell>
+                        <TableCell className="py-2 px-2.5">
+                          <Badge variant="outline" className="text-[11px] font-semibold bg-primary/10 text-primary border-primary/20">
                             {c.voided_by || "Supervisor"}
-                          </span>
-                        </td>
-                        <td className="p-2.5 text-[11px] text-muted-foreground uppercase">{c.user_role || "spv"}</td>
-                        <td className="p-2.5 text-muted-foreground max-w-sm truncate" title={c.void_reason}>
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="py-2 px-2.5 text-[11px] text-muted-foreground uppercase">{c.user_role || "spv"}</TableCell>
+                        <TableCell className="py-2 px-2.5 text-muted-foreground max-w-sm truncate" title={c.void_reason}>
                           {c.void_reason || "-"}
-                        </td>
-                      </tr>
+                        </TableCell>
+                      </TableRow>
                     ))}
-                  </tbody>
-                </table>
+                  </TableBody>
+                </Table>
               </div>
             ) : (
-              <div className="p-6 text-center text-xs text-muted-foreground border border-dashed border-border rounded-lg">
-                Belum ada catatan pembatalan pencairan cashback (Void).
+              <div className="border border-dashed border-border rounded-lg">
+                <EmptyState
+                  className="min-h-[140px] py-6"
+                  title="Belum ada riwayat pembatalan cashback"
+                  description="Belum ada catatan pembatalan pencairan cashback (Void)."
+                />
               </div>
             )
           )}
@@ -1884,6 +1800,7 @@ Terima kasih.`;
       { key: "keterangan", label: "Keterangan", type: "text", placeholder: "Rincian keperluan kas" },
       { key: "in", label: "Kas masuk (in)", type: "number", placeholder: "0" },
       { key: "out", label: "Kas keluar (out)", type: "number", placeholder: "0" },
+      { key: "reason", label: "Alasan Perubahan", type: "text", placeholder: "Jelaskan alasan koreksi (tercatat di audit log)" },
     ];
 
     const kasMessengerColumns: Column[] = [
@@ -2113,24 +2030,25 @@ Terima kasih.`;
       setPayoutMethod(defaultMethod);
     };
 
-    const handleConfirmPayout = () => {
-      if (!payoutTarget) return;
+    const handleConfirmPayout = async () => {
+      if (!payoutTarget || isSubmittingPayout) return;
       setIsSubmittingPayout(true);
       try {
-        const ok = payReimbursement(
+        const res = await payReimbursement(
           payoutTarget.id,
-          { role: "finance", userName: "Finance Admin" },
+          { role: currentUser.role, userName: currentUser.userName },
           { paymentMethod: payoutMethod, channel: "Kas Messenger" }
         );
 
-        if (ok) {
+        if (res.success) {
           const amt = payoutTarget.approvedAmount || payoutTarget.amount;
           toast.success(
             `Pencairan reimbursement ${payoutTarget.id} sebesar ${formatRupiah(amt)} berhasil dicatat di Kas Messenger!`
           );
           setPayoutTarget(null);
+          await refreshReimbursements();
         } else {
-          toast.error("Gagal memproses pencairan reimbursement.");
+          toast.error(res.error || "Gagal memproses pencairan reimbursement.");
         }
       } catch (err: any) {
         toast.error(err?.message || "Terjadi kesalahan saat memproses pencairan.");
@@ -2198,7 +2116,20 @@ Terima kasih.`;
                 subTabTitle="Kas Messenger"
                 onAdd={() => setIsAddKasMessengerOpen(true)}
                 onView={(item) => setViewingItem({ item, subTabTitle: "Kas messenger", columns: kasMessengerColumns })}
-                onEdit={(item, updated) => updateKasMessenger(item.id, updated)}
+                onEdit={async (item, updated) => {
+                  const inVal = Number(updated.in || 0);
+                  const outVal = Number(updated.out || 0);
+                  await updateKasMessenger(item.id, {
+                    tanggal: updated.tanggal,
+                    jenis: updated.jenis,
+                    messenger: updated.messenger,
+                    orderNo: extractOrderNo(updated.orderNo),
+                    keterangan: updated.keterangan,
+                    in: inVal,
+                    out: outVal,
+                    reason: updated.reason ? String(updated.reason).trim() : undefined,
+                  });
+                }}
                 onDelete={(item, reason) => deleteKasMessenger(item.id, reason || "")}
                 searchPlaceholder="Cari berdasarkan messenger, keterangan, jenis..."
                 editFields={kasMessengerFields}
@@ -2211,8 +2142,10 @@ Terima kasih.`;
               onOpenChange={setIsAddKasMessengerOpen}
               messengerOptions={messengerOptions}
               orderOptions={availableOrderOptions}
+              isLoading={isEmployeeLoading}
+              error={employeeError}
               onSubmit={async (data) => {
-                addKasMessenger({
+                await addKasMessengerAsync({
                   tanggal: data.tanggal,
                   jenis: data.jenis,
                   messenger: data.messenger,
@@ -2307,12 +2240,12 @@ Terima kasih.`;
                     </SelectContent>
                   </Select>
 
-                  <input
+                  <Input
                     type="text"
                     value={reimbSearchQuery}
                     onChange={(e) => setReimbSearchQuery(e.target.value)}
                     placeholder="Cari ref, order, catatan..."
-                    className="h-8 px-3 rounded-md border border-border bg-background text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary w-[200px]"
+                    className="h-8 text-xs w-[200px]"
                   />
                 </div>
               </div>
@@ -2324,17 +2257,17 @@ Terima kasih.`;
                 <table className="finance-table finance-table--font-1 w-full text-[10px] text-left">
                   <thead className="finance-table__header bg-muted border-b border-border text-muted-foreground uppercase text-[10px] tracking-wider sticky top-0 z-10">
                     <tr>
-                      <th className="py-2.5 px-3 text-center w-12 min-w-[48px] text-[10px] font-semibold">No.</th>
-                      <th className="py-2.5 px-3 text-[10px]">No. Ref & Tanggal</th>
-                      <th className="py-2.5 px-3 text-[10px]">Messenger</th>
-                      <th className="py-2.5 px-3 text-[10px]">Order Terkait</th>
-                      <th className="py-2.5 px-3 text-[10px]">Kategori & Keterangan</th>
-                      <th className="py-2.5 px-3 text-center text-[10px]">Bukti Struk</th>
-                      <th className="py-2.5 px-3 text-right text-[10px]">Diajukan</th>
-                      <th className="py-2.5 px-3 text-right text-[10px]">Disetujui</th>
-                      <th className="py-2.5 px-3 text-[10px]">Sumber Bank / Kas Pencairan</th>
-                      <th className="py-2.5 px-3 text-center text-[10px]">Status</th>
-                      <th className="py-2.5 px-3 text-center text-[10px]">Aksi Tim Finance</th>
+                      <th className="py-2 px-2.5 text-center w-12 min-w-[48px] text-[10px] font-semibold">No.</th>
+                      <th className="py-2 px-2.5 text-[10px]">No. Ref & Tanggal</th>
+                      <th className="py-2 px-2.5 text-[10px]">Messenger</th>
+                      <th className="py-2 px-2.5 text-[10px]">Order Terkait</th>
+                      <th className="py-2 px-2.5 text-[10px]">Kategori & Keterangan</th>
+                      <th className="py-2 px-2.5 text-center text-[10px]">Bukti Struk</th>
+                      <th className="py-2 px-2.5 text-right text-[10px]">Diajukan</th>
+                      <th className="py-2 px-2.5 text-right text-[10px]">Disetujui</th>
+                      <th className="py-2 px-2.5 text-[10px]">Sumber Bank / Kas Pencairan</th>
+                      <th className="py-2 px-2.5 text-center text-[10px]">Status</th>
+                      <th className="py-2 px-2.5 text-center text-[10px]">Aksi Tim Finance</th>
                     </tr>
                   </thead>
                   <tbody className="finance-table__body divide-y divide-border/60">
@@ -2344,24 +2277,24 @@ Terima kasih.`;
                         return (
                           <tr key={r.id} className="hover:bg-muted/30 transition-colors">
                             {/* No. */}
-                            <td className="py-2.5 px-3 align-top text-center font-mono text-muted-foreground text-[10px] tabular-nums">
+                            <td className="py-2 px-2.5 align-top text-center font-mono text-muted-foreground text-[10px] tabular-nums">
                               {idx + 1}
                             </td>
 
                             {/* Ref & Tanggal */}
-                            <td className="py-2.5 px-3 align-top font-mono text-[10px]">
+                            <td className="py-2 px-2.5 align-top font-mono text-[10px]">
                               <span className="font-bold text-foreground block">{r.id}</span>
                               <span className="text-[10px] text-muted-foreground block">{r.date}</span>
                             </td>
 
                             {/* Messenger */}
-                            <td className="py-2.5 px-3 align-top text-[10px]">
+                            <td className="py-2 px-2.5 align-top text-[10px]">
                               <span className="font-semibold text-foreground block">{r.messengerName}</span>
                               <span className="text-[10px] text-muted-foreground block font-mono">{r.employeeId}</span>
                             </td>
 
                             {/* Order */}
-                            <td className="py-2.5 px-3 align-top text-[10px]">
+                            <td className="py-2 px-2.5 align-top text-[10px]">
                               {r.orderNo ? (
                                 <Badge variant="outline" className="text-[10px] bg-muted font-mono font-semibold">
                                   {r.orderNo}
@@ -2372,7 +2305,7 @@ Terima kasih.`;
                             </td>
 
                             {/* Kategori & Keterangan */}
-                            <td className="py-2.5 px-3 align-top max-w-[220px] text-[10px]">
+                            <td className="py-2 px-2.5 align-top max-w-[220px] text-[10px]">
                               <Badge variant="outline" className="text-[10px] font-semibold mb-1">
                                 {r.category}
                               </Badge>
@@ -2389,29 +2322,31 @@ Terima kasih.`;
                             </td>
 
                             {/* Bukti Struk */}
-                            <td className="py-2.5 px-3 align-top text-center text-[10px]">
+                            <td className="py-2 px-2.5 align-top text-center text-[10px]">
                               {r.receiptUrl ? (
-                                <button
+                                <Button
                                   type="button"
+                                  variant="outline"
+                                  size="sm"
                                   onClick={() => setPreviewReceiptDoc({ url: r.receiptUrl!, title: `Bukti ${r.id} (${r.messengerName})` })}
-                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-emerald-200 text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/20 text-[10px] font-semibold transition-colors"
+                                  className="h-7 px-2 border-emerald-200 text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/20 text-[11px] font-semibold gap-1"
                                   title="Lihat foto kuitansi/struk"
                                 >
                                   <ImageIcon className="w-3.5 h-3.5" />
                                   Foto
-                                </button>
+                                </Button>
                               ) : (
                                 <span className="text-muted-foreground text-[10px]">—</span>
                               )}
                             </td>
 
                             {/* Nominal Diajukan */}
-                            <td className="py-2.5 px-3 align-top text-right font-medium text-foreground text-[10px]">
+                            <td className="py-2 px-2.5 align-top text-right font-medium text-foreground text-[10px]">
                               {formatRupiah(r.amount)}
                             </td>
 
                             {/* Nominal Disetujui */}
-                            <td className="py-2.5 px-3 align-top text-right text-[10px]">
+                            <td className="py-2 px-2.5 align-top text-right text-[10px]">
                               {r.approvedAmount !== undefined && r.status !== "Diajukan" ? (
                                 <div>
                                   <span className="font-bold text-emerald-600 dark:text-emerald-400 block">
@@ -2429,7 +2364,7 @@ Terima kasih.`;
                             </td>
 
                             {/* Sumber Bank / Kas Pencairan */}
-                            <td className="py-2.5 px-3 align-top text-[10px]">
+                            <td className="py-2 px-2.5 align-top text-[10px]">
                               {r.status === "Dibayar" ? (
                                 <div className="flex flex-col text-left leading-tight py-0.5 space-y-0.5">
                                   {(() => {
@@ -2445,7 +2380,7 @@ Terima kasih.`;
                                               : "bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-300/40 uppercase"
                                           }`}
                                         >
-                                          {isCash ? "💵 TUNAI" : "🏦 " + (pmStr.split("-")[0]?.trim() || "BANK")}
+                                          {isCash ? "TUNAI" : (pmStr.split("-")[0]?.trim() || "BANK")}
                                         </Badge>
                                         <span className="text-[10px] text-foreground font-semibold">
                                           {pmStr}
@@ -2454,7 +2389,7 @@ Terima kasih.`;
                                     );
                                   })()}
                                   {r.kasMessengerId && (
-                                    <span className="text-[9px] font-mono text-muted-foreground">
+                                    <span className="text-[11px] font-mono text-muted-foreground">
                                       Ref: Kas #{r.kasMessengerId}
                                     </span>
                                   )}
@@ -2465,7 +2400,7 @@ Terima kasih.`;
                             </td>
 
                             {/* Status */}
-                            <td className="py-2.5 px-3 align-top text-center text-[10px]">
+                            <td className="py-2 px-2.5 align-top text-center text-[10px]">
                               {r.status === "Diajukan" && (
                                 <Badge variant="outline" className="text-[10px] font-semibold bg-blue-500/10 text-blue-600 border-blue-200">
                                   Diajukan
@@ -2494,7 +2429,7 @@ Terima kasih.`;
                             </td>
 
                             {/* Aksi */}
-                            <td className="py-2.5 px-3 align-top text-center text-[10px]">
+                            <td className="py-2 px-2.5 align-top text-center text-[10px]">
                               {(r.status === "Diajukan" || r.status === "Sedang Ditinjau") && (
                                 <Button
                                   size="sm"
@@ -2537,8 +2472,12 @@ Terima kasih.`;
                       })
                     ) : (
                       <tr>
-                        <td colSpan={11} className="py-8 text-center text-muted-foreground text-[10px]">
-                          Tidak ada data pengajuan reimbursement yang sesuai filter.
+                        <td colSpan={11} className="p-0 text-center">
+                          <EmptyState
+                            className="min-h-[180px]"
+                            title="Belum ada data reimbursement"
+                            description="Tidak ada data pengajuan reimbursement yang sesuai filter."
+                          />
                         </td>
                       </tr>
                     )}
@@ -2836,12 +2775,14 @@ Terima kasih.`;
   if (tab === "kas-kantor") {
     const kasKantorFields: FieldConfig[] = [
       { key: "tanggal", label: "Tanggal", type: "date" },
-      { key: "status", label: "Tipe arus kas", type: "select", options: ["Debit (Masuk)", "Kredit (Keluar)"] },
+      { key: "status", label: "Tipe arus kas", type: "select", options: ["Debit", "Kredit"] },
       { key: "kategori", label: "Kategori Kas", type: "select", options: STANDARD_EXPENSE_CATEGORIES },
-      { key: "nominal", label: "Nominal transaksi", type: "number", placeholder: "0" },
+      { key: "debit", label: "Debit (Masuk)", type: "number", placeholder: "0" },
+      { key: "kredit", label: "Kredit (Keluar)", type: "number", placeholder: "0" },
       { key: "keterangan", label: "Keterangan", type: "text", placeholder: "Contoh: Pembayaran invoice atau biaya sewa" },
       { key: "penanggungJawab", label: "Penanggung jawab", type: "select", options: responsibleOptions, placeholder: "Pilih penanggung jawab" },
       { key: "orderNo", label: "Nomor Order Terkait (Opsional)", type: "select", options: availableOrderOptions, placeholder: "Pilih order terkait jika ada" },
+      { key: "reason", label: "Alasan Perubahan", type: "text", placeholder: "Jelaskan alasan koreksi (tercatat di audit log)" },
     ];
 
     const kasKantorColumns: Column[] = [
@@ -2908,42 +2849,33 @@ Terima kasih.`;
 
     return (
       <div className="flex-1 flex flex-col min-h-0 space-y-4">
-        {/* Toolbar Rekonsiliasi & Tutup Kas */}
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-card p-3 rounded-xl border border-border shadow-xs">
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-lg bg-primary/10 text-primary flex items-center justify-center font-bold">
-              <FileSpreadsheet className="w-5 h-5" />
-            </div>
-            <div>
-              <h2 className="text-sm font-semibold text-foreground">Buku Kas Kantor</h2>
-              <p className="text-xs text-muted-foreground">Pencatatan arus kas operasional harian dan rekonsiliasi kas fisik</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2 w-full sm:w-auto flex-wrap">
-
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setIsRekonsiliasiOpen(true)}
-              className="h-8 text-xs font-semibold flex items-center gap-1.5 border-primary/30 text-primary hover:bg-primary/5"
-            >
-              <Printer className="w-3.5 h-3.5" />
-              <span>Rekonsiliasi & Tutup Kas Harian (A5)</span>
-            </Button>
-          </div>
-        </div>
-
-        {renderSubTabHeader("Kas Kantor", "Kelola transaksi kas kantor")}
+        {renderSubTabHeader("Kas Kantor", "Kelola transaksi arus kas operasional kantor")}
 
         {/* Level 3: Table (Maximized Viewport Height with internal scrolling) */}
-        <Card className="p-3.5 sm:p-4 border border-border bg-card shadow-xs md:h-[calc(100vh-180px)] min-h-[500px] flex flex-col shrink-0">
+        <Card className="p-3.5 sm:p-4 border border-border bg-card shadow-xs md:h-[calc(100vh-140px)] min-h-[500px] flex flex-col shrink-0">
           <EnhancedTableWithDialogs
             columns={kasKantorColumns}
             data={kasKantorData}
             subTabTitle="Kas Kantor"
             onAdd={() => setIsAddKasKantorOpen(true)}
             onView={(item) => setViewingItem({ item, subTabTitle: "Kas kantor", columns: kasKantorColumns })}
-            onEdit={(item, updated) => updateKasKantor(item.id, updated)}
+            onEdit={async (item, updated) => {
+              const rawStatus = String(updated.status || "Debit").toLowerCase();
+              const isDebit = rawStatus.includes("debit") || rawStatus === "pemasukan";
+              const debitVal = Number(updated.debit || 0);
+              const kreditVal = Number(updated.kredit || 0);
+              await updateKasKantor(item.id, {
+                tanggal: updated.tanggal,
+                status: isDebit ? "Debit" : "Kredit",
+                kategori: updated.kategori,
+                debit: debitVal,
+                kredit: kreditVal,
+                keterangan: updated.keterangan,
+                penanggungJawab: updated.penanggungJawab,
+                orderNo: extractOrderNo(updated.orderNo),
+                reason: updated.reason ? String(updated.reason).trim() : undefined,
+              });
+            }}
             onDelete={(item, reason) => deleteKasKantor(item.id, reason || "")}
             searchPlaceholder="Cari berdasarkan keterangan transaksi..."
             editFields={kasKantorFields}
@@ -2957,8 +2889,10 @@ Terima kasih.`;
           responsibleOptions={responsibleOptions}
           orderOptions={availableOrderOptions}
           expenseCategories={STANDARD_EXPENSE_CATEGORIES}
+          isLoading={isEmployeeLoading}
+          error={employeeError}
           onSubmit={async (data) => {
-            addKasKantor({
+            await addKasKantorAsync({
               tanggal: data.tanggal,
               status: data.status,
               kategori: data.kategori,
@@ -3003,22 +2937,6 @@ Terima kasih.`;
             columnsCount={3}
           />
         </div>
-
-        <RekonsiliasiKasModal
-          open={isRekonsiliasiOpen}
-          onOpenChange={setIsRekonsiliasiOpen}
-          kasTransactions={kasKantorData}
-          currentUser={{
-            nama: (() => {
-              try {
-                const u = localStorage.getItem("auth_user");
-                if (u) return JSON.parse(u).nama || JSON.parse(u).name;
-              } catch {}
-              return "Kasir Operasional";
-            })(),
-            role: "finance",
-          }}
-        />
       </div>
     );
   }
@@ -3092,7 +3010,7 @@ Terima kasih.`;
         {renderSubTabHeader("Pengeluaran", "Catat dan monitor seluruh pos pengeluaran operasional kantor")}
 
         {/* Level 3: Table */}
-        <Card className="p-4 sm:p-5 border border-border bg-card shadow-xs flex-1 flex flex-col min-h-0">
+        <Card className="p-3.5 sm:p-4 border border-border bg-card shadow-xs flex-1 flex flex-col min-h-0">
           <EnhancedTableWithDialogs
             columns={pengeluaranColumns}
             data={pengeluaranData}
@@ -3445,6 +3363,18 @@ Terima kasih.`;
             searchPlaceholder="Cari nama customer, nomor polisi, nomor order..."
             hideAddButton={true}
             hideEditButton={true}
+            toolbarExtras={
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleOpenVoidHistory}
+                className="h-8 text-xs border-border gap-1.5 shrink-0"
+              >
+                <History className="w-3.5 h-3.5" />
+                <span>Log Audit Void</span>
+              </Button>
+            }
           />
         </Card>
 
@@ -3608,26 +3538,28 @@ Terima kasih.`;
                       {/* Input Nominal Pembayaran & Kalkulator Sisa */}
                       <div className="space-y-1.5 pt-1">
                         <div className="flex items-center justify-between">
-                          <label className="text-[11px] font-semibold text-foreground block">
+                          <Label className="text-[11px] font-semibold text-foreground block">
                             Nominal Pembayaran <span className="text-destructive">*</span>
-                          </label>
-                          <button
+                          </Label>
+                          <Button
                             type="button"
+                            variant="link"
+                            size="sm"
                             onClick={() => {
                               const curSisa = Number(lunasTargetItem.kekurangan ?? lunasTargetItem.sisa ?? 0);
                               handleLunasAmountChange(curSisa);
                               setLunasInstallmentMode("full");
                             }}
-                            className="text-[10px] text-primary hover:underline font-semibold flex items-center gap-1"
+                            className="h-auto p-0 text-[11px] font-semibold gap-1"
                           >
                             Lunasi Sisa ({formatRupiah(Number(lunasTargetItem.kekurangan ?? lunasTargetItem.sisa ?? 0))})
-                          </button>
+                          </Button>
                         </div>
                         <div className="relative">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-muted-foreground">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-muted-foreground z-10 pointer-events-none">
                             Rp
                           </span>
-                          <input
+                          <Input
                             type="number"
                             min="1"
                             max={Number(lunasTargetItem.kekurangan ?? lunasTargetItem.sisa ?? 0)}
@@ -3643,7 +3575,7 @@ Terima kasih.`;
                               }
                             }}
                             placeholder="0"
-                            className="w-full h-9 pl-9 pr-3 rounded-md border border-border bg-input-background text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary font-mono font-semibold"
+                            className="pl-9 font-mono font-semibold text-xs"
                           />
                         </div>
                         {/* Kalkulator Sisa Berjalan */}
@@ -3692,17 +3624,17 @@ Terima kasih.`;
                       {/* Baris Tanggal & Metode Pembayaran */}
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
                         <div className="space-y-1">
-                          <label className="text-[11px] font-semibold text-foreground block">
+                          <Label className="text-[11px] font-semibold text-foreground block">
                             Tanggal Pembayaran <span className="text-destructive">*</span>
-                          </label>
-                          <input
+                          </Label>
+                          <Input
                             type="date"
                             value={lunasDate}
                             onChange={(e) => {
                               actionFeedback.clearError("finance-lunas-submit");
                               setLunasDate(e.target.value);
                             }}
-                            className="w-full h-9 px-3 rounded-md border border-border bg-input-background text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                            className="text-xs"
                           />
                           {!lunasDate?.trim() && (
                             <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">
@@ -3712,32 +3644,38 @@ Terima kasih.`;
                         </div>
 
                         <div className="space-y-1">
-                          <label className="text-[11px] font-semibold text-foreground block">
+                          <Label className="text-[11px] font-semibold text-foreground block">
                             Metode / Bank Kas Masuk <span className="text-destructive">*</span>
-                          </label>
-                          <select
+                          </Label>
+                          <Select
                             value={lunasMethod}
-                            onChange={(e) => {
+                            onValueChange={(val) => {
                               actionFeedback.clearError("finance-lunas-submit");
-                              setLunasMethod(e.target.value);
+                              setLunasMethod(val);
                             }}
-                            className="w-full h-9 px-3 rounded-md border border-border bg-input-background text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary font-normal"
                           >
-                            {activeMethods.length > 0 ? (
-                              activeMethods.map((m) => (
-                                <option key={m.id} value={m.nama_metode}>
-                                  {m.nama_metode} ({m.bank}{m.nomor_rekening ? ` - ${m.nomor_rekening}` : ""})
-                                </option>
-                              ))
-                            ) : (
-                              <>
-                                <option value="Transfer BCA">Transfer BCA</option>
-                                <option value="Transfer Mandiri">Transfer Mandiri</option>
-                                <option value="Transfer BRI">Transfer BRI</option>
-                                <option value="Kas Tunai">Kas Tunai</option>
-                              </>
-                            )}
-                          </select>
+                            <SelectTrigger className="h-9 text-xs font-normal">
+                              <SelectValue placeholder="Pilih metode pembayaran" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {activeMethods.filter((m) => m.nama_metode?.trim()).length > 0 ? (
+                                activeMethods
+                                  .filter((m) => m.nama_metode?.trim())
+                                  .map((m) => (
+                                    <SelectItem key={m.id} value={m.nama_metode}>
+                                      {m.nama_metode} ({m.bank}{m.nomor_rekening ? ` - ${m.nomor_rekening}` : ""})
+                                    </SelectItem>
+                                  ))
+                              ) : (
+                                <>
+                                  <SelectItem value="Transfer BCA">Transfer BCA</SelectItem>
+                                  <SelectItem value="Transfer Mandiri">Transfer Mandiri</SelectItem>
+                                  <SelectItem value="Transfer BRI">Transfer BRI</SelectItem>
+                                  <SelectItem value="Kas Tunai">Kas Tunai</SelectItem>
+                                </>
+                              )}
+                            </SelectContent>
+                          </Select>
                           {(() => {
                             const sel = paymentMethodStore.getAll().find((m) => m.nama_metode === lunasMethod);
                             if (sel && sel.status === "Nonaktif") {
@@ -3754,15 +3692,15 @@ Terima kasih.`;
 
                       {/* Catatan Pembayaran */}
                       <div className="space-y-1 pt-1">
-                        <label className="text-[11px] font-semibold text-foreground block">
+                        <Label className="text-[11px] font-semibold text-foreground block">
                           Catatan Transaksi <span className="text-muted-foreground font-normal">(Opsional)</span>
-                        </label>
-                        <input
+                        </Label>
+                        <Input
                           type="text"
                           value={lunasNotes}
                           onChange={(e) => setLunasNotes(e.target.value)}
                           placeholder="Contoh: DP Termin 2 / Pelunasan via Transfer M-Banking"
-                          className="w-full h-9 px-3 rounded-md border border-border bg-input-background text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                          className="text-xs"
                         />
                       </div>
 
@@ -3785,14 +3723,17 @@ Terima kasih.`;
                               <span className="font-mono text-[11px] truncate text-foreground">{lunasProof.fileName}</span>
                               <span className="text-[10px] text-muted-foreground uppercase">({lunasProof.fileType})</span>
                             </div>
-                            <button
+                            <Button
                               type="button"
+                              variant="ghost"
+                              size="icon-sm"
                               onClick={() => setLunasProof(null)}
-                              className="text-destructive hover:text-destructive/80 p-1 text-xs"
+                              className="text-destructive hover:text-destructive hover:bg-destructive/10 shrink-0"
+                              aria-label="Hapus bukti pembayaran"
                               title="Hapus / ganti berkas"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
-                            </button>
+                            </Button>
                           </div>
                         ) : (
                           <label className="flex flex-col items-center justify-center p-3 border border-dashed border-border rounded-lg bg-background hover:bg-muted/30 cursor-pointer transition-colors">
@@ -3847,26 +3788,37 @@ Terima kasih.`;
                                         {formatRupiah(p.nominal || p.amount || 0)}
                                       </span>
                                       {isVoid && (
-                                        <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-bold bg-destructive/15 text-destructive border border-destructive/30">
+                                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-bold bg-destructive/15 text-destructive border border-destructive/30">
                                           BATAL (VOID)
                                         </span>
                                       )}
                                     </div>
-                                    <span className="text-[10px] text-muted-foreground">
+                                    <span className="text-[11px] text-muted-foreground">
                                       {p.tanggal_bayar || p.tanggal || "-"} • {p.metode_pembayaran || p.metodePembayaran || p.nama_bank || "Transfer"}
                                       {(p.keterangan || p.catatan) ? ` • ${p.keterangan || p.catatan}` : ""}
                                     </span>
                                     {isVoid && p.void_reason && (
-                                      <span className="text-[9px] text-destructive/90 italic mt-0.5">
+                                      <span className="text-[11px] text-destructive/90 italic mt-0.5">
                                         Alasan: {p.void_reason} {p.voided_by ? `(oleh: ${p.voided_by})` : ""}
                                       </span>
                                     )}
                                   </div>
                                   <div className="flex items-center gap-1.5">
-                                    {!isVoid && (
+                                    {!isVoid && (() => {
+                                      const rawVerif = String(p.status_verifikasi || p.statusVerifikasi || "").trim().toUpperCase();
+                                      const verifLabel = rawVerif || "STATUS TIDAK DIKETAHUI";
+                                      const verifClass =
+                                        rawVerif === "TERVERIFIKASI"
+                                          ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
+                                          : rawVerif === "MENUNGGU_VERIFIKASI" || rawVerif === "MENUNGGU_BUKTI" || rawVerif === "PENDING"
+                                          ? "bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/20"
+                                          : rawVerif === "DITOLAK"
+                                          ? "bg-destructive/15 text-destructive border-destructive/30"
+                                          : "bg-muted text-muted-foreground border-border";
+                                      return (
                                       <>
-                                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-                                          {p.status_verifikasi || p.statusVerifikasi || "TERVERIFIKASI"}
+                                        <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-semibold border ${verifClass}`}>
+                                          {verifLabel}
                                         </span>
                                         <Button
                                           type="button"
@@ -3898,7 +3850,8 @@ Terima kasih.`;
                                           <span>Kwitansi</span>
                                         </Button>
                                       </>
-                                    )}
+                                      );
+                                    })()}
                                   </div>
                                 </div>
                               );
@@ -3972,6 +3925,7 @@ Terima kasih.`;
         />
 
         {renderKwitansiModal()}
+        {renderVoidHistoryModal()}
       </div>
     );
   }
@@ -4150,7 +4104,7 @@ Terima kasih.`;
             <span className="font-mono tabular-nums text-xs font-bold text-amber-600 dark:text-amber-400">
               {formatRupiah(val || 0)}
             </span>
-            <span className="text-[9px] text-muted-foreground uppercase tracking-wider font-semibold">
+            <span className="text-[11px] text-muted-foreground uppercase tracking-wider font-semibold">
               (Estimasi)
             </span>
           </div>
@@ -4289,13 +4243,19 @@ Terima kasih.`;
   }
 
     if (tab === "cashback-pending") {
-    const displayCashbackData = cashbackPendingData.filter(
-      (item: any) => !dismissedCashbackIds.has(item.id) && (!item.orderNo || !dismissedCashbackIds.has(item.orderNo))
-    );
+    const displayCashbackData = cashbackPendingData;
+    const isItemPaid = (item: any) =>
+      item?.status === "Dibayar" ||
+      item?.cashbackStatus === "REALIZED" ||
+      item?.refundStatus === "PROCESSED";
 
     const totalKelebihan = displayCashbackData.reduce((acc: number, item: any) => acc + (item.nominalKelebihan || item.jumlahCashback || 0), 0);
-    const totalPendingCount = displayCashbackData.filter((item: any) => item.status !== "Dibayar" && !paidCashbackIds.has(item.id) && (!item.orderNo || !paidCashbackIds.has(item.orderNo))).length;
+    const totalPendingCount = displayCashbackData.filter((item: any) => !isItemPaid(item)).length;
     const totalSudahDibayarCount = displayCashbackData.length - totalPendingCount;
+    const totalHistoryNominal = cashbackHistoryData.reduce(
+      (acc: number, item: any) => acc + Number(item.jumlahCashback || item.nominalKelebihan || item.nominalKomisi || 0),
+      0
+    );
 
     const cashbackPendingColumns: Column[] = [
       { 
@@ -4407,7 +4367,7 @@ Terima kasih.`;
         filterType: "select" as const,
         filterOptions: ["Pending", "Dibayar", "Menunggu Supervisi"],
         render: (val: string, item: any) => {
-          const isPaid = paidCashbackIds.has(item.id) || (item.orderNo && paidCashbackIds.has(item.orderNo)) || val === "Dibayar";
+          const isPaid = val === "Dibayar" || isItemPaid(item);
           if (isPaid) {
             return (
               <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20">
@@ -4435,7 +4395,10 @@ Terima kasih.`;
         key: "aksi",
         label: "Aksi",
         render: (_val: any, item: any) => {
-          const isPaid = paidCashbackIds.has(item.id) || (item.orderNo && paidCashbackIds.has(item.orderNo)) || item.status === "Dibayar";
+          const isPaid =
+      item.status === "Dibayar" ||
+      item.cashbackStatus === "REALIZED" ||
+      item.refundStatus === "PROCESSED";
           const isGated = Boolean(item.isPayoutGated);
           const gatingReason = item.payoutGatingReason || (!item.hasFinalCost ? "Biaya Final Belum Ada" : "Menunggu persetujuan Supervisi (Stage 6)");
 
@@ -4563,53 +4526,211 @@ Terima kasih.`;
       }
     ];
 
+    const cashbackHistoryColumns = [
+      { key: "orderNo", label: "No. Order / Invoice", render: (val: string, item: any) => val && val !== "-" ? val : item.invoice || "-" },
+      { key: "tanggalMasukBerkas", label: "Tgl Masuk" },
+      {
+        key: "cashbackPaidAt",
+        label: "Tgl Dicairkan",
+        render: (val: string, item: any) => (val || item.refundProcessedAt || "-").slice(0, 10),
+      },
+      {
+        key: "cashbackCompletedAt",
+        label: "Tgl Selesai",
+        render: (val: string) => (val ? String(val).slice(0, 10) : "-"),
+      },
+      { key: "customer", label: "Nama Customer" },
+      { key: "nopol", label: "Plat No." },
+      {
+        key: "jumlahCashback",
+        label: "Nominal",
+        type: "currency" as const,
+        render: (val: number, item: any) => (
+          <span className="font-mono font-semibold text-emerald-700 dark:text-emerald-400">
+            {formatRupiah(Number(val || item.nominalKelebihan || item.nominalKomisi || 0))}
+          </span>
+        ),
+      },
+      {
+        key: "cashbackCompletedBy",
+        label: "Petugas Selesai",
+        render: (val: string, item: any) => val || item.cashbackPaidBy || item.refundProcessedBy || "-",
+      },
+      {
+        key: "cashbackCompletionNotes",
+        label: "Catatan",
+        render: (val: string) => val || "-",
+      },
+      {
+        key: "statusCashback",
+        label: "Status",
+        filterable: true,
+        filterType: "select" as const,
+        filterOptions: ["Selesai", "Dibayar"],
+        render: (val: string) => (
+          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/20">
+            {val || "Selesai"}
+          </span>
+        ),
+      },
+      {
+        key: "id",
+        label: "Aksi",
+        render: (_: any, item: any) => (
+          <div className="flex items-center gap-1.5">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-6 px-2 text-[11px] gap-1 text-muted-foreground hover:text-foreground border-border"
+              onClick={() => setViewingItem({ item, subTabTitle: "Riwayat Cashback", columns: cashbackHistoryColumns })}
+              title="Lihat rincian arsip cashback"
+            >
+              <Eye className="w-3 h-3" />
+              <span>Detail</span>
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-6 px-2 text-[11px] gap-1 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/10"
+              onClick={() => {
+                setPrintVoucherData({
+                  orderNo: item.orderNo || item.invoice || `ORD-${item.id}`,
+                  invoiceNo: item.invoice || (item.orderNo ? `INV/${item.orderNo.replace(/^ORD-/, "")}` : "INV-001"),
+                  voucherNo: `VCR-REF/${(item.orderNo || `ORD-${item.id}`).replace(/^ORD-/, "")}`,
+                  customer: item.customer || "Konsumen",
+                  phone: item.phone || item.nomorHp || "",
+                  nopol: item.nopol || "-",
+                  layanan: item.pengurusan || item.jenisLayanan || "Pengurusan Dokumen Kendaraan",
+                  tanggal: item.tanggalMasukBerkas || item.tanggal || new Date().toISOString().split("T")[0],
+                  nominal: Number(item.nominalKelebihan || item.jumlahCashback || 0),
+                  metode: "Transfer Bank",
+                  bank: item.bank || "BCA",
+                  noRekening: item.noRekening || "-",
+                  namaRekening: item.customer || "Konsumen",
+                  catatan: item.cashbackCompletionNotes || "Bukti Voucher Pengeluaran Kas (Refund)",
+                  approvedBy: item.cashbackCompletedBy || "Supervisor Finansial",
+                  kasirName: item.cashbackPaidBy || "Kasir SUN89",
+                });
+              }}
+              title="Cetak voucher arsip cashback"
+            >
+              <Printer className="w-3 h-3" />
+              <span>Cetak</span>
+            </Button>
+          </div>
+        ),
+      },
+    ];
+
     return (
       <div className="flex-1 flex flex-col min-h-0 space-y-4">
-        {renderSubTabHeader("Cashback Terpending", "Kewajiban pengembalian kelebihan bayar kepada customer")}
-        
+        {renderSubTabHeader("Cashback Terpending", "Kewajiban pengembalian kelebihan bayar kepada customer & arsip penyelesaian DB")}
 
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant={cashbackViewMode === "active" ? "default" : "outline"}
+            size="sm"
+            className="h-8 text-xs font-semibold"
+            onClick={() => setCashbackViewMode("active")}
+          >
+            Antrean Aktif ({displayCashbackData.length})
+          </Button>
+          <Button
+            type="button"
+            variant={cashbackViewMode === "history" ? "default" : "outline"}
+            size="sm"
+            className="h-8 text-xs font-semibold"
+            onClick={() => setCashbackViewMode("history")}
+          >
+            Riwayat Cashback (Arsip DB) ({cashbackHistoryData.length})
+          </Button>
+        </div>
 
         <Card className="p-3.5 sm:p-4 border border-border bg-card shadow-xs md:h-[calc(100vh-140px)] min-h-[520px] flex flex-col shrink-0">
-          <EnhancedTableWithDialogs
-            columns={cashbackPendingColumns}
-            data={displayCashbackData}
-            subTabTitle="Cashback Terpending"
-            suppressTrailingActionColumn={true}
-            hideDeleteButton={true}
-            searchPlaceholder="Cari nama customer, nomor polisi, order..."
-            hideAddButton={true}
-            hideEditButton={true}
-          />
+          {cashbackViewMode === "active" ? (
+            <EnhancedTableWithDialogs
+              columns={cashbackPendingColumns}
+              data={displayCashbackData}
+              subTabTitle="Cashback Terpending"
+              suppressTrailingActionColumn={true}
+              hideDeleteButton={true}
+              searchPlaceholder="Cari nama customer, nomor polisi, order..."
+              hideAddButton={true}
+              hideEditButton={true}
+            />
+          ) : (
+            <EnhancedTableWithDialogs
+              columns={cashbackHistoryColumns}
+              data={cashbackHistoryData}
+              subTabTitle="Riwayat Cashback (Arsip DB)"
+              suppressTrailingActionColumn={true}
+              hideDeleteButton={true}
+              searchPlaceholder="Cari riwayat customer, order, petugas, catatan..."
+              hideAddButton={true}
+              hideEditButton={true}
+            />
+          )}
         </Card>
 
         {/* Standardized Neutral Financial Summary in Normal Document Flow Below Table */}
         <div className="pt-2 pb-8 shrink-0">
           <FinanceSummary
-            items={[
-              {
-                id: "kelebihan-pembayaran",
-                label: "Kelebihan Pembayaran Pelanggan",
-                value: totalKelebihan,
-                type: "outflow", // Merah! (Kewajiban pengembalian kas ke customer)
-                subtitle: `${displayCashbackData.length} total transaksi pengembalian dana`,
-              },
-              {
-                id: "menunggu-pencairan",
-                label: "Status Menunggu Pencairan",
-                value: `${totalPendingCount} transaksi`,
-                type: "neutral",
-                isCurrency: false,
-                subtitle: "Siap diproses pengembalian kas",
-              },
-              {
-                id: "selesai-dicairkan",
-                label: "Sudah Selesai Dicairkan",
-                value: `${totalSudahDibayarCount} transaksi`,
-                type: "neutral",
-                isCurrency: false,
-                subtitle: "Tekan tombol Selesai untuk membersihkan antrean",
-              },
-            ]}
+            items={
+              cashbackViewMode === "active"
+                ? [
+                    {
+                      id: "kelebihan-pembayaran",
+                      label: "Kelebihan Pembayaran Pelanggan",
+                      value: totalKelebihan,
+                      type: "outflow",
+                      subtitle: `${displayCashbackData.length} transaksi aktif pada antrean`,
+                    },
+                    {
+                      id: "menunggu-pencairan",
+                      label: "Status Menunggu Pencairan",
+                      value: `${totalPendingCount} transaksi`,
+                      type: "neutral",
+                      isCurrency: false,
+                      subtitle: "Siap diproses pengembalian kas",
+                    },
+                    {
+                      id: "selesai-dicairkan",
+                      label: "Sudah Dicairkan (Menunggu Konfirmasi Selesai)",
+                      value: `${totalSudahDibayarCount} transaksi`,
+                      type: "neutral",
+                      isCurrency: false,
+                      subtitle: "Tekan Selesai untuk mengarsipkan secara permanen di DB",
+                    },
+                  ]
+                : [
+                    {
+                      id: "riwayat-total-nominal",
+                      label: "Total Cashback Terselesaikan (Arsip DB)",
+                      value: totalHistoryNominal,
+                      type: "neutral",
+                      subtitle: `${cashbackHistoryData.length} transaksi selesai di database`,
+                    },
+                    {
+                      id: "riwayat-jumlah-arsip",
+                      label: "Jumlah Arsip Selesai",
+                      value: `${cashbackHistoryData.length} transaksi`,
+                      type: "neutral",
+                      isCurrency: false,
+                      subtitle: "Tetap tersedia lintas reload & sesi pengguna",
+                    },
+                    {
+                      id: "antrean-aktif-sisa",
+                      label: "Sisa Antrean Aktif",
+                      value: `${displayCashbackData.length} transaksi`,
+                      type: "neutral",
+                      isCurrency: false,
+                      subtitle: "Kewajiban aktif yang belum diselesaikan",
+                    },
+                  ]
+            }
             columnsCount={3}
           />
         </div>
@@ -4718,25 +4839,27 @@ Terima kasih.`;
                   {/* Nominal yang Dicairkan */}
                   <div className="space-y-1">
                     <div className="flex items-center justify-between">
-                      <label className="text-[11px] font-semibold text-foreground block">
+                      <Label className="text-[11px] font-semibold text-foreground block">
                         Nominal yang Dicairkan <span className="text-destructive">*</span>
-                      </label>
-                      <button
+                      </Label>
+                      <Button
                         type="button"
+                        variant="link"
+                        size="sm"
                         onClick={() => {
                           actionFeedback.clearError("finance-cashback-submit");
                           setCashbackAmount(Number(cashbackTargetItem.nominalKelebihan || cashbackTargetItem.jumlahCashback || 0));
                         }}
-                        className="text-[10px] text-primary hover:underline font-semibold"
+                        className="h-auto p-0 text-[11px] font-semibold"
                       >
                         Maksimal ({formatRupiah(Number(cashbackTargetItem.nominalKelebihan || cashbackTargetItem.jumlahCashback || 0))})
-                      </button>
+                      </Button>
                     </div>
                     <div className="relative">
-                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-muted-foreground">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-muted-foreground z-10 pointer-events-none">
                         Rp
                       </span>
-                      <input
+                      <Input
                         type="number"
                         min="1"
                         max={Number(cashbackTargetItem.nominalKelebihan || cashbackTargetItem.jumlahCashback || 0)}
@@ -4745,7 +4868,7 @@ Terima kasih.`;
                           actionFeedback.clearError("finance-cashback-submit");
                           setCashbackAmount(Number(e.target.value));
                         }}
-                        className="w-full h-9 pl-9 pr-3 rounded-md border border-border bg-input-background text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary font-mono font-semibold"
+                        className="pl-9 font-mono font-semibold text-xs"
                       />
                     </div>
                     {cashbackAmount <= 0 && (
@@ -4764,26 +4887,25 @@ Terima kasih.`;
                   {/* Tanggal Pengeluaran Kas + Checkbox Hari Ini */}
                   <div className="space-y-1">
                     <div className="flex items-center justify-between">
-                      <label className="text-[11px] font-semibold text-foreground block">
+                      <Label className="text-[11px] font-semibold text-foreground block">
                         Tanggal Pengeluaran Kas <span className="text-destructive">*</span>
-                      </label>
-                      <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground cursor-pointer">
-                        <input
-                          type="checkbox"
+                      </Label>
+                      <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground cursor-pointer select-none">
+                        <Checkbox
                           checked={isCashbackToday}
-                          onChange={(e) => {
+                          onCheckedChange={(checked) => {
+                            const isChecked = checked === true;
                             actionFeedback.clearError("finance-cashback-submit");
-                            setIsCashbackToday(e.target.checked);
-                            if (e.target.checked) {
+                            setIsCashbackToday(isChecked);
+                            if (isChecked) {
                               setCashbackDate(new Date().toISOString().split("T")[0]);
                             }
                           }}
-                          className="rounded border-border text-primary focus:ring-primary w-3.5 h-3.5"
                         />
                         <span>Hari Ini</span>
                       </label>
                     </div>
-                    <input
+                    <Input
                       type="date"
                       value={cashbackDate}
                       onChange={(e) => {
@@ -4791,7 +4913,7 @@ Terima kasih.`;
                         setCashbackDate(e.target.value);
                         setIsCashbackToday(e.target.value === new Date().toISOString().split("T")[0]);
                       }}
-                      className="w-full h-9 px-3 rounded-md border border-border bg-input-background text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary font-normal"
+                      className="text-xs font-normal"
                     />
                     {!cashbackDate?.trim() && (
                       <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">
@@ -4815,14 +4937,13 @@ Terima kasih.`;
                     return (
                       <>
                         <div className="space-y-1">
-                          <label className="text-[11px] font-semibold text-foreground block">
+                          <Label className="text-[11px] font-semibold text-foreground block">
                             Metode Pembayaran Keluar <span className="text-destructive">*</span>
-                          </label>
-                          <select
+                          </Label>
+                          <Select
                             value={cashbackMethod}
-                            onChange={(e) => {
+                            onValueChange={(selectedName) => {
                               actionFeedback.clearError("finance-cashback-submit");
-                              const selectedName = e.target.value;
                               setCashbackMethod(selectedName);
                               const foundM = activeMethods.find((m) => m.nama_metode === selectedName);
                               const nextIsCash =
@@ -4838,23 +4959,29 @@ Terima kasih.`;
                                 }
                               }
                             }}
-                            className="w-full h-9 px-3 rounded-md border border-border bg-input-background text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary font-normal"
                           >
-                            {activeMethods.length > 0 ? (
-                              activeMethods.map((m) => (
-                                <option key={m.id} value={m.nama_metode}>
-                                  {m.nama_metode} ({m.bank}{m.nomor_rekening ? ` - ${m.nomor_rekening}` : ""})
-                                </option>
-                              ))
-                            ) : (
-                              <>
-                                <option value="Transfer BCA">Transfer BCA (BCA)</option>
-                                <option value="Transfer Mandiri">Transfer Mandiri (Mandiri)</option>
-                                <option value="Transfer BRI">Transfer BRI (BRI)</option>
-                                <option value="Cash">Cash (Tunai)</option>
-                              </>
-                            )}
-                          </select>
+                            <SelectTrigger className="h-9 text-xs font-normal">
+                              <SelectValue placeholder="Pilih metode pembayaran" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {activeMethods.filter((m) => m.nama_metode?.trim()).length > 0 ? (
+                                activeMethods
+                                  .filter((m) => m.nama_metode?.trim())
+                                  .map((m) => (
+                                    <SelectItem key={m.id} value={m.nama_metode}>
+                                      {m.nama_metode} ({m.bank}{m.nomor_rekening ? ` - ${m.nomor_rekening}` : ""})
+                                    </SelectItem>
+                                  ))
+                              ) : (
+                                <>
+                                  <SelectItem value="Transfer BCA">Transfer BCA (BCA)</SelectItem>
+                                  <SelectItem value="Transfer Mandiri">Transfer Mandiri (Mandiri)</SelectItem>
+                                  <SelectItem value="Transfer BRI">Transfer BRI (BRI)</SelectItem>
+                                  <SelectItem value="Cash">Cash (Tunai)</SelectItem>
+                                </>
+                              )}
+                            </SelectContent>
+                          </Select>
                           {isMethodInactive && (
                             <p className="text-[10px] text-destructive mt-0.5">
                               Metode ini berstatus Nonaktif dan tidak dapat digunakan.
@@ -4875,10 +5002,11 @@ Terima kasih.`;
                         ) : (
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 p-2.5 rounded-md border border-border/70 bg-muted/20">
                             <div className="space-y-1">
-                              <label className="text-[10px] font-medium text-muted-foreground block">
+                              <Label className="text-[11px] font-medium text-muted-foreground block">
                                 Bank Tujuan <span className="text-destructive">*</span>
-                              </label>
-                              <input
+                              </Label>
+                              <Input
+                                inputSize="sm"
                                 type="text"
                                 value={cashbackBank === "Tunai" ? "" : cashbackBank}
                                 onChange={(e) => {
@@ -4886,7 +5014,7 @@ Terima kasih.`;
                                   setCashbackBank(e.target.value);
                                 }}
                                 placeholder="Contoh: BCA, Mandiri, BRI"
-                                className="w-full h-8 px-2.5 rounded-md border border-border bg-input-background text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary font-normal"
+                                className="font-normal"
                               />
                               {!cashbackBank.trim() && (
                                 <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">
@@ -4896,10 +5024,11 @@ Terima kasih.`;
                             </div>
 
                             <div className="space-y-1">
-                              <label className="text-[10px] font-medium text-muted-foreground block">
+                              <Label className="text-[11px] font-medium text-muted-foreground block">
                                 No. Rekening Tujuan <span className="text-destructive">*</span>
-                              </label>
-                              <input
+                              </Label>
+                              <Input
+                                inputSize="sm"
                                 type="text"
                                 value={cashbackNoRekening}
                                 onChange={(e) => {
@@ -4907,7 +5036,7 @@ Terima kasih.`;
                                   setCashbackNoRekening(e.target.value);
                                 }}
                                 placeholder="Nomor rekening"
-                                className="w-full h-8 px-2.5 rounded-md border border-border bg-input-background text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary font-mono"
+                                className="font-mono"
                               />
                               {!cashbackNoRekening.trim() && (
                                 <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">
@@ -4940,14 +5069,17 @@ Terima kasih.`;
                           <span className="font-mono text-[11px] truncate text-foreground">{cashbackProof.fileName}</span>
                           <span className="text-[10px] text-muted-foreground uppercase">({cashbackProof.fileType})</span>
                         </div>
-                        <button
+                        <Button
                           type="button"
+                          variant="ghost"
+                          size="icon-sm"
                           onClick={() => setCashbackProof(null)}
-                          className="text-destructive hover:text-destructive/80 p-1 text-xs"
+                          className="text-destructive hover:text-destructive hover:bg-destructive/10 shrink-0"
+                          aria-label="Hapus bukti transfer"
                           title="Hapus berkas"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        </Button>
                       </div>
                     ) : (
                       <label className="flex flex-col items-center justify-center p-2.5 border border-dashed border-border rounded-lg bg-background hover:bg-muted/30 cursor-pointer transition-colors">
@@ -5021,13 +5153,14 @@ Terima kasih.`;
           </AlertDialogContent>
         </AlertDialog>
 
-        {/* Modal Selesai (Informasi Cashback Telah Dicairkan & Dismiss dari Antrean) */}
+        {/* Modal Selesai (Konfirmasi Penyelesaian Cashback Permanen di DB -> Arsip Riwayat) */}
         <AlertDialog
           open={!!selesaiInfoItem}
           onOpenChange={(open) => {
             if (!open && !isSubmittingSelesai) {
               actionFeedback.clearError("finance-cashback-selesai");
               setSelesaiInfoItem(null);
+              setCashbackCompletionNotes("");
             }
           }}
         >
@@ -5035,12 +5168,12 @@ Terima kasih.`;
             <AlertDialogHeader>
               <AlertDialogTitle className="text-base font-semibold flex items-center gap-2 text-foreground">
                 <CheckCircle className="w-4 h-4 text-emerald-600" />
-                Cashback Berhasil Dicairkan
+                Selesaikan & Arsipkan Cashback
               </AlertDialogTitle>
               <AlertDialogDescription asChild className="text-xs text-muted-foreground pt-1 space-y-2">
                 <div>
                   <p className="leading-relaxed">
-                    Cashback terpending ini sudah berhasil dicairkan. Transaksi akan diselesaikan dan dikeluarkan dari antrean Cashback Terpending pada tampilan sesi ini.
+                    Transaksi cashback ini sudah dicairkan. Konfirmasi <strong>OK</strong> untuk menandai penyelesaian secara permanen di database dan memindahkannya ke tab <strong>Riwayat Cashback (Arsip DB)</strong>.
                   </p>
                   {selesaiInfoItem && (
                     <div className="p-3 rounded-md border border-border/80 bg-muted/30 space-y-1 font-mono text-xs text-foreground mt-2">
@@ -5049,6 +5182,19 @@ Terima kasih.`;
                       <div>Nominal: <span className="font-semibold text-emerald-600 dark:text-emerald-400">{formatRupiah(selesaiInfoItem.nominalKelebihan || selesaiInfoItem.jumlahCashback || 0)}</span></div>
                     </div>
                   )}
+                  <div className="pt-2 space-y-1">
+                    <Label htmlFor="cashback-completion-notes" className="text-[11px] font-medium text-foreground">
+                      Catatan Penyelesaian (Opsional)
+                    </Label>
+                    <Input
+                      id="cashback-completion-notes"
+                      value={cashbackCompletionNotes}
+                      onChange={(e) => setCashbackCompletionNotes(e.target.value)}
+                      placeholder="Contoh: Diterima oleh customer / arsip terverifikasi"
+                      className="h-8 text-xs"
+                      disabled={isSubmittingSelesai}
+                    />
+                  </div>
                 </div>
               </AlertDialogDescription>
             </AlertDialogHeader>
@@ -5067,12 +5213,16 @@ Terima kasih.`;
               </AlertDialogCancel>
               <AlertDialogAction
                 disabled={isSubmittingSelesai}
-                onClick={(e) => {
+                onClick={async (e) => {
                   e.preventDefault();
                   if (!selesaiInfoItem || selesaiDismissRef.current) return;
                   actionFeedback.clearError("finance-cashback-selesai");
                   const target = selesaiInfoItem;
-                  if (target.status !== "Dibayar" && !paidCashbackIds.has(target.id) && !(target.orderNo && paidCashbackIds.has(target.orderNo))) {
+                  const targetPaid =
+                    target.status === "Dibayar" ||
+                    target.cashbackStatus === "REALIZED" ||
+                    target.refundStatus === "PROCESSED";
+                  if (!targetPaid) {
                     const err = new ActionApiError(422, "BUSINESS_RULE_VIOLATION", "Transaksi cashback belum berstatus Dibayar sehingga tidak dapat diselesaikan dari antrean.");
                     const classified = actionFeedback.setError("finance-cashback-selesai", err);
                     toast.error(classified.message);
@@ -5082,18 +5232,12 @@ Terima kasih.`;
                   try {
                     setIsSubmittingSelesai(true);
                     const validOrderNo = target.orderNo && target.orderNo !== "-" ? target.orderNo : "";
-                    dismissCashback(target.id);
-                    if (validOrderNo) {
-                      dismissCashback(validOrderNo);
-                    }
-                    setDismissedCashbackIds((prev) => {
-                      const next = new Set(prev);
-                      next.add(target.id);
-                      if (validOrderNo) next.add(validOrderNo);
-                      return next;
+                    await completeCashback(target.id, {
+                      catatan: cashbackCompletionNotes.trim() || undefined,
                     });
-                    toast.success(`Transaksi ${validOrderNo || target.invoice || target.id} diselesaikan dari antrean pending.`);
+                    toast.success(`Transaksi ${validOrderNo || target.invoice || target.id} berhasil diselesaikan dan diarsipkan di database.`);
                     setSelesaiInfoItem(null);
+                    setCashbackCompletionNotes("");
                   } catch (err: any) {
                     const classified = actionFeedback.setError("finance-cashback-selesai", err, {
                       actionLabel: "menyelesaikan antrean cashback",
@@ -5141,7 +5285,10 @@ Terima kasih.`;
             </DialogHeader>
 
             {editingCashbackItem && (() => {
-              const isPaid = editingCashbackItem.status === "Dibayar" || paidCashbackIds.has(editingCashbackItem.id);
+              const isPaid =
+      editingCashbackItem.status === "Dibayar" ||
+      editingCashbackItem.cashbackStatus === "REALIZED" ||
+      editingCashbackItem.refundStatus === "PROCESSED";
               return (
                 <div className="space-y-3 py-2 text-xs">
                   {isPaid && (
@@ -5273,18 +5420,22 @@ Terima kasih.`;
 
                   <div className="space-y-1">
                     <Label className="text-[11px] font-semibold text-foreground">Status</Label>
-                    <select
+                    <Select
                       disabled={isPaid || isSavingEditCashback}
                       value={editingCashbackForm.status || "Pending"}
-                      onChange={(e) => {
+                      onValueChange={(val) => {
                         actionFeedback.clearError("finance-cashback-edit");
-                        setEditingCashbackForm({ ...editingCashbackForm, status: e.target.value });
+                        setEditingCashbackForm({ ...editingCashbackForm, status: val });
                       }}
-                      className="w-full h-8 px-2.5 rounded-md border border-border bg-input-background text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
                     >
-                      <option value="Pending">Pending</option>
-                      <option value="Dibayar">Dibayar</option>
-                    </select>
+                      <SelectTrigger size="sm" className="text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="Pending">Pending</SelectItem>
+                        <SelectItem value="Dibayar">Dibayar</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
 
                   <div className="space-y-1">

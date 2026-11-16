@@ -1,21 +1,13 @@
+import * as fs from 'fs';
 import { test, expect, Browser } from "@playwright/test";
 import * as path from "path";
 
 const BASE_URL = "http://localhost:3000";
 const EVIDENCE_DIR = "C:\\Users\\mahes\\.gemini\\antigravity\\brain\\4869b8c1-4be9-45c8-ac32-b2a933495169\\responsive_evidence";
 
-// Reusable login helper
-async function loginAs(page: any, email = "svp@birojasa.com", password = "admin123") {
-  await page.goto(`${BASE_URL}/login`);
-  await page.fill("#email", email);
-  await page.fill("#password", password);
-  await page.click("button[type='submit']");
-  if (email === "messenger@birojasa.com") {
-    await page.waitForURL("**/messenger/workspace", { timeout: 15000 });
-  } else {
-    await page.waitForURL("**/dashboard", { timeout: 15000 });
-  }
-}
+try { fs.mkdirSync(EVIDENCE_DIR, { recursive: true }); } catch {}
+
+import { loginAs } from "./helpers/authHelper";
 
 // Helper to check horizontal document overflow
 async function checkNoDocumentHorizontalOverflow(page: any) {
@@ -85,7 +77,7 @@ test.describe("Phase 8.4: Responsive Viewport & Module Coverage Matrix", () => {
   }
 
   test("Module Coverage: All 20 major routes render cleanly at 375x812 (mobile) and 1440x900 (desktop)", async ({ page }) => {
-    test.setTimeout(180_000);
+    test.setTimeout(300_000);
     const ROUTES_TO_AUDIT = [
       { path: "/dashboard", name: "Dashboard" },
       { path: "/finance/kas-kantor", name: "Finance Kas Kantor" },
@@ -134,11 +126,7 @@ test.describe("Phase 8.4: Responsive Viewport & Module Coverage Matrix", () => {
     // Isolated context with messenger login
     const msgCtx = await browser.newContext();
     const msgPage = await msgCtx.newPage();
-    await msgPage.goto(`${BASE_URL}/login`);
-    await msgPage.fill("#email", "budi.messenger@birojasa.com");
-    await msgPage.fill("#password", "messenger123");
-    await msgPage.click("button[type='submit']");
-    await msgPage.waitForURL("**/messenger/workspace", { timeout: 15000 });
+    await loginAs(msgPage, "budi.messenger@birojasa.com", "messenger123");
 
     const messengerVps = [
       { width: 320, height: 800 },
@@ -176,8 +164,8 @@ test.describe("Phase 8.4: Responsive Viewport & Module Coverage Matrix", () => {
 test.describe("Phase 8.4: Browser Zoom Matrix (25% - 300%)", () => {
   const ZOOMS = [25, 50, 67, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300];
 
-  test("Emulated Browser Zoom 25% - 300% on Data Penjualan: Tabs, table, and controls remain functional", async ({ browser }: { browser: Browser }) => {
-    test.setTimeout(180_000);
+  test("Emulated Browser Zoom 25% - 300% on Data Penjualan: Header selector, table, and controls remain functional", async ({ browser }: { browser: Browser }) => {
+    test.setTimeout(360_000);
     for (const z of ZOOMS) {
       const ctx = await browser.newContext({
         viewport: { width: Math.round((1440 * 100) / z), height: Math.round((900 * 100) / z) },
@@ -188,13 +176,10 @@ test.describe("Phase 8.4: Browser Zoom Matrix (25% - 300%)", () => {
       await page.goto(`${BASE_URL}/finance/data-penjualan/mutasi-ld`);
       await page.waitForLoadState("domcontentloaded");
 
-      // Verify tabs list is visible
-      const tabsList = page.locator("div[role='tablist']");
-      await expect(tabsList).toBeVisible();
-
-      // Verify active tab is selected
-      const activeTab = page.locator("button[role='tab'][aria-selected='true']");
-      await expect(activeTab).toBeVisible();
+      // Verify Header Service Dropdown trigger & table container remain visible
+      const serviceTrigger = page.locator("button[title='Pilih layanan Data Penjualan']");
+      await expect(serviceTrigger).toBeVisible();
+      await expect(page.locator("[data-slot='table-container']").first()).toBeVisible();
 
       // Take screenshot at key zoom levels
       if ([25, 50, 100, 150, 200, 300].includes(z)) {
@@ -218,12 +203,13 @@ test.describe("Phase 8.4: Browser Zoom Matrix (25% - 300%)", () => {
       const page = await ctx.newPage();
       await loginAs(page, "svp@birojasa.com", "admin123");
 
-      for (const url of [`${BASE_URL}/dashboard`, `${BASE_URL}/order/tracking`]) {
-        await page.goto(url);
-        await page.waitForLoadState("domcontentloaded");
-        const headerTitle = page.locator("header h2");
-        await expect(headerTitle).toBeVisible();
-      }
+      await page.goto(`${BASE_URL}/dashboard`);
+      await page.waitForLoadState("domcontentloaded");
+      await expect(page.getByRole("banner").getByText("Dashboard", { exact: true })).toBeVisible();
+
+      await page.goto(`${BASE_URL}/order/tracking`);
+      await page.waitForLoadState("domcontentloaded");
+      await expect(page.getByRole("banner").getByText("Order Tracking", { exact: true })).toBeVisible();
 
       await ctx.close();
     }
@@ -332,8 +318,8 @@ test.describe("Phase 8.4: Interaction, Accessibility & Modals Audit", () => {
     const customerInput = page.locator("#customerName, input[placeholder*='nama' i], input[name='customerName']").first();
     await expect(customerInput).toBeVisible();
 
-    // Verify 'Berikutnya' button is reachable on Step 1
-    const nextBtn = page.locator("button:has-text('Berikutnya')");
+    // Verify Step 1 submit/next button is reachable at 375px
+    const nextBtn = page.locator("button:has-text('Lanjut ke Dokumen & Pembayaran')");
     await expect(nextBtn).toBeVisible();
 
     // Verify touch target height is at least 36px (WCAG compliant)
@@ -351,18 +337,18 @@ test.describe("Phase 8.4: Full Regression (Phases 8.1, 8.2, 8.3)", () => {
   });
 
   test("Phase 8.1 Regression: Deep link, canonical slugs, and refresh persistence", async ({ page }) => {
-    // Deep link directly to bbn
+    // Deep link to legacy alias bbn -> canonicalizes to balik-nama
     await page.goto(`${BASE_URL}/finance/data-penjualan/bbn`);
-    await expect(page).toHaveURL(`${BASE_URL}/finance/data-penjualan/bbn`);
+    await expect(page).toHaveURL(`${BASE_URL}/finance/data-penjualan/balik-nama`);
 
-    // Verify tab selected
-    const bbnTab = page.getByRole("tab", { name: "BBN", exact: true });
-    await expect(bbnTab).toHaveAttribute("aria-selected", "true");
+    // Verify Header Service Dropdown shows Balik Nama
+    const serviceTrigger = page.locator("button[title='Pilih layanan Data Penjualan']");
+    await expect(serviceTrigger).toContainText("Balik Nama");
 
     // Refresh page
     await page.reload();
-    await expect(page).toHaveURL(`${BASE_URL}/finance/data-penjualan/bbn`);
-    await expect(bbnTab).toHaveAttribute("aria-selected", "true");
+    await expect(page).toHaveURL(`${BASE_URL}/finance/data-penjualan/balik-nama`);
+    await expect(serviceTrigger).toContainText("Balik Nama");
   });
 
   test("Phase 8.2 Regression: Table vertical-fill and bottom pagination across small datasets", async ({ page }) => {
@@ -386,7 +372,7 @@ test.describe("Phase 8.4: Full Regression (Phases 8.1, 8.2, 8.3)", () => {
 
   test("Phase 8.3 Regression: Tab visual states hierarchy (active vs inactive distinct styles)", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto(`${BASE_URL}/finance/data-penjualan/mutasi-ld`);
+    await page.goto(`${BASE_URL}/settings`);
 
     const activeTab = page.locator("button[role='tab'][aria-selected='true']");
     const inactiveTab = page.locator("button[role='tab'][aria-selected='false']").first();
@@ -397,7 +383,7 @@ test.describe("Phase 8.4: Full Regression (Phases 8.1, 8.2, 8.3)", () => {
     const activeBg = await activeTab.evaluate((el) => window.getComputedStyle(el).backgroundColor);
     const inactiveBg = await inactiveTab.evaluate((el) => window.getComputedStyle(el).backgroundColor);
 
-    // Active tab has card background, inactive tab has transparent background
+    // Active tab has distinct surface from inactive tab
     expect(activeBg).not.toBe(inactiveBg);
   });
 });

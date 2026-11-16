@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "../ui/dialog";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -14,6 +14,8 @@ export interface AddKasKantorModalProps {
   responsibleOptions: string[];
   orderOptions: string[];
   expenseCategories: string[];
+  isLoading?: boolean;
+  error?: string | null;
   onSubmit: (data: {
     tanggal: string;
     status: string;
@@ -34,12 +36,26 @@ export function AddKasKantorModal({
   responsibleOptions,
   orderOptions,
   expenseCategories,
+  isLoading = false,
+  error = null,
   onSubmit,
 }: AddKasKantorModalProps) {
   const [tanggal, setTanggal] = useState<string>(new Date().toISOString().split("T")[0]);
   const [status, setStatus] = useState<"Debit" | "Kredit">("Debit");
   const [kategori, setKategori] = useState<string>(expenseCategories[0] || "Operasional");
   const [penanggungJawab, setPenanggungJawab] = useState<string>(responsibleOptions[0] || "");
+  useEffect(() => {
+    if (responsibleOptions.length > 0) {
+      if (!penanggungJawab) {
+        setPenanggungJawab(responsibleOptions[0]);
+      } else if (!responsibleOptions.includes(penanggungJawab)) {
+        // Selected person is no longer in valid options list; reset to empty to avoid silent arbitrary replacement
+        setPenanggungJawab("");
+      }
+    } else if (!isLoading && responsibleOptions.length === 0) {
+      setPenanggungJawab("");
+    }
+  }, [responsibleOptions, penanggungJawab, isLoading]);
   const [nominal, setNominal] = useState<string>("");
   const [keterangan, setKeterangan] = useState<string>("");
   const [orderNo, setOrderNo] = useState<string>("-");
@@ -78,6 +94,11 @@ export function AddKasKantorModal({
       return;
     }
 
+    if (penanggungJawab && penanggungJawab.startsWith("__")) {
+      setErrorMsg("Penanggung jawab belum dipilih atau tidak tersedia.");
+      return;
+    }
+
     if (!isModalAwal && !paymentMethodId) {
       setErrorMsg("Metode pembayaran wajib dipilih untuk transaksi kas kantor operasional.");
       return;
@@ -90,7 +111,7 @@ export function AddKasKantorModal({
         status: status === "Debit" ? "Debit" : "Kredit",
         kategori,
         keterangan: keterangan.trim(),
-        penanggungJawab: penanggungJawab && penanggungJawab !== "-" ? penanggungJawab : undefined,
+        penanggungJawab: penanggungJawab && penanggungJawab !== "-" && !penanggungJawab.startsWith("__") ? penanggungJawab : undefined,
         debit: status === "Debit" ? cleanNominal : 0,
         kredit: status === "Kredit" ? cleanNominal : 0,
         orderNo: orderNo && orderNo !== "-" ? orderNo.split(" ")[0] : undefined,
@@ -151,14 +172,28 @@ export function AddKasKantorModal({
               <Label className="text-xs font-semibold">Penanggung Jawab</Label>
               <Select value={penanggungJawab} onValueChange={setPenanggungJawab}>
                 <SelectTrigger className="h-9 text-xs">
-                  <SelectValue placeholder="Pilih penanggung jawab" />
+                  <SelectValue placeholder={isLoading && responsibleOptions.length === 0 ? "Memuat data penanggung jawab..." : "Pilih penanggung jawab"} />
                 </SelectTrigger>
                 <SelectContent>
-                  {responsibleOptions.map((opt) => (
-                    <SelectItem key={opt} value={opt} className="text-xs">
-                      {opt}
+                  {isLoading && responsibleOptions.length === 0 ? (
+                    <SelectItem value="__loading" disabled className="text-xs text-muted-foreground">
+                      Memuat data penanggung jawab...
                     </SelectItem>
-                  ))}
+                  ) : error && responsibleOptions.length === 0 ? (
+                    <SelectItem value="__error" disabled className="text-xs text-rose-500">
+                      Gagal memuat: {error}
+                    </SelectItem>
+                  ) : responsibleOptions.length === 0 ? (
+                    <SelectItem value="__empty" disabled className="text-xs text-muted-foreground">
+                      Tidak ada penanggung jawab aktif
+                    </SelectItem>
+                  ) : (
+                    responsibleOptions.map((opt) => (
+                      <SelectItem key={opt} value={opt} className="text-xs">
+                        {opt}
+                      </SelectItem>
+                    ))
+                  )}
                 </SelectContent>
               </Select>
             </div>
@@ -296,7 +331,7 @@ export function AddKasKantorModal({
               type="submit"
               size="sm"
               className="text-xs h-8 bg-primary text-primary-foreground gap-1.5 font-semibold"
-              disabled={isSubmitting}
+              disabled={isSubmitting || isLoading || (responsibleOptions.length === 0 && !isModalAwal)}
             >
               <Plus className="w-3.5 h-3.5" />
               {isSubmitting ? "Menyimpan..." : "Simpan Transaksi"}

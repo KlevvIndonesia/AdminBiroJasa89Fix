@@ -1,4 +1,4 @@
-import { resolveTariff, getComponentJurisdiction } from "../../domain/pricing/pricingResolver";
+import { resolveTariff, getComponentJurisdiction, getStandardJasa } from "../../domain/pricing/pricingResolver";
 import { ResolvedTariff } from "../../domain/pricing/types";
 /**
  * Master Pricing Store — Authoritative Single Source of Truth for Master Pricing
@@ -17,6 +17,7 @@ import { ResolvedTariff } from "../../domain/pricing/types";
  */
 
 import { useState, useEffect } from "react";
+import { permissionStore } from "./permissionStore";
 export type { SamsatMasterItem };
 import {
   SamsatMasterItem,
@@ -222,7 +223,7 @@ export const MASTER_PRICING_ITEMS: PricingItem[] = [
   { id: "mutasi-cetak-plat", code: "MM-11", name: "Cetak Plat", category: "Mutasi Masuk", active: true },
 ];
 
-// Mapping helper from key in initialMutasiAS row to pricingItemId
+// Mapping helper from key in Mutasi AS row to pricingItemId
 const MUTASI_AS_ROW_KEY_MAP: Record<string, string> = {
   legalisir: "mutasi-legalisir",
   hadir: "mutasi-hadir",
@@ -326,38 +327,78 @@ class PricingStore {
   private hargaDasarRows: any[] = [];
 
   private listeners: Set<() => void> = new Set();
-  private isApiMode: boolean;
   private unsubscribeRepo?: () => void;
+  private isLoadingState = false;
+  private lastError: string | null = null;
+  private isDataStale = false;
+  private operationalTariffFetchSeq = 0;
+  private isMutatingTariffs = false;
 
   constructor() {
     this.seed();
-    this.isApiMode = APP_CONFIG.dataProvider === "api";
-    if (this.isApiMode) {
-      this.syncFromRepository();
-      this.unsubscribeRepo = pricingRepository.subscribe(() => {
-        this.syncFromRepository();
-      });
-    }
+    this.syncFromRepository({ skipOperationalFetch: true });
+    this.unsubscribeRepo = pricingRepository.subscribe(() => {
+      this.syncFromRepository({ skipOperationalFetch: this.isMutatingTariffs });
+    });
   }
 
-  public setApiMode(isApi: boolean): void {
-    this.isApiMode = isApi;
-    if (this.unsubscribeRepo) {
-      this.unsubscribeRepo();
-      this.unsubscribeRepo = undefined;
+  public isLoading(): boolean {
+    return this.isLoadingState;
+  }
+
+  public getError(): string | null {
+    return this.lastError;
+  }
+
+  public isStale(): boolean {
+    return this.isDataStale;
+  }
+
+  public async refreshSamsatOperationalTariffs(): Promise<void> {
+    if (!pricingRepository.getSamsatOperationalTariffs) return;
+    if (typeof window !== "undefined" && permissionStore.getSessionAuthStatus() !== "authenticated") {
+      return;
     }
-    if (isApi) {
-      this.syncFromRepository();
-      this.unsubscribeRepo = pricingRepository.subscribe(() => {
-        this.syncFromRepository();
-      });
-    } else {
-      this.seed();
+    const seq = ++this.operationalTariffFetchSeq;
+    try {
+      const tariffs: any = await pricingRepository.getSamsatOperationalTariffs();
+      if (seq !== this.operationalTariffFetchSeq) return;
+      if (Array.isArray(tariffs)) {
+        this.samsatOverrides.clear();
+        tariffs.forEach((t) => {
+          let map = this.samsatOverrides.get(t.samsat_id);
+          if (!map) {
+            map = new Map();
+            this.samsatOverrides.set(t.samsat_id, map);
+          }
+          map.set(t.pricing_item_id, {
+            id: t.id,
+            nominal: t.nominal,
+            isActive: t.is_active === 1 || t.is_active === true,
+          });
+
+          // Also sync to legacy samsatPricing map
+          let legacyMap = this.samsatPricing.get(t.samsat_id);
+          if (!legacyMap) {
+            legacyMap = new Map();
+            this.samsatPricing.set(t.samsat_id, legacyMap);
+          }
+          legacyMap.set(t.pricing_item_id, t.nominal);
+        });
+        this.lastError = null;
+        this.isDataStale = false;
+        this.notify();
+      }
+    } catch (e: any) {
+      if (seq !== this.operationalTariffFetchSeq) return;
+      this.lastError = e?.message || "Gagal memuat tarif operasional Samsat.";
+      this.isDataStale = true;
+      console.warn("Could not load samsat operational tariffs:", e);
       this.notify();
     }
   }
 
-  public syncFromRepository(): void {
+  public syncFromRepository(options?: { skipOperationalFetch?: boolean }): void {
     const items = pricingRepository.getSamsatItems();
     if (Array.isArray(items) && items.length > 0) {
       items.forEach((item) => {
@@ -370,33 +411,8 @@ class PricingStore {
     }
 
     // Asynchronously synchronize authoritative per-Samsat operational tariffs from backend
-    if (pricingRepository.getSamsatOperationalTariffs) {
-      pricingRepository.getSamsatOperationalTariffs().then((tariffs: any) => {
-        if (Array.isArray(tariffs)) {
-          this.samsatOverrides.clear();
-          tariffs.forEach((t) => {
-            let map = this.samsatOverrides.get(t.samsat_id);
-            if (!map) {
-              map = new Map();
-              this.samsatOverrides.set(t.samsat_id, map);
-            }
-            map.set(t.pricing_item_id, {
-              id: t.id,
-              nominal: t.nominal,
-              isActive: t.is_active === 1 || t.is_active === true,
-            });
-
-            // Also sync to legacy samsatPricing map
-            let legacyMap = this.samsatPricing.get(t.samsat_id);
-            if (!legacyMap) {
-              legacyMap = new Map();
-              this.samsatPricing.set(t.samsat_id, legacyMap);
-            }
-            legacyMap.set(t.pricing_item_id, t.nominal);
-          });
-          this.notify();
-        }
-      }).catch((e: any) => console.warn("Could not load samsat operational tariffs:", e));
+    if (!options?.skipOperationalFetch && typeof pricingRepository.getSamsatOperationalTariffs === "function") {
+      void this.refreshSamsatOperationalTariffs();
     }
 
     // Authoritative Samsat list from backend database
@@ -420,56 +436,76 @@ class PricingStore {
     if (pricingRepository.getServiceConfigs) {
       const dbConfigs = pricingRepository.getServiceConfigs();
       if (Array.isArray(dbConfigs) && dbConfigs.length > 0) {
-        dbConfigs.forEach((cfg) => {
-          const key = cfg.id || `${cfg.serviceId}:${cfg.samsatId}`;
-          this.serviceConfigs.set(key, cfg);
-
-          // Update corresponding row in biayaLayananRows if matching
+        dbConfigs.forEach((rawCfg) => {
+          const cfg = rawCfg as ServiceFeeConfig & { id?: string };
           const cfgSvcId = resolveServiceId(cfg.serviceId || cfg.serviceName);
           const cfgSamsatId = resolveSamsatId(cfg.samsatId || cfg.wilayah);
+          const canonicalKey = `${cfgSvcId}:${cfgSamsatId}`;
+          const existingCfg = (
+            this.serviceConfigs.get(canonicalKey) ||
+            (cfg.id ? this.serviceConfigs.get(cfg.id) : undefined)
+          ) as (ServiceFeeConfig & { id?: string }) | undefined;
 
+          const normalizedId = cfg.id || existingCfg?.id || canonicalKey;
+          const normalizedCfg: ServiceFeeConfig & { id?: string } = {
+            ...(existingCfg || {}),
+            ...cfg,
+            id: normalizedId,
+            serviceId: cfgSvcId || cfg.serviceId || existingCfg?.serviceId || "",
+            samsatId: cfgSamsatId || cfg.samsatId || existingCfg?.samsatId || "",
+            components: this.normalizeServiceComponents(
+              cfg.components,
+              cfgSvcId,
+              existingCfg?.components
+            ),
+          };
+
+          const key = normalizedId || `${cfg.serviceId}:${cfg.samsatId}`;
+          this.serviceConfigs.set(key, normalizedCfg);
+
+          // Update corresponding row in biayaLayananRows if matching
           const rowIdx = this.biayaLayananRows.findIndex(
             (r) => resolveServiceId(r.layanan) === cfgSvcId && resolveSamsatId(r.wilayah) === cfgSamsatId
           );
           if (rowIdx !== -1) {
             this.biayaLayananRows[rowIdx] = {
               ...this.biayaLayananRows[rowIdx],
-              id: cfg.id || this.biayaLayananRows[rowIdx].id,
-              dbId: cfg.id,
-              biayaJasa: cfg.biayaJasa,
-              biayaJasaLengkap: cfg.biayaJasa,
-              biayaJasaR4: cfg.biayaJasaR4 ?? cfg.biayaJasa,
-              biayaJasaR2: cfg.biayaJasaR2,
-              jasaR4Enabled: cfg.jasaR4Enabled,
-              jasaR2Enabled: cfg.jasaR2Enabled,
-              biayaKhususR4: cfg.biayaKhususR4,
-              biayaKhususR2: cfg.biayaKhususR2,
-              khususR4Enabled: cfg.khususR4Enabled,
-              khususR2Enabled: cfg.khususR2Enabled,
-              biayaAntarJemput: cfg.biayaAntarJemput,
+              id: normalizedId || this.biayaLayananRows[rowIdx].id,
+              dbId: normalizedId,
+              biayaJasa: normalizedCfg.biayaJasa,
+              biayaJasaLengkap: normalizedCfg.biayaJasa,
+              biayaJasaR4: normalizedCfg.biayaJasaR4 ?? normalizedCfg.biayaJasa,
+              biayaJasaR2: normalizedCfg.biayaJasaR2,
+              jasaR4Enabled: normalizedCfg.jasaR4Enabled,
+              jasaR2Enabled: normalizedCfg.jasaR2Enabled,
+              biayaKhususR4: normalizedCfg.biayaKhususR4,
+              biayaKhususR2: normalizedCfg.biayaKhususR2,
+              khususR4Enabled: normalizedCfg.khususR4Enabled,
+              khususR2Enabled: normalizedCfg.khususR2Enabled,
+              biayaAntarJemput: normalizedCfg.biayaAntarJemput,
             };
           } else {
             this.biayaLayananRows.push({
-              id: cfg.id || `bl-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-              dbId: cfg.id,
-              layanan: cfg.serviceName || cfg.serviceId,
-              wilayah: cfg.wilayah || cfg.samsatId,
-              biayaJasa: cfg.biayaJasa || 0,
-              biayaJasaLengkap: cfg.biayaJasa || 0,
-              biayaJasaR4: cfg.biayaJasaR4 ?? cfg.biayaJasa,
-              biayaJasaR2: cfg.biayaJasaR2,
-              jasaR4Enabled: cfg.jasaR4Enabled,
-              jasaR2Enabled: cfg.jasaR2Enabled,
-              biayaKhususR4: cfg.biayaKhususR4,
-              biayaKhususR2: cfg.biayaKhususR2,
-              khususR4Enabled: cfg.khususR4Enabled,
-              khususR2Enabled: cfg.khususR2Enabled,
-              biayaJasaNembak: cfg.jasaNembak?.nominal || 0,
-              biayaAntarJemput: cfg.biayaAntarJemput || 50000,
-              antarJemputEnabled: cfg.antarJemputEnabled ?? true,
-              swdkllj: cfg.swdkllj ? { ...cfg.swdkllj } : { nominal: 143000, enabled: true },
-              opsenPkb: cfg.opsenPkb ? { ...cfg.opsenPkb } : { nominal: 143000, enabled: true },
-              biayaLainnya: Array.isArray(cfg.biayaLainnya) ? cfg.biayaLainnya : [],
+              id: normalizedId || `bl-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+              dbId: normalizedId,
+              layanan: normalizedCfg.serviceName || normalizedCfg.serviceId,
+              wilayah: normalizedCfg.wilayah || normalizedCfg.samsatId,
+              biayaJasa: normalizedCfg.biayaJasa || 0,
+              biayaJasaLengkap: normalizedCfg.biayaJasa || 0,
+              biayaJasaR4: normalizedCfg.biayaJasaR4 ?? normalizedCfg.biayaJasa,
+              biayaJasaR2: normalizedCfg.biayaJasaR2,
+              jasaR4Enabled: normalizedCfg.jasaR4Enabled,
+              jasaR2Enabled: normalizedCfg.jasaR2Enabled,
+              biayaKhususR4: normalizedCfg.biayaKhususR4,
+              biayaKhususR2: normalizedCfg.biayaKhususR2,
+              khususR4Enabled: normalizedCfg.khususR4Enabled,
+              khususR2Enabled: normalizedCfg.khususR2Enabled,
+              biayaJasaNembak: normalizedCfg.jasaNembak?.nominal || 0,
+              biayaAntarJemput: normalizedCfg.biayaAntarJemput || 50000,
+              antarJemputEnabled: normalizedCfg.antarJemputEnabled ?? true,
+              swdkllj: normalizedCfg.swdkllj ? { ...normalizedCfg.swdkllj } : { nominal: 143000, enabled: true },
+              opsenPkb: normalizedCfg.opsenPkb ? { ...normalizedCfg.opsenPkb } : { nominal: 143000, enabled: true },
+              biayaLainnya: Array.isArray(normalizedCfg.biayaLainnya) ? normalizedCfg.biayaLainnya : [],
             });
           }
         });
@@ -480,10 +516,27 @@ class PricingStore {
   }
 
   public async initFromApi(): Promise<void> {
-    if (pricingRepository.initFromApi) {
-      await pricingRepository.initFromApi();
+    if (typeof window !== "undefined" && permissionStore.getSessionAuthStatus() !== "authenticated") {
+      this.isLoadingState = false;
+      return;
     }
-    this.syncFromRepository();
+    this.isLoadingState = true;
+    this.lastError = null;
+    this.notify();
+    try {
+      if (pricingRepository.initFromApi) {
+        await pricingRepository.initFromApi();
+      }
+      this.syncFromRepository({ skipOperationalFetch: true });
+      await this.refreshSamsatOperationalTariffs();
+    } catch (err: any) {
+      this.lastError = err?.message || "Gagal memuat data harga dari server.";
+      this.isDataStale = true;
+      throw err;
+    } finally {
+      this.isLoadingState = false;
+      this.notify();
+    }
   }
 
   private seed() {
@@ -1310,7 +1363,13 @@ class PricingStore {
     const resolvedSamsatId = resolveSamsatId(samsatId);
     const masterItem = this.nationalPricing.get(pricingItemId) || (this.getPricingItemById(pricingItemId) as SamsatCostItem | undefined) || null;
     const officeOverrides = resolvedSamsatId ? this.samsatOverrides.get(resolvedSamsatId) : null;
-    const override = officeOverrides ? officeOverrides.get(pricingItemId) : null;
+    let override = officeOverrides ? officeOverrides.get(pricingItemId) : null;
+    if (!override && resolvedSamsatId) {
+      const legacyPrice = this.samsatPricing.get(resolvedSamsatId)?.get(pricingItemId);
+      if (typeof legacyPrice === "number" && Number.isFinite(legacyPrice)) {
+        override = { nominal: legacyPrice, isActive: true };
+      }
+    }
     return resolveTariff({ masterItem, override, samsatId: resolvedSamsatId, jurisdiction });
   }
 
@@ -1342,6 +1401,9 @@ class PricingStore {
     const resolvedSamsatId = resolveSamsatId(samsatId);
     const validNominal = Math.max(0, Math.round(Number(nominal)));
 
+    // Invalidate any stale in-flight operational tariff fetches before updating local + DB state
+    ++this.operationalTariffFetchSeq;
+
     let officeMap = this.samsatOverrides.get(resolvedSamsatId);
     if (!officeMap) {
       officeMap = new Map();
@@ -1357,7 +1419,19 @@ class PricingStore {
     legacyMap.set(pricingItemId, validNominal);
 
     if (pricingRepository.updateSamsatOperationalTariff) {
-      await pricingRepository.updateSamsatOperationalTariff(resolvedSamsatId, pricingItemId, validNominal);
+      this.isMutatingTariffs = true;
+      try {
+        await pricingRepository.updateSamsatOperationalTariff(resolvedSamsatId, pricingItemId, validNominal);
+        this.lastError = null;
+        this.isDataStale = false;
+      } catch (err: any) {
+        this.lastError = err?.message || "Gagal menyimpan tarif operasional Samsat.";
+        this.isDataStale = true;
+        this.notify();
+        throw err;
+      } finally {
+        this.isMutatingTariffs = false;
+      }
     }
 
     this.notify();
@@ -1366,6 +1440,8 @@ class PricingStore {
 
   public async resetSamsatOverride(samsatId: string, pricingItemId: string): Promise<boolean> {
     const resolvedSamsatId = resolveSamsatId(samsatId);
+    ++this.operationalTariffFetchSeq;
+
     const officeMap = this.samsatOverrides.get(resolvedSamsatId);
     if (officeMap) {
       officeMap.delete(pricingItemId);
@@ -1378,7 +1454,19 @@ class PricingStore {
     }
 
     if (pricingRepository.deleteSamsatOperationalTariff) {
-      await pricingRepository.deleteSamsatOperationalTariff({ samsatId: resolvedSamsatId, pricingItemId });
+      this.isMutatingTariffs = true;
+      try {
+        await pricingRepository.deleteSamsatOperationalTariff({ samsatId: resolvedSamsatId, pricingItemId });
+        this.lastError = null;
+        this.isDataStale = false;
+      } catch (err: any) {
+        this.lastError = err?.message || "Gagal mereset tarif operasional Samsat.";
+        this.isDataStale = true;
+        this.notify();
+        throw err;
+      } finally {
+        this.isMutatingTariffs = false;
+      }
     }
 
     this.notify();
@@ -1387,13 +1475,21 @@ class PricingStore {
 
   public updateSamsatPrice(samsatId: string, pricingItemId: string, amount: number): boolean {
     const resolvedSamsatId = resolveSamsatId(samsatId);
-    this.setSamsatOverride(resolvedSamsatId, pricingItemId, amount);
+    void this.setSamsatOverride(resolvedSamsatId, pricingItemId, amount).catch((err: any) => {
+      this.lastError = err?.message || "Gagal menyimpan tarif Samsat.";
+      this.isDataStale = true;
+      this.notify();
+    });
     return true;
   }
 
   public deleteSamsatPrice(samsatId: string, pricingItemId: string): boolean {
     const resolvedSamsatId = resolveSamsatId(samsatId);
-    this.resetSamsatOverride(resolvedSamsatId, pricingItemId);
+    void this.resetSamsatOverride(resolvedSamsatId, pricingItemId).catch((err: any) => {
+      this.lastError = err?.message || "Gagal menghapus tarif Samsat.";
+      this.isDataStale = true;
+      this.notify();
+    });
     return true;
   }
 
@@ -1410,7 +1506,16 @@ class PricingStore {
     }
 
     if (pricingRepository.updateSamsatItem) {
-      await pricingRepository.updateSamsatItem(pricingItemId, updates);
+      try {
+        await pricingRepository.updateSamsatItem(pricingItemId, updates);
+        this.lastError = null;
+        this.isDataStale = false;
+      } catch (err: any) {
+        this.lastError = err?.message || "Gagal menyimpan standar nasional harga Samsat.";
+        this.isDataStale = true;
+        this.notify();
+        throw err;
+      }
     }
 
     this.notify();
@@ -1431,6 +1536,8 @@ class PricingStore {
     if (!resolvedSamsatId) {
       throw new Error(`Kantor Samsat '${samsatId}' tidak valid.`);
     }
+
+    ++this.operationalTariffFetchSeq;
 
     const tariffsToUpsert: Array<{ pricingItemId: string; nominal: number }> = [];
     const itemsToDelete: string[] = [];
@@ -1455,7 +1562,7 @@ class PricingStore {
 
     // 2. Process upserts
     if (tariffsToUpsert.length > 0) {
-      if (this.isApiMode && pricingRepository.updateSamsatOperationalTariffsBatch) {
+      if (pricingRepository.updateSamsatOperationalTariffsBatch) {
         // Sync local memory first
         for (const t of tariffsToUpsert) {
           let officeMap = this.samsatOverrides.get(resolvedSamsatId);
@@ -1472,7 +1579,19 @@ class PricingStore {
           }
           legacyMap.set(t.pricingItemId, t.nominal);
         }
-        await pricingRepository.updateSamsatOperationalTariffsBatch(resolvedSamsatId, tariffsToUpsert);
+        this.isMutatingTariffs = true;
+        try {
+          await pricingRepository.updateSamsatOperationalTariffsBatch(resolvedSamsatId, tariffsToUpsert);
+          this.lastError = null;
+          this.isDataStale = false;
+        } catch (err: any) {
+          this.lastError = err?.message || "Gagal menyimpan batch tarif operasional Samsat.";
+          this.isDataStale = true;
+          this.notify();
+          throw err;
+        } finally {
+          this.isMutatingTariffs = false;
+        }
       } else {
         for (const t of tariffsToUpsert) {
           await this.setSamsatOverride(resolvedSamsatId, t.pricingItemId, t.nominal);
@@ -1613,6 +1732,31 @@ class PricingStore {
   }
 
   // ─── Biaya Layanan Methods (Service Fee Config per Service + Samsat) ────────
+  private normalizeServiceComponents(
+    components: unknown,
+    serviceId: string,
+    fallback?: ServiceComponentConfig[]
+  ): ServiceComponentConfig[] {
+    const source = Array.isArray(components)
+      ? components
+      : Array.isArray(fallback)
+        ? fallback
+        : this.getDefaultComponentsForService(serviceId);
+    const normalized = source
+      .filter((c: any) => c && typeof c.pricingItemId === "string" && c.pricingItemId.length > 0)
+      .map((c: any) => ({
+        pricingItemId: c.pricingItemId,
+        enabled: Boolean(c.enabled),
+        required: Boolean(c.required),
+      }));
+    if (Array.isArray(components)) {
+      return normalized;
+    }
+    return normalized.length > 0
+      ? normalized
+      : this.getDefaultComponentsForService(serviceId);
+  }
+
   public getServiceFeeConfig(serviceIdOrName: string, samsatIdOrWilayah: string): ServiceFeeConfig | undefined {
     const serviceId = resolveServiceId(serviceIdOrName);
     const samsatId = resolveSamsatId(samsatIdOrWilayah);
@@ -1644,6 +1788,9 @@ class PricingStore {
     }
     if (!cfg.biayaLainnya) {
       cfg.biayaLainnya = [];
+    }
+    if (!Array.isArray(cfg.components)) {
+      cfg.components = this.getDefaultComponentsForService(serviceId);
     }
     return cfg;
   }
@@ -1756,9 +1903,10 @@ class PricingStore {
     const samsatId = resolveSamsatId(samsatIdOrWilayah);
     const config = this.getServiceFeeConfig(serviceId, samsatId);
 
+    const configComponents = Array.isArray(config?.components) ? config.components : [];
     return MASTER_PRICING_ITEMS.map((item) => {
       const price = this.getSamsatPrice(samsatId, item.id);
-      const isEnabled = config?.components.find((c) => c.pricingItemId === item.id)?.enabled ?? false;
+      const isEnabled = configComponents.find((c) => c.pricingItemId === item.id)?.enabled ?? false;
       return {
         id: item.id,
         label: item.name,
@@ -1855,6 +2003,9 @@ class PricingStore {
   public toggleComponent(serviceIdOrName: string, samsatIdOrWilayah: string, pricingItemId: string, enabled: boolean): boolean {
     const config = this.getServiceFeeConfig(serviceIdOrName, samsatIdOrWilayah);
     if (!config) return false;
+    if (!Array.isArray(config.components)) {
+      config.components = this.getDefaultComponentsForService(resolveServiceId(serviceIdOrName));
+    }
     const comp = config.components.find((c) => c.pricingItemId === pricingItemId);
     if (comp) {
       comp.enabled = enabled;
@@ -2010,7 +2161,7 @@ class PricingStore {
       this.serviceConfigs.set(key, updatedConfig);
     }
 
-    if (this.isApiMode && pricingRepository.updateServicePricing) {
+    if (pricingRepository.updateServicePricing) {
       await pricingRepository.updateServicePricing(key, updatedConfig);
     }
 
@@ -2054,7 +2205,7 @@ class PricingStore {
       active: true,
     };
 
-    if (this.isApiMode && pricingRepository.createServicePricing) {
+    if (pricingRepository.createServicePricing) {
       const serverRes = await pricingRepository.createServicePricing(newConfig);
       if (serverRes?.id) {
         newConfig.id = serverRes.id;
@@ -2080,7 +2231,7 @@ class PricingStore {
     const samsatId = resolveSamsatId(targetRow.wilayah);
     const canonicalKey = targetRow.dbId || `${serviceId}:${samsatId}`;
 
-    if (this.isApiMode && pricingRepository.deleteServicePricing) {
+    if (pricingRepository.deleteServicePricing) {
       await pricingRepository.deleteServicePricing(canonicalKey);
     }
 
@@ -2155,17 +2306,45 @@ class PricingStore {
     const isCustomRow = (row: any): boolean => {
       if (!row) return false;
       const jasa = Number(row.biayaJasaLengkap ?? row.biayaJasa ?? 0);
+      const stdR2 = getStandardJasa(row.layanan || serviceName, "Motor");
+      const hasCustomR2 =
+        row.biayaJasaR2 !== undefined &&
+        row.biayaJasaR2 !== null &&
+        Number(row.biayaJasaR2) !== stdR2;
       const kurir = Number(row.biayaAntarJemput ?? 50000);
       const hasCustomFees =
         Array.isArray(row.biayaLainnya) &&
         row.biayaLainnya.some((b: any) => b.enabled !== false && b.label && b.label.trim() !== "");
-      const isKhususActive = row.pengurusanKhususEnabled === true || row.jasaNembakEnabled === true;
-      return jasa !== baseline.jasa || kurir !== baseline.kurir || hasCustomFees || isKhususActive;
+      const isKhususActive =
+        row.khususR4Enabled === true ||
+        row.khususR2Enabled === true ||
+        row.pengurusanKhususEnabled === true ||
+        row.jasaNembakEnabled === true;
+      return jasa !== baseline.jasa || hasCustomR2 || kurir !== baseline.kurir || hasCustomFees || isKhususActive;
     };
 
     let updatedCount = 0;
     let preservedCount = 0;
     let totalCount = 0;
+
+    // Capture snapshots so local cache rolls back cleanly if backend replication fails
+    const prevBiayaLayananRows = this.biayaLayananRows.map((r) => ({
+      ...r,
+      biayaLainnya: Array.isArray(r.biayaLainnya) ? r.biayaLainnya.map((b: any) => ({ ...b })) : [],
+    }));
+    const prevServiceConfigs = new Map(
+      Array.from(this.serviceConfigs.entries()).map(([k, v]) => [
+        k,
+        {
+          ...v,
+          components: this.normalizeServiceComponents(
+            v.components,
+            resolveServiceId(v.serviceId || v.serviceName)
+          ).map((c) => ({ ...c })),
+          biayaLainnya: Array.isArray(v.biayaLainnya) ? v.biayaLainnya.map((b) => ({ ...b })) : [],
+        },
+      ])
+    );
 
     // Update all matching rows in biayaLayananRows
     this.biayaLayananRows.forEach((row) => {
@@ -2269,6 +2448,9 @@ class PricingStore {
           }
 
           if (scope.applyKomponenSamsat !== false && sourceConfig.components) {
+            if (!Array.isArray(existing.components)) {
+              existing.components = this.getDefaultComponentsForService(serviceId);
+            }
             Object.entries(sourceConfig.components).forEach(([pricingItemId, enabled]) => {
               const comp = existing.components.find((c) => c.pricingItemId === pricingItemId);
               if (comp) {
@@ -2283,7 +2465,7 @@ class PricingStore {
     });
 
     // Physical backend persistence via API
-    if (this.isApiMode && pricingRepository.batchReplicateServicePricing) {
+    if (pricingRepository.batchReplicateServicePricing) {
       try {
         const apiRes = await pricingRepository.batchReplicateServicePricing({
           serviceId,
@@ -2297,8 +2479,16 @@ class PricingStore {
           if (typeof apiRes.preservedCount === "number") preservedCount = apiRes.preservedCount;
           if (typeof apiRes.totalCount === "number") totalCount = apiRes.totalCount;
         }
-      } catch (err) {
+        this.lastError = null;
+        this.isDataStale = false;
+      } catch (err: any) {
+        this.biayaLayananRows = prevBiayaLayananRows;
+        this.serviceConfigs = prevServiceConfigs;
+        this.lastError = err?.message || "Gagal mereplikasi biaya layanan ke server.";
+        this.isDataStale = true;
         console.error("[pricingStore] batchReplicateServicePricing API error:", err);
+        this.notify();
+        throw err;
       }
     }
 
@@ -2342,7 +2532,7 @@ class PricingStore {
           tariffs.push({ pricingItemId, nominal: updatedRow[key] });
         }
       }
-      if (this.isApiMode && pricingRepository.updateSamsatOperationalTariffsBatch && tariffs.length > 0) {
+      if (pricingRepository.updateSamsatOperationalTariffsBatch && tariffs.length > 0) {
         await pricingRepository.updateSamsatOperationalTariffsBatch(samsatId, tariffs);
       }
       this.notify();
@@ -2366,7 +2556,7 @@ class PricingStore {
         tariffs.push({ pricingItemId, nominal: row[key] });
       }
     }
-    if (this.isApiMode && pricingRepository.updateSamsatOperationalTariffsBatch && tariffs.length > 0) {
+    if (pricingRepository.updateSamsatOperationalTariffsBatch && tariffs.length > 0) {
       await pricingRepository.updateSamsatOperationalTariffsBatch(samsatId, tariffs);
     }
     this.notify();
@@ -2378,7 +2568,7 @@ class PricingStore {
       const row = this.mutasiLDRows[idx];
       const samsatId = resolveSamsatId(row.namaSamsat);
       this.mutasiLDRows.splice(idx, 1);
-      if (this.isApiMode && pricingRepository.updateSamsatOperationalTariffsBatch) {
+      if (pricingRepository.updateSamsatOperationalTariffsBatch) {
         const resetTariffs = Object.values(MUTASI_LD_ROW_KEY_MAP).map((pricingItemId) => ({
           pricingItemId,
           nominal: 0,
@@ -2411,7 +2601,7 @@ class PricingStore {
           tariffs.push({ pricingItemId, nominal: updatedRow[key] });
         }
       }
-      if (this.isApiMode && pricingRepository.updateSamsatOperationalTariffsBatch && tariffs.length > 0) {
+      if (pricingRepository.updateSamsatOperationalTariffsBatch && tariffs.length > 0) {
         await pricingRepository.updateSamsatOperationalTariffsBatch(samsatId, tariffs);
       }
       this.notify();
@@ -2435,7 +2625,7 @@ class PricingStore {
         tariffs.push({ pricingItemId, nominal: row[key] });
       }
     }
-    if (this.isApiMode && pricingRepository.updateSamsatOperationalTariffsBatch && tariffs.length > 0) {
+    if (pricingRepository.updateSamsatOperationalTariffsBatch && tariffs.length > 0) {
       await pricingRepository.updateSamsatOperationalTariffsBatch(samsatId, tariffs);
     }
     this.notify();
@@ -2447,7 +2637,7 @@ class PricingStore {
       const row = this.balikNamaRows[idx];
       const samsatId = resolveSamsatId(row.namaSamsat);
       this.balikNamaRows.splice(idx, 1);
-      if (this.isApiMode && pricingRepository.updateSamsatOperationalTariffsBatch) {
+      if (pricingRepository.updateSamsatOperationalTariffsBatch) {
         const resetTariffs = Object.values(BALIK_NAMA_ROW_KEY_MAP).map((pricingItemId) => ({
           pricingItemId,
           nominal: 0,
@@ -2480,7 +2670,7 @@ class PricingStore {
           tariffs.push({ pricingItemId, nominal: updatedRow[key] });
         }
       }
-      if (this.isApiMode && pricingRepository.updateSamsatOperationalTariffsBatch && tariffs.length > 0) {
+      if (pricingRepository.updateSamsatOperationalTariffsBatch && tariffs.length > 0) {
         await pricingRepository.updateSamsatOperationalTariffsBatch(samsatId, tariffs);
       }
       this.notify();
@@ -2504,7 +2694,7 @@ class PricingStore {
         tariffs.push({ pricingItemId, nominal: row[key] });
       }
     }
-    if (this.isApiMode && pricingRepository.updateSamsatOperationalTariffsBatch && tariffs.length > 0) {
+    if (pricingRepository.updateSamsatOperationalTariffsBatch && tariffs.length > 0) {
       await pricingRepository.updateSamsatOperationalTariffsBatch(samsatId, tariffs);
     }
     this.notify();
@@ -2516,7 +2706,7 @@ class PricingStore {
       const row = this.tarikBerkasRows[idx];
       const samsatId = resolveSamsatId(row.namaSamsat);
       this.tarikBerkasRows.splice(idx, 1);
-      if (this.isApiMode && pricingRepository.updateSamsatOperationalTariffsBatch) {
+      if (pricingRepository.updateSamsatOperationalTariffsBatch) {
         const resetTariffs = Object.values(TARIK_BERKAS_ROW_KEY_MAP).map((pricingItemId) => ({
           pricingItemId,
           nominal: 0,
@@ -2549,7 +2739,7 @@ class PricingStore {
           tariffs.push({ pricingItemId, nominal: updatedRow[key] });
         }
       }
-      if (this.isApiMode && pricingRepository.updateSamsatOperationalTariffsBatch && tariffs.length > 0) {
+      if (pricingRepository.updateSamsatOperationalTariffsBatch && tariffs.length > 0) {
         await pricingRepository.updateSamsatOperationalTariffsBatch(samsatId, tariffs);
       }
       this.notify();
@@ -2573,7 +2763,7 @@ class PricingStore {
         tariffs.push({ pricingItemId, nominal: row[key] });
       }
     }
-    if (this.isApiMode && pricingRepository.updateSamsatOperationalTariffsBatch && tariffs.length > 0) {
+    if (pricingRepository.updateSamsatOperationalTariffsBatch && tariffs.length > 0) {
       await pricingRepository.updateSamsatOperationalTariffsBatch(samsatId, tariffs);
     }
     this.notify();
@@ -2585,7 +2775,7 @@ class PricingStore {
       const row = this.duplikatSTNKRows[idx];
       const samsatId = resolveSamsatId(row.namaSamsat);
       this.duplikatSTNKRows.splice(idx, 1);
-      if (this.isApiMode && pricingRepository.updateSamsatOperationalTariffsBatch) {
+      if (pricingRepository.updateSamsatOperationalTariffsBatch) {
         const resetTariffs = Object.values(DUPLIKAT_STNK_ROW_KEY_MAP).map((pricingItemId) => ({
           pricingItemId,
           nominal: 0,
@@ -2609,11 +2799,11 @@ class PricingStore {
 
     const canonicalId = String(id);
     const existingDbItem = this.getPricingItemById(canonicalId);
-    if (!existingDbItem && this.isApiMode) {
+    if (!existingDbItem) {
       throw new Error(`Baris '${updatedRow.namaSamsat || id}' tidak memiliki pasangan record di database.`);
     }
 
-    if (this.isApiMode && updatedRow.hargaDasar !== undefined) {
+    if (updatedRow.hargaDasar !== undefined) {
       await pricingRepository.updateSamsatItem(canonicalId, { basePrice: Number(updatedRow.hargaDasar) });
     }
 
@@ -2710,7 +2900,10 @@ class PricingStore {
     const rawTujuan = params.samsatTujuanId || params.wilayahSamsatTujuan;
     const samsatTujuanId = rawTujuan && rawTujuan !== "-" ? resolveSamsatId(rawTujuan) : "";
 
-    config.components.forEach((comp) => {
+    const serviceComponents = Array.isArray(config.components)
+      ? config.components
+      : this.getDefaultComponentsForService(serviceId);
+    serviceComponents.forEach((comp) => {
       const isEnabled =
         params.customComponents && params.customComponents[comp.pricingItemId] !== undefined
           ? params.customComponents[comp.pricingItemId]
@@ -2867,7 +3060,7 @@ class PricingStore {
       wilayahSamsat: samsat.wilayah,
       biayaJasa,
       biayaPengurusanKhusus,
-      biayaSamsat: totalBiayaSamsat,
+      biayaSamsat: totalBiayaSamsat + pkb + swdkllj + dendaSwdkllj,
       biayaAntarJemput,
       pkb,
       swdkllj,
@@ -2902,9 +3095,7 @@ class PricingStore {
   }
 
   public updateSamsatItem(id: string, updates: Partial<SamsatCostItem>): boolean {
-    if (this.isApiMode) {
-      pricingRepository.updateSamsatItem(id, updates);
-    }
+    pricingRepository.updateSamsatItem(id, updates);
     if (updates.basePrice !== undefined) {
       return this.updateSamsatPrice("samsat-jakarta-timur", id, updates.basePrice);
     }

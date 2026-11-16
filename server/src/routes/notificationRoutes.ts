@@ -18,7 +18,7 @@ export const notificationRouter = Router();
 notificationRouter.get(
   "/settings",
   requireAuth,
-  requireRoles("administrator", "admin", "svp"),
+  requireRoles("administrator", "admin"),
   getNotificationSettings
 );
 
@@ -26,7 +26,7 @@ notificationRouter.get(
 notificationRouter.put(
   "/settings",
   requireAuth,
-  requireRoles("administrator", "admin", "svp"),
+  requireRoles("administrator", "admin"),
   updateNotificationSettings
 );
 
@@ -34,7 +34,7 @@ notificationRouter.put(
 notificationRouter.post(
   "/test-email",
   requireAuth,
-  requireRoles("administrator", "admin", "svp"),
+  requireRoles("administrator", "admin"),
   sendTestEmail
 );
 
@@ -42,6 +42,6 @@ notificationRouter.post(
 notificationRouter.get(
   "/logs",
   requireAuth,
-  requireRoles("administrator", "admin", "svp"),
+  requireRoles("administrator", "admin"),
   getNotificationLogs
 );

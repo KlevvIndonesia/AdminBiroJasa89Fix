@@ -4,16 +4,16 @@
  * and high-fidelity printable/PDF documents for Laba Rugi & Profit modules.
  */
 
-import { formatRupiah, formatDateDDMMYYYY } from "./financeFormatters";
+import { formatRupiah, formatDateDDMMYYYY, parseDateTimestamp } from "./financeFormatters";
 
 /**
  * Neutralizes potential CSV/Formula Injection attacks.
- * Prepends a single quote if string begins with =, +, -, or @
+ * Prepends a single quote if string begins with =, +, -, @, tab, or carriage return.
  */
 export function sanitizeCSVFormula(val: string | number | null | undefined): string {
   if (val === null || val === undefined) return "";
   const str = String(val);
-  if (/^\s*[=+\-@]/.test(str)) {
+  if (/^\s*[=+\-@\t\r]/.test(str)) {
     return `'${str}`;
   }
   return str;
@@ -26,10 +26,23 @@ export function escapeCSVCell(rawVal: any): string {
   if (rawVal === null || rawVal === undefined) return "";
   let str = String(rawVal);
   str = sanitizeCSVFormula(str);
-  if (/[",\r\n;]/.test(str)) {
+  if (/[",\r\n]/.test(str)) {
     return `"${str.replace(/"/g, '""')}"`;
   }
   return str;
+}
+
+/**
+ * Escapes HTML special characters for safe printable report rendering.
+ */
+export function escapeHtml(val: unknown): string {
+  if (val === null || val === undefined) return "";
+  return String(val)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 /**
@@ -177,14 +190,16 @@ export function exportLabaRugiToCSV(params: LabaRugiExportParams): void {
   // Metadata Section
   lines.push(`"LAPORAN","LAPORAN LABA RUGI"`);
   lines.push(`"PERUSAHAAN","SUN DELAPAN SEMBILAN"`);
-  lines.push(`"PERIODE","${params.periodLabel}"`);
-  lines.push(`"TANGGAL EKSPOR","${printDateTime}"`);
+  lines.push(`"PERIODE",${escapeCSVCell(params.periodLabel)}`);
+  lines.push(`"TANGGAL EKSPOR",${escapeCSVCell(printDateTime)}`);
   lines.push(
-    `"KOMPONEN DIPERHITUNGKAN","Profit Terpending: ${params.componentFilters.includeProfitPending ? "ON" : "OFF"} | Cashback Terpending: ${params.componentFilters.includeCashbackPending ? "ON" : "OFF"} | Tagihan Customer: ${params.componentFilters.includeTagihanCustomer ? "ON" : "OFF"}"`
+    `"KOMPONEN DIPERHITUNGKAN",${escapeCSVCell(
+      `Profit Terpending: ${params.componentFilters.includeProfitPending ? "ON" : "OFF"} | Cashback Terpending: ${params.componentFilters.includeCashbackPending ? "ON" : "OFF"} | Tagihan Customer: ${params.componentFilters.includeTagihanCustomer ? "ON" : "OFF"}`
+    )}`
   );
-  lines.push(`"LABA RUGI BERSIH",${params.labaBersih.amount}`);
-  lines.push(`"STATUS USAHA","${params.labaBersih.isSurplus ? "SURPLUS USAHA" : "DEFISIT USAHA"}"`);
-  lines.push(`"BASIS PERHITUNGAN","${params.labaBersih.basisText}"`);
+  lines.push(`"LABA RUGI BERSIH",${escapeCSVCell(params.labaBersih.amount)}`);
+  lines.push(`"STATUS USAHA",${escapeCSVCell(params.labaBersih.isSurplus ? "SURPLUS USAHA" : "DEFISIT USAHA")}`);
+  lines.push(`"BASIS PERHITUNGAN",${escapeCSVCell(params.labaBersih.basisText)}`);
   lines.push(""); // empty row before table
 
   // Table Column Headers (Excel friendly)
@@ -239,17 +254,34 @@ export function exportLabaRugiToPDF(params: LabaRugiExportParams, action: "downl
     minute: "2-digit",
   });
 
-  const totalRow = params.tableRows.find((r) => r.sumber.toUpperCase() === "TOTAL") || params.tableRows[params.tableRows.length - 1];
+  const totalRow =
+    params.tableRows.find((r) => r.sumber.toUpperCase() === "TOTAL") ||
+    params.tableRows[params.tableRows.length - 1] || {
+      sumber: "TOTAL",
+      uangMasuk: 0,
+      uangKeluar: 0,
+      keterangan: "-",
+    };
 
   const html = `<!DOCTYPE html>
 <html lang="id">
 <head>
   <meta charset="utf-8" />
-  <title>${filename}</title>
+  <title>${escapeHtml(filename)}</title>
   <style>
     @page {
       size: A4 landscape;
       margin: 12mm 14mm 14mm 14mm;
+      @bottom-left {
+        content: "SUN BIRO JASA / ADMIN SUN89 — Dokumen Keuangan Resmi";
+        font-size: 7.5pt;
+        color: #64748b;
+      }
+      @bottom-right {
+        content: "Halaman " counter(page) " dari " counter(pages);
+        font-size: 7.5pt;
+        color: #64748b;
+      }
     }
     @media print {
       body {
@@ -498,22 +530,22 @@ export function exportLabaRugiToPDF(params: LabaRugiExportParams, action: "downl
 
   <div class="header-box">
     <div>
-      <div class="brand-title">SUN DELAPAN SEMBILAN</div>
+      <div class="brand-title">SUN BIRO JASA / ADMIN SUN89</div>
       <div class="brand-sub">Biro Jasa & Manajemen Layanan Samsat Terpadu</div>
     </div>
     <div class="doc-meta">
       <div><strong>Laporan:</strong> LAPORAN LABA RUGI</div>
-      <div><strong>Periode:</strong> ${params.periodLabel}</div>
-      <div><strong>Waktu Ekspor:</strong> ${printDate}, ${printTime} WIB</div>
-      <div><strong>Petugas:</strong> ${params.printedBy || "Admin Keuangan"}</div>
+      <div><strong>Periode:</strong> ${escapeHtml(params.periodLabel)}</div>
+      <div><strong>Waktu Ekspor:</strong> ${escapeHtml(printDate)}, ${escapeHtml(printTime)} WIB</div>
+      <div><strong>Petugas:</strong> ${escapeHtml(params.printedBy || "Admin Keuangan")}</div>
     </div>
   </div>
 
   <div class="report-hero">
     <div>
-      <div class="hero-title">LABA RUGI BERSIH (${params.periodLabel})</div>
+      <div class="hero-title">LABA RUGI BERSIH (${escapeHtml(params.periodLabel)})</div>
       <div class="hero-amount">${formatRupiah(params.labaBersih.amount)}</div>
-      <div class="hero-sub">Basis: ${params.labaBersih.basisText} &nbsp;|&nbsp; Realisasi Dasar: ${formatRupiah(params.labaBersih.baseAmount)}</div>
+      <div class="hero-sub">Basis: ${escapeHtml(params.labaBersih.basisText)} &nbsp;|&nbsp; Realisasi Dasar: ${formatRupiah(params.labaBersih.baseAmount)}</div>
       <div class="chips-box">
         Filter Komponen: 
         <span class="chip">Profit Pending: ${params.componentFilters.includeProfitPending ? "ON" : "OFF"}</span>
@@ -540,14 +572,21 @@ export function exportLabaRugiToPDF(params: LabaRugiExportParams, action: "downl
       </tr>
     </thead>
     <tbody>
-      ${params.tableRows
-        .map((row, idx) => {
-          const isTotal = row.sumber.toUpperCase() === "TOTAL";
-          const rowClass = isTotal ? "total-row" : idx % 2 === 0 ? "even" : "odd";
+      ${
+        params.tableRows.length === 0
+          ? `
+            <tr class="even">
+              <td colspan="6" class="text-left">Tidak ada transaksi keuangan pada periode ini.</td>
+            </tr>
+          `
+          : params.tableRows
+              .map((row, idx) => {
+                const isTotal = row.sumber.toUpperCase() === "TOTAL";
+                const rowClass = isTotal ? "total-row" : idx % 2 === 0 ? "even" : "odd";
 
-          return `
+                return `
             <tr class="${rowClass}">
-              <td class="text-left font-semibold">${row.sumber}</td>
+              <td class="text-left font-semibold">${escapeHtml(row.sumber)}</td>
               <td class="text-right font-mono text-green">${formatRupiah(row.uangMasuk)}</td>
               <td class="text-right font-mono text-red">${formatRupiah(row.uangKeluar)}</td>
               <td class="text-right font-mono text-neutral">${row.profitPending !== null ? formatRupiah(row.profitPending) : "—"}</td>
@@ -664,12 +703,12 @@ export function exportProfitToCSV(params: ProfitExportParams): void {
   const lines: string[] = [];
 
   // Metadata headers
-  lines.push(`"LAPORAN","LAPORAN PROFIT PER JENIS PENGURUSAN"`);
-  lines.push(`"PERUSAHAAN","SUN DELAPAN SEMBILAN"`);
-  lines.push(`"PERIODE","${params.periodLabel}"`);
-  lines.push(`"FILTER METODE PEMBAYARAN","${params.filterMethodLabel}"`);
-  lines.push(`"FILTER JENIS PENGURUSAN","${params.filterCategoryLabel}"`);
-  lines.push(`"TANGGAL EKSPOR","${printDateTime}"`);
+  lines.push(`${escapeCSVCell("LAPORAN")},${escapeCSVCell("LAPORAN PROFIT PER JENIS PENGURUSAN")}`);
+  lines.push(`${escapeCSVCell("PERUSAHAAN")},${escapeCSVCell("SUN DELAPAN SEMBILAN")}`);
+  lines.push(`${escapeCSVCell("PERIODE")},${escapeCSVCell(params.periodLabel)}`);
+  lines.push(`${escapeCSVCell("FILTER METODE PEMBAYARAN")},${escapeCSVCell(params.filterMethodLabel)}`);
+  lines.push(`${escapeCSVCell("FILTER JENIS PENGURUSAN")},${escapeCSVCell(params.filterCategoryLabel)}`);
+  lines.push(`${escapeCSVCell("TANGGAL EKSPOR")},${escapeCSVCell(printDateTime)}`);
   lines.push(`"TOTAL BERKAS",${params.grandTotals.totalBerkas}`);
   lines.push(`"TOTAL PEMASUKAN",${params.grandTotals.totalUangMasuk}`);
   lines.push(`"TOTAL PENGELUARAN",${params.grandTotals.totalUangKeluar}`);
@@ -764,11 +803,21 @@ export function exportProfitToPDF(params: ProfitExportParams, action: "download"
 <html lang="id">
 <head>
   <meta charset="utf-8" />
-  <title>${filename}</title>
+  <title>${escapeHtml(filename)}</title>
   <style>
     @page {
       size: A4 landscape;
-      margin: 10mm 12mm 12mm 12mm;
+      margin: 10mm 12mm 13mm 12mm;
+      @bottom-left {
+        content: "SUN BIRO JASA / ADMIN SUN89 — Dokumen Keuangan Resmi";
+        font-size: 7.5pt;
+        color: #64748b;
+      }
+      @bottom-right {
+        content: "Halaman " counter(page) " dari " counter(pages);
+        font-size: 7.5pt;
+        color: #64748b;
+      }
     }
     @media print {
       body {
@@ -981,15 +1030,15 @@ export function exportProfitToPDF(params: ProfitExportParams, action: "download"
 
   <div class="header-box">
     <div>
-      <div class="brand-title">SUN DELAPAN SEMBILAN</div>
+      <div class="brand-title">SUN BIRO JASA / ADMIN SUN89</div>
       <div class="brand-sub">Biro Jasa & Manajemen Layanan Samsat Terpadu</div>
     </div>
     <div class="doc-meta">
       <div><strong>Laporan:</strong> LAPORAN PROFIT PER JENIS PENGURUSAN</div>
-      <div><strong>Periode:</strong> ${params.periodLabel}</div>
-      <div><strong>Filter:</strong> ${params.filterMethodLabel} &nbsp;|&nbsp; ${params.filterCategoryLabel}</div>
-      <div><strong>Waktu Ekspor:</strong> ${printDate}, ${printTime} WIB</div>
-      <div><strong>Petugas:</strong> ${params.printedBy || "Admin Keuangan"}</div>
+      <div><strong>Periode:</strong> ${escapeHtml(params.periodLabel)}</div>
+      <div><strong>Filter:</strong> ${escapeHtml(params.filterMethodLabel)} &nbsp;|&nbsp; ${escapeHtml(params.filterCategoryLabel)}</div>
+      <div><strong>Waktu Ekspor:</strong> ${escapeHtml(printDate)}, ${escapeHtml(printTime)} WIB</div>
+      <div><strong>Petugas:</strong> ${escapeHtml(params.printedBy || "Admin Keuangan")}</div>
     </div>
   </div>
 
@@ -1044,7 +1093,7 @@ export function exportProfitToPDF(params: ProfitExportParams, action: "download"
           return `
             <tr class="${rowClass}">
               <td class="text-center">${idx + 1}</td>
-              <td class="text-left font-semibold">${g.serviceTitle}</td>
+              <td class="text-left font-semibold">${escapeHtml(g.serviceTitle)}</td>
               <td class="text-center font-mono">${g.jumlahBerkas}</td>
               <td class="text-right">
                 <div class="font-mono text-green font-semibold">${formatRupiah(g.totalUangMasuk)}</div>
@@ -1055,7 +1104,7 @@ export function exportProfitToPDF(params: ProfitExportParams, action: "download"
                           .map(
                             ([m, v]) => `
                           <div class="method-item">
-                            <span>${m}:</span>
+                            <span>${escapeHtml(m)}:</span>
                             <span class="font-mono">${formatRupiah(v.nominal)}</span>
                           </div>`
                           )
@@ -1073,7 +1122,7 @@ export function exportProfitToPDF(params: ProfitExportParams, action: "download"
                           .map(
                             ([b, v]) => `
                           <div class="method-item">
-                            <span>${b}:</span>
+                            <span>${escapeHtml(b)}:</span>
                             <span class="font-mono">${formatRupiah(v.nominal)}</span>
                           </div>`
                           )
@@ -1132,6 +1181,7 @@ export interface ExportColumn {
   key: string;
   label: string;
   align?: "left" | "center" | "right";
+  exportValue?: (value: any, row: any, rowIndex: number) => any;
 }
 
 export interface SummaryMetric {
@@ -1139,25 +1189,99 @@ export interface SummaryMetric {
   value: string | number;
 }
 
+export interface ExportMetadataItem {
+  label: string;
+  value: string;
+}
+
 export interface CSVExportOptions {
   title: string;
+  subTitle?: string;
   columns: ExportColumn[];
   data: any[];
   filename?: string;
   periodLabel?: string;
+  metadata?: ExportMetadataItem[];
 }
 
 export interface PDFExportOptions {
   title: string;
   subTitle?: string;
+  companyName?: string;
   periodLabel: string;
   columns: ExportColumn[];
   data: any[];
   summaryMetrics?: SummaryMetric[];
+  metadata?: ExportMetadataItem[];
   printedBy?: string;
+  orientation?: "auto" | "portrait" | "landscape";
+  action?: "download" | "print";
 }
 
 export type ExportPeriodOption = "all" | "today" | "this_week" | "this_month" | "this_year" | "custom";
+
+/**
+ * Parses a row date field safely into a local epoch timestamp (ms), supporting
+ * ISO YYYY-MM-DD (without UTC-shift bugs), DD/MM/YYYY, DD-MM-YYYY, and Indonesian dates.
+ */
+function parseExportDateTimestamp(rawVal: unknown): number {
+  if (rawVal === null || rawVal === undefined) return 0;
+  const str = String(rawVal).trim();
+  if (!str || str === "-" || str === "—") return 0;
+
+  // Date-only ISO string YYYY-MM-DD -> parse in local calendar day so midnight comparisons match WIB/local TZ
+  const isoDateOnly = str.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoDateOnly) {
+    const [, y, m, d] = isoDateOnly;
+    return new Date(Number(y), Number(m) - 1, Number(d)).getTime();
+  }
+
+  return parseDateTimestamp(str);
+}
+
+const FALLBACK_DATE_KEYS = [
+  "tanggal",
+  "Tanggal",
+  "tanggalMasukBerkas",
+  "Tanggal Masuk Berkas",
+  "tanggalPengajuan",
+  "tanggalOrder",
+  "date",
+  "created_at",
+];
+
+function resolveRowDateTimestamp(row: any, columns: ExportColumn[]): number {
+  if (!row || typeof row !== "object") return 0;
+
+  const dateCols = columns.filter((c) => {
+    const k = c.key.toLowerCase();
+    return k.includes("tanggal") || k.includes("tgl") || k.includes("tempo") || k.includes("date");
+  });
+
+  for (const col of dateCols) {
+    if (row[col.key]) {
+      const ts = parseExportDateTimestamp(row[col.key]);
+      if (ts > 0) return ts;
+    }
+  }
+
+  for (const key of FALLBACK_DATE_KEYS) {
+    if (row[key]) {
+      const ts = parseExportDateTimestamp(row[key]);
+      if (ts > 0) return ts;
+    }
+  }
+
+  for (const [k, v] of Object.entries(row)) {
+    const lower = k.toLowerCase();
+    if ((lower.includes("tanggal") || lower.includes("tgl") || lower.includes("date")) && v) {
+      const ts = parseExportDateTimestamp(v);
+      if (ts > 0) return ts;
+    }
+  }
+
+  return 0;
+}
 
 export function filterDataByExportPeriod(
   data: any[],
@@ -1169,20 +1293,13 @@ export function filterDataByExportPeriod(
     return data;
   }
 
-  const dateCol = columns.find((c) => {
-    const k = c.key.toLowerCase();
-    return k.includes("tanggal") || k.includes("tgl") || k.includes("tempo") || k.includes("date");
-  });
-
-  const dateKey = dateCol ? dateCol.key : "tanggal";
-
   const now = new Date();
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const endOfDay = startOfDay + 86400000 - 1;
 
   if (period === "today") {
     return data.filter((row) => {
-      const ts = new Date(row[dateKey]).getTime();
+      const ts = resolveRowDateTimestamp(row, columns);
       return ts >= startOfDay && ts <= endOfDay;
     });
   }
@@ -1194,7 +1311,7 @@ export function filterDataByExportPeriod(
     const endOfWeek = startOfWeek + 7 * 86400000 - 1;
 
     return data.filter((row) => {
-      const ts = new Date(row[dateKey]).getTime();
+      const ts = resolveRowDateTimestamp(row, columns);
       return ts >= startOfWeek && ts <= endOfWeek;
     });
   }
@@ -1204,7 +1321,7 @@ export function filterDataByExportPeriod(
     const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999).getTime();
 
     return data.filter((row) => {
-      const ts = new Date(row[dateKey]).getTime();
+      const ts = resolveRowDateTimestamp(row, columns);
       return ts >= startOfMonth && ts <= endOfMonth;
     });
   }
@@ -1214,65 +1331,643 @@ export function filterDataByExportPeriod(
     const endOfYear = new Date(now.getFullYear(), 11, 31, 23, 59, 59, 999).getTime();
 
     return data.filter((row) => {
-      const ts = new Date(row[dateKey]).getTime();
+      const ts = resolveRowDateTimestamp(row, columns);
       return ts >= startOfYear && ts <= endOfYear;
     });
   }
 
-  if (period === "custom" && customRange?.start && customRange?.end) {
-    const startCustom = new Date(customRange.start).getTime();
-    const endCustom = new Date(customRange.end).getTime() + 86400000 - 1;
+  if (period === "custom" && (customRange?.start || customRange?.end)) {
+    const rawStart = customRange?.start ? parseExportDateTimestamp(customRange.start) : 0;
+    const rawEnd = customRange?.end ? parseExportDateTimestamp(customRange.end) + 86400000 - 1 : Number.MAX_SAFE_INTEGER;
+    const startCustom = rawStart && rawEnd !== Number.MAX_SAFE_INTEGER && rawStart > rawEnd ? parseExportDateTimestamp(customRange!.end!) : rawStart;
+    const endCustom = rawStart && rawEnd !== Number.MAX_SAFE_INTEGER && rawStart > rawEnd ? rawStart + 86400000 - 1 : rawEnd;
 
     return data.filter((row) => {
-      const ts = new Date(row[dateKey]).getTime();
-      return ts >= startCustom && ts <= endCustom;
+      const ts = resolveRowDateTimestamp(row, columns);
+      return ts > 0 && ts >= startCustom && ts <= endCustom;
     });
   }
 
   return data;
 }
 
-export function exportToCSV({ title, columns, data, filename, periodLabel }: CSVExportOptions): void {
-  const safeTitle = title.replace(/[^a-zA-Z0-9_-]/g, "_");
+/**
+ * Recursively extracts clean plain text from React elements / primitives for exports.
+ */
+export function extractPlainTextFromNode(node: any): string {
+  if (node === null || node === undefined || typeof node === "boolean") {
+    return "";
+  }
+  if (typeof node === "string" || typeof node === "number") {
+    return String(node);
+  }
+  if (Array.isArray(node)) {
+    return node
+      .map((child) => extractPlainTextFromNode(child))
+      .filter((s) => s.trim().length > 0)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+  if (typeof node === "object" && node.props) {
+    // Skip hidden decorative icons / SVG elements
+    if (node.type === "svg") return "";
+    return extractPlainTextFromNode(node.props.children);
+  }
+  return "";
+}
+
+export function isMonetaryColumnKey(key: string): boolean {
+  const lower = key.toLowerCase();
+  if (lower.includes("tanggal") || lower.includes("tgl")) return false;
+  return (
+    lower.includes("uang") ||
+    lower.includes("biaya") ||
+    lower.includes("profit") ||
+    lower.includes("cashback") ||
+    lower.includes("nominal") ||
+    lower.includes("total") ||
+    lower.includes("debit") ||
+    lower.includes("kredit") ||
+    lower.includes("tagihan") ||
+    lower.includes("terbayar") ||
+    lower.includes("sisa") ||
+    lower.includes("kekurangan") ||
+    lower.includes("kelebihan") ||
+    lower.includes("selisih") ||
+    lower.includes("saldo") ||
+    lower.includes("dana") ||
+    lower === "in" ||
+    lower === "out"
+  );
+}
+
+export function isDateColumnKey(key: string): boolean {
+  const lower = key.toLowerCase();
+  return lower.includes("tanggal") || lower.includes("tgl") || lower.includes("tempo") || lower === "date";
+}
+
+export function resolveExportCellDisplay(
+  col: ExportColumn,
+  row: any,
+  rowIndex: number,
+  mode: "csv" | "pdf"
+): string | number {
+  const raw = row ? row[col.key] : undefined;
+  let val = col.exportValue ? col.exportValue(raw, row, rowIndex) : raw;
+
+  if (val !== null && val !== undefined && typeof val === "object") {
+    val = extractPlainTextFromNode(val);
+  }
+
+  if (isMonetaryColumnKey(col.key)) {
+    if (typeof val === "number" && Number.isFinite(val)) {
+      return mode === "csv" ? val : formatRupiah(val);
+    }
+    if (val === null || val === undefined || val === "" || val === "-" || val === "—") {
+      return mode === "csv" ? 0 : "-";
+    }
+    const parsedNum = Number(String(val).replace(/[^0-9-]/g, ""));
+    if (String(val).trim().match(/^-?\s*(?:rp\.?\s*)?[\d.,]+$/i) && !Number.isNaN(parsedNum)) {
+      return mode === "csv" ? parsedNum : formatRupiah(parsedNum);
+    }
+  }
+
+  if (isDateColumnKey(col.key) && val !== null && val !== undefined && val !== "" && val !== "-" && val !== "—") {
+    return formatDateDDMMYYYY(String(val));
+  }
+
+  if (val === null || val === undefined || val === "") {
+    return mode === "csv" ? "" : "-";
+  }
+
+  return typeof val === "number"
+    ? val
+    : String(val)
+        .replace(/[ \t]+/g, " ")
+        .replace(/\r?\n+/g, mode === "csv" ? "\n" : " ")
+        .trim();
+}
+
+export function getFinanceExportFilename(title: string, ext: "csv" | "pdf", periodLabel?: string): string {
+  const cleanPart = (val: string) =>
+    val
+      .replace(/[^a-zA-Z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+  const safeTitle = cleanPart(title) || "Laporan_Keuangan";
+  const safePeriod = periodLabel ? `_${cleanPart(periodLabel).slice(0, 32)}` : "";
   const dateStr = new Date().toISOString().slice(0, 10);
-  const actualFilename = filename || `AdminSUN89_${safeTitle}_${dateStr}.csv`;
+  return `AdminSUN89_${safeTitle}${safePeriod}_${dateStr}.${ext}`;
+}
+
+export function buildFinanceCSVContent({
+  title,
+  columns,
+  data,
+  periodLabel,
+  metadata = [],
+}: CSVExportOptions): string {
+  if (!columns || columns.length === 0) {
+    throw new Error("Minimal satu kolom harus dipilih untuk diekspor ke CSV.");
+  }
+
+  const now = new Date();
+  const printDateTime = `${now.toLocaleDateString("id-ID")} ${now.toLocaleTimeString("id-ID", {
+    hour: "2-digit",
+    minute: "2-digit",
+  })}`;
 
   const lines: string[] = [];
-  lines.push(`"LAPORAN: ${title.toUpperCase()}"`);
-  if (periodLabel) lines.push(`"PERIODE: ${periodLabel}"`);
-  lines.push(`"TANGGAL CETAK: ${new Date().toLocaleDateString("id-ID")}"`);
-  lines.push(`"TOTAL BARIS: ${data.length}"`);
+  lines.push([escapeCSVCell("LAPORAN"), escapeCSVCell(title.toUpperCase())].join(","));
+  lines.push([escapeCSVCell("PERUSAHAAN"), escapeCSVCell("SUN BIRO JASA / ADMIN SUN89")].join(","));
+  if (periodLabel) {
+    lines.push([escapeCSVCell("PERIODE"), escapeCSVCell(periodLabel)].join(","));
+  }
+  metadata.forEach((m) => {
+    lines.push([escapeCSVCell(m.label.toUpperCase()), escapeCSVCell(m.value)].join(","));
+  });
+  lines.push([escapeCSVCell("TANGGAL EKSPOR"), escapeCSVCell(printDateTime)].join(","));
+  lines.push([escapeCSVCell("TOTAL DATA"), String(data.length)].join(","));
   lines.push("");
 
   const headers = columns.map((c) => escapeCSVCell(c.label));
   lines.push(headers.join(","));
 
-  data.forEach((row) => {
+  data.forEach((row, rowIdx) => {
     const rowValues = columns.map((col) => {
-      const rawVal = row[col.key];
-      return escapeCSVCell(rawVal);
+      const resolved = resolveExportCellDisplay(col, row, rowIdx, "csv");
+      if (typeof resolved === "number" && Number.isFinite(resolved)) {
+        return String(resolved);
+      }
+      return escapeCSVCell(resolved);
     });
     lines.push(rowValues.join(","));
   });
 
-  const csvContent = "\uFEFF" + lines.join("\r\n");
+  return "\uFEFF" + lines.join("\r\n");
+}
+
+export function exportToCSV(options: CSVExportOptions): void {
+  const actualFilename =
+    options.filename || getFinanceExportFilename(options.title, "csv", options.periodLabel);
+  const csvContent = buildFinanceCSVContent(options);
   triggerBlobDownload(csvContent, actualFilename);
 }
 
-export function exportToPDF(options: PDFExportOptions): void {
-  // Backwards compatibility fallback using printable dispatcher
-  const theadHtml = options.columns
-    .map((c) => `<th style="border:1px solid #cbd5e1; padding:6px; background:#f1f5f9; text-align:${c.align || 'left'}">${c.label}</th>`)
-    .join("");
+/**
+ * Automatically selects A4 Portrait vs Landscape based on column count & estimated horizontal width.
+ */
+export function resolvePdfOrientation(
+  columns: ExportColumn[],
+  data: any[] = [],
+  requestedOrientation: "auto" | "portrait" | "landscape" = "auto"
+): "portrait" | "landscape" {
+  if (requestedOrientation === "portrait" || requestedOrientation === "landscape") {
+    return requestedOrientation;
+  }
 
-  const tbodyHtml = options.data
+  const colCount = columns.length;
+  if (colCount >= 7) {
+    return "landscape";
+  }
+
+  const sample = data.slice(0, 25);
+  let estimatedWidthPx = 42; // Base No. column
+
+  for (const col of columns) {
+    const k = col.key.toLowerCase();
+    let baseWidth = Math.max(80, Math.min(180, col.label.length * 7.5 + 24));
+
+    if (k.includes("keterangan") || k.includes("catatan") || k.includes("alamat") || k.includes("detail")) {
+      baseWidth = Math.max(baseWidth, 175);
+    } else if (k.includes("payment") || k.includes("metode") || k.includes("bank")) {
+      baseWidth = Math.max(baseWidth, 150);
+    } else if (k.includes("customer") || k.includes("nama") || k.includes("pengurusan") || k.includes("layanan")) {
+      baseWidth = Math.max(baseWidth, 135);
+    } else if (isMonetaryColumnKey(col.key)) {
+      baseWidth = Math.max(baseWidth, 112);
+    } else if (isDateColumnKey(col.key) || k.includes("nopol") || k.includes("plat") || k.includes("status")) {
+      baseWidth = Math.max(baseWidth, 88);
+    }
+
+    if (sample.length > 0) {
+      let maxSampleLen = 0;
+      for (let i = 0; i < sample.length; i++) {
+        const text = String(resolveExportCellDisplay(col, sample[i], i, "pdf"));
+        if (text.length > maxSampleLen) maxSampleLen = text.length;
+      }
+      baseWidth = Math.max(baseWidth, Math.min(200, maxSampleLen * 6.2 + 18));
+    }
+
+    estimatedWidthPx += baseWidth;
+  }
+
+  return estimatedWidthPx > 680 ? "landscape" : "portrait";
+}
+
+export function buildFinancePDFHtml(options: PDFExportOptions): string {
+  const {
+    title,
+    subTitle = "Laporan Operasional & Keuangan Terintegrasi",
+    companyName = "SUN BIRO JASA / ADMIN SUN89",
+    periodLabel,
+    columns,
+    data,
+    summaryMetrics = [],
+    metadata = [],
+    printedBy,
+    orientation: requestedOrientation = "auto",
+  } = options;
+
+  if (!columns || columns.length === 0) {
+    throw new Error("Minimal satu kolom harus dipilih untuk dicetak ke PDF.");
+  }
+
+  const orientation = resolvePdfOrientation(columns, data, requestedOrientation);
+  const now = new Date();
+  const currentDate = `${now.toLocaleDateString("id-ID", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  })}, ${now.toLocaleTimeString("id-ID", {
+    hour: "2-digit",
+    minute: "2-digit",
+  })} WIB`;
+
+  const isUltraWide = columns.length >= 18;
+  const isDenseWide = columns.length >= 12;
+
+  const bodyFontSize =
+    columns.length >= 26
+      ? "5.25pt"
+      : isUltraWide
+        ? "6pt"
+        : isDenseWide
+          ? "7.5pt"
+          : columns.length >= 8
+            ? "8.25pt"
+            : orientation === "portrait"
+              ? "9pt"
+              : "8.75pt";
+  const headerFontSize =
+    columns.length >= 26
+      ? "4.85pt"
+      : isUltraWide
+        ? "5.5pt"
+        : isDenseWide
+          ? "7pt"
+          : columns.length >= 8
+            ? "7.5pt"
+            : "8pt";
+  const cellPadding =
+    columns.length >= 26
+      ? "2px 2.5px"
+      : isUltraWide
+        ? "2.5px 3.5px"
+        : columns.length >= 11
+          ? "4.5px 5px"
+          : "6px 7px";
+  const noColWidth = columns.length >= 26 ? "18px" : isUltraWide ? "24px" : "34px";
+  const pageMarginCss = isUltraWide ? "8mm 6mm 12mm 6mm" : "10mm 11mm 13mm 11mm";
+  const tableZoomCss = columns.length >= 26 ? "0.86" : "1";
+
+  const metaItems: ExportMetadataItem[] = [
+    ...(periodLabel ? [{ label: "Periode", value: periodLabel }] : []),
+    ...metadata,
+    ...(printedBy ? [{ label: "Dicetak Oleh", value: printedBy }] : []),
+    { label: "Total Data", value: `${data.length} Baris` },
+  ];
+
+  const metadataHtml = metaItems
     .map(
-      (r) =>
-        `<tr>${options.columns.map((c) => `<td style="border:1px solid #cbd5e1; padding:6px; text-align:${c.align || 'left'}">${r[c.key] ?? "-"}</td>`).join("")}</tr>`
+      (m) => `
+      <div class="meta-item">
+        <span class="meta-label">${escapeHtml(m.label)}:</span>
+        <span class="meta-value">${escapeHtml(m.value)}</span>
+      </div>`
     )
     .join("");
 
-  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>${options.title}</title><style>@page{size:A4 landscape;margin:10mm;}body{font-family:sans-serif;font-size:8pt;}table{width:100%;border-collapse:collapse;}</style></head><body><h2>SUN DELAPAN SEMBILAN — ${options.title}</h2><p>Periode: ${options.periodLabel}</p><br/><table><thead><tr>${theadHtml}</tr></thead><tbody>${tbodyHtml}</tbody></table><script>window.print();</script></body></html>`;
+  const summaryHtml =
+    summaryMetrics.length > 0
+      ? `<div class="summary-grid">${summaryMetrics
+          .map(
+            (s) => `
+          <div class="summary-card">
+            <div class="summary-label">${escapeHtml(s.label)}</div>
+            <div class="summary-value">${escapeHtml(s.value)}</div>
+          </div>`
+          )
+          .join("")}</div>`
+      : "";
 
-  dispatchPrintableDocument(html, `${options.title}.pdf`, "print");
+  const headerCellsHtml = [
+    `<th class="text-center" style="width: ${noColWidth};">No</th>`,
+    ...columns.map((col) => {
+      const align = col.align || (isMonetaryColumnKey(col.key) ? "right" : "left");
+      return `<th class="text-${align}">${escapeHtml(col.label)}</th>`;
+    }),
+  ].join("");
+
+  const rowsHtml =
+    data.length > 0
+      ? data
+          .map((row, rowIdx) => {
+            const cells = [
+              `<td class="text-center font-mono text-muted">${rowIdx + 1}</td>`,
+              ...columns.map((col) => {
+                const resolved = resolveExportCellDisplay(col, row, rowIdx, "pdf");
+                const isMoney = isMonetaryColumnKey(col.key);
+                const isDate = isDateColumnKey(col.key);
+                const align = col.align || (isMoney ? "right" : "left");
+                const extraClasses = [
+                  `text-${align}`,
+                  isMoney ? "font-mono text-currency" : "",
+                  isDate && !isUltraWide ? "font-mono text-nowrap" : isDate ? "font-mono" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ");
+                return `<td class="${extraClasses}">${escapeHtml(resolved)}</td>`;
+              }),
+            ].join("");
+            return `<tr>${cells}</tr>`;
+          })
+          .join("")
+      : `<tr><td colspan="${columns.length + 1}" class="empty-cell">Tidak ada data yang tersedia untuk filter / periode yang dipilih.</td></tr>`;
+
+  return `<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <title>${escapeHtml(title)} - ${escapeHtml(companyName)}</title>
+  <style>
+    @page {
+      size: A4 ${orientation};
+      margin: ${pageMarginCss};
+      @bottom-left {
+        content: "SUN BIRO JASA / ADMIN SUN89 — Dokumen Keuangan Resmi";
+        font-size: 7.5pt;
+        color: #64748b;
+      }
+      @bottom-right {
+        content: "Halaman " counter(page) " dari " counter(pages);
+        font-size: 7.5pt;
+        color: #64748b;
+      }
+    }
+    @media print {
+      body {
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+        padding: 0 !important;
+      }
+      thead {
+        display: table-header-group;
+      }
+      tfoot {
+        display: table-footer-group;
+      }
+      tr {
+        page-break-inside: avoid;
+      }
+      .print-bar {
+        display: none !important;
+      }
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      color: #0f172a;
+      background: #ffffff;
+      margin: 0;
+      padding: 16px;
+      font-size: ${bodyFontSize};
+      line-height: 1.4;
+    }
+    .print-bar {
+      background: #0f172a;
+      color: #ffffff;
+      padding: 10px 16px;
+      margin: -16px -16px 16px -16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    .print-bar-meta {
+      font-size: 11px;
+      color: #cbd5e1;
+      margin-top: 2px;
+    }
+    .print-btn {
+      background: #2563eb;
+      color: #ffffff;
+      border: none;
+      padding: 7px 14px;
+      font-size: 12px;
+      font-weight: 600;
+      border-radius: 4px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .print-btn:hover {
+      background: #1d4ed8;
+    }
+    .report-header {
+      border-bottom: 2px solid #0f172a;
+      padding-bottom: 8px;
+      margin-bottom: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 16px;
+    }
+    .company-title {
+      font-size: 9pt;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      color: #475569;
+      text-transform: uppercase;
+    }
+    .doc-title {
+      font-size: 14pt;
+      font-weight: 700;
+      color: #0f172a;
+      margin: 2px 0;
+      letter-spacing: -0.01em;
+    }
+    .doc-subtitle {
+      font-size: 8.5pt;
+      color: #64748b;
+    }
+    .header-right {
+      text-align: right;
+      font-size: 8pt;
+      color: #475569;
+      line-height: 1.5;
+      white-space: nowrap;
+    }
+    .meta-box {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      padding: 8px 12px;
+      margin-bottom: 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 18px;
+    }
+    .meta-item {
+      display: inline-flex;
+      gap: 4px;
+      font-size: 8pt;
+    }
+    .meta-label {
+      color: #64748b;
+      font-weight: 500;
+    }
+    .meta-value {
+      color: #0f172a;
+      font-weight: 600;
+    }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .summary-card {
+      border: 1px solid #cbd5e1;
+      border-radius: 5px;
+      padding: 6px 10px;
+      background: #f8fafc;
+    }
+    .summary-label {
+      font-size: 7pt;
+      color: #64748b;
+      text-transform: uppercase;
+      font-weight: 700;
+    }
+    .summary-value {
+      font-size: 9.5pt;
+      font-weight: 700;
+      color: #0f172a;
+      margin-top: 2px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 4px;
+      table-layout: auto;
+      zoom: ${tableZoomCss};
+    }
+    th {
+      background-color: #f1f5f9;
+      color: #1e293b;
+      font-weight: 700;
+      font-size: ${headerFontSize};
+      text-transform: uppercase;
+      letter-spacing: ${isUltraWide ? "0.01em" : "0.03em"};
+      padding: ${cellPadding};
+      border: 1px solid #cbd5e1;
+      vertical-align: middle;
+      line-height: 1.2;
+      overflow-wrap: ${isUltraWide ? "anywhere" : "break-word"};
+      word-break: normal;
+    }
+    td {
+      padding: ${cellPadding};
+      border: 1px solid #e2e8f0;
+      font-size: ${bodyFontSize};
+      vertical-align: middle;
+      line-height: ${isUltraWide ? "1.25" : "1.35"};
+      overflow-wrap: ${isUltraWide ? "anywhere" : "break-word"};
+      word-break: normal;
+    }
+    tr:nth-child(even) td {
+      background-color: #f8fafc;
+    }
+    .text-center { text-align: center; }
+    .text-right { text-align: right; }
+    .text-left { text-align: left; }
+    .text-nowrap { white-space: nowrap; }
+    .text-muted { color: #64748b; }
+    .text-currency {
+      white-space: ${isUltraWide ? "normal" : "nowrap"};
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      word-break: normal;
+      overflow-wrap: normal;
+    }
+    .font-mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    .empty-cell {
+      text-align: center;
+      padding: 24px;
+      color: #64748b;
+    }
+    .report-footer {
+      margin-top: 14px;
+      padding-top: 8px;
+      border-top: 1px solid #cbd5e1;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      font-size: 7.5pt;
+      color: #64748b;
+    }
+  </style>
+</head>
+<body>
+  <div class="print-bar">
+    <div>
+      <div><strong>Pratinjau Dokumen Cetak / PDF — ${escapeHtml(title)}</strong></div>
+      <div class="print-bar-meta">Orientasi otomatis: A4 ${orientation === "portrait" ? "Portrait" : "Landscape"} • ${columns.length} kolom aktif • ${data.length} baris data</div>
+    </div>
+    <button class="print-btn" onclick="window.print()">Cetak / Simpan PDF</button>
+  </div>
+
+  <div class="report-header">
+    <div>
+      <div class="company-title">${escapeHtml(companyName)}</div>
+      <div class="doc-title">${escapeHtml(title)}</div>
+      ${subTitle ? `<div class="doc-subtitle">${escapeHtml(subTitle)}</div>` : ""}
+    </div>
+    <div class="header-right">
+      <div>Tanggal Cetak: <strong>${escapeHtml(currentDate)}</strong></div>
+      <div>Total Data: <strong>${data.length} baris</strong></div>
+      <div>Format Kertas: <strong>A4 ${orientation === "portrait" ? "Portrait" : "Landscape"}</strong></div>
+    </div>
+  </div>
+
+  ${metaItems.length > 0 ? `<div class="meta-box">${metadataHtml}</div>` : ""}
+
+  ${summaryHtml}
+
+  <table>
+    <thead>
+      <tr>${headerCellsHtml}</tr>
+    </thead>
+    <tbody>
+      ${rowsHtml}
+    </tbody>
+  </table>
+
+  <div class="report-footer">
+    <div>${escapeHtml(companyName)} — Dokumen dicetak otomatis dari sistem operasional Admin SUN89.</div>
+    <div>Dicetak pada: ${escapeHtml(currentDate)}</div>
+  </div>
+</body>
+</html>`;
+}
+
+export function exportToPDF(options: PDFExportOptions): void {
+  const filename = getFinanceExportFilename(options.title, "pdf", options.periodLabel);
+  const html = buildFinancePDFHtml(options);
+  dispatchPrintableDocument(html, filename, options.action || "download");
 }

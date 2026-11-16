@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { MapPin, X } from "lucide-react";
+import { Button } from "./ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "./ui/select";
 import { PROVINSI_LIST } from "../../domain/pricing/wilayahIndonesiaData";
 import { cn } from "./ui/utils";
@@ -29,8 +30,9 @@ export function ProvinsiFilterSelect({
     <div className={cn("flex items-center gap-1.5", className)}>
       <Select value={value} onValueChange={onValueChange}>
         <SelectTrigger
+          size="sm"
           className={cn(
-            "w-full sm:w-56 h-8.5 text-xs bg-background border-border shrink-0",
+            "w-full sm:w-56 bg-background border-border shrink-0",
             triggerClassName
           )}
         >
@@ -60,15 +62,18 @@ export function ProvinsiFilterSelect({
         </SelectContent>
       </Select>
       {value !== "all" && (
-        <button
+        <Button
           type="button"
+          variant="outline"
+          size="sm"
           onClick={() => onValueChange("all")}
+          aria-label="Reset filter provinsi"
           title="Kembali ke Semua Provinsi"
-          className="h-8.5 px-2 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/60 border border-border rounded-md flex items-center gap-1 transition-colors shrink-0"
+          className="h-8.5 px-2 text-xs text-muted-foreground hover:text-foreground gap-1 shrink-0"
         >
           <X className="w-3 h-3" />
           <span className="hidden sm:inline">Reset</span>
-        </button>
+        </Button>
       )}
     </div>
   );

@@ -296,11 +296,7 @@ export function MetodePembayaranMaster() {
     if (!selectedItem) return;
     try {
       const res = await deleteMethod(selectedItem.id);
-      if (res.deactivated) {
-        toast.info(res.message || `Metode '${selectedItem.nama_metode}' dinonaktifkan.`);
-      } else {
-        toast.success(res.message || `Metode '${selectedItem.nama_metode}' berhasil dihapus.`);
-      }
+      toast.success(res.message || `Metode '${selectedItem.nama_metode}' berhasil dihapus permanen.`);
       setIsDeleteOpen(false);
       setSelectedItem(null);
     } catch (err: any) {
@@ -415,8 +411,7 @@ export function MetodePembayaranMaster() {
         </div>
         <Button
           onClick={handleOpenAdd}
-          size="sm"
-          className="h-9 gap-1.5 text-xs font-medium shrink-0 shadow-xs"
+          className="gap-1.5 text-xs font-medium shrink-0"
         >
           <Plus className="w-4 h-4" />
           Tambah Metode Pembayaran
@@ -608,13 +603,12 @@ export function MetodePembayaranMaster() {
               <Button
                 type="button"
                 variant="outline"
-                size="sm"
                 onClick={handleCancelAdd}
-                className="text-xs h-9 px-4"
+                className="text-xs px-4"
               >
                 Batal
               </Button>
-              <Button type="submit" size="sm" className="bg-primary hover:bg-primary/90 text-primary-foreground text-xs h-9 px-4 font-semibold shadow-xs flex items-center gap-1.5">
+              <Button type="submit" className="text-xs px-4 font-semibold gap-1.5">
                 <Plus className="w-3.5 h-3.5" />
                 <span>Simpan Metode</span>
               </Button>
@@ -752,13 +746,12 @@ export function MetodePembayaranMaster() {
               <Button
                 type="button"
                 variant="outline"
-                size="sm"
                 onClick={handleCancelEdit}
-                className="text-xs h-9 px-4"
+                className="text-xs px-4"
               >
                 Batal
               </Button>
-              <Button type="submit" size="sm" className="bg-primary hover:bg-primary/90 text-primary-foreground text-xs h-9 px-4 font-semibold shadow-xs flex items-center gap-1.5">
+              <Button type="submit" className="text-xs px-4 font-semibold gap-1.5">
                 <CheckCircle2 className="w-3.5 h-3.5" />
                 <span>Simpan Perubahan</span>
               </Button>
@@ -806,16 +799,16 @@ export function MetodePembayaranMaster() {
           <AlertDialogHeader>
             <AlertDialogTitle className="text-base font-bold flex items-center gap-2 text-destructive">
               <AlertCircle className="w-5 h-5 text-destructive" />
-              Hapus / Nonaktifkan Metode Pembayaran?
+              Hapus Permanen Metode Pembayaran?
             </AlertDialogTitle>
             <AlertDialogDescription className="text-xs text-muted-foreground space-y-2">
               <p>
-                Anda akan menghapus metode pembayaran{" "}
+                Anda akan menghapus permanen metode pembayaran{" "}
                 <strong className="text-foreground">{selectedItem?.nama_metode}</strong> (
                 {selectedItem?.bank} - {selectedItem?.nomor_rekening || "Tanpa Rekening"}).
               </p>
               <p className="p-2.5 rounded bg-muted/40 border border-border text-[11px] leading-relaxed">
-                <strong className="text-foreground">Proteksi Integritas Transaksi:</strong> Jika metode ini sudah pernah digunakan oleh transaksi lama, sistem akan secara otomatis <strong>menonaktifkannya</strong> (bukan menghapus permanen) agar histori transaksi lama tetap utuh. Jika belum pernah digunakan, metode akan dihapus permanen.
+                <strong className="text-foreground">Proteksi Integritas Transaksi:</strong> Penghapusan permanen hanya diizinkan untuk metode yang belum pernah digunakan dalam transaksi keuangan. Jika metode sudah direferensikan, sistem akan menolak penghapusan (HTTP 409); gunakan tombol <strong>Edit</strong> untuk mengubah status menjadi <strong>Nonaktif</strong> agar histori transaksi tetap terjaga.
               </p>
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -827,7 +820,7 @@ export function MetodePembayaranMaster() {
               onClick={handleDeleteConfirm}
               className="bg-destructive hover:bg-destructive/90 text-destructive-foreground text-xs h-8 px-3"
             >
-              Lanjutkan Penghapusan
+              Hapus Permanen
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

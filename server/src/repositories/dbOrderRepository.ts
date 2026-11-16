@@ -6,6 +6,7 @@
 import { db, runInTransaction } from "../database/db";
 import { OperationalOrder, StageName, STAGES } from "../../../src/domain/order/types";
 import { serializeUtcTimestamp } from "../utils/timestampSerializer";
+import { normalizeToWibCalendarDate } from "../utils/dateNormalizer";
 
 /**
  * Evaluates whether an order represents a partial estimate or complete pricing.
@@ -345,7 +346,9 @@ export class DbOrderRepository {
     }
     const paymentStatus = String(order.payment?.statusPembayaran || "Belum Lunas");
     const totalBiaya = Number(order.payment?.totalBiaya ?? order.totalEstimasi ?? order.biayaJasa ?? 0);
-    const createdAt = order.createdAt ? String(order.createdAt) : new Date().toISOString().split("T")[0];
+    const createdAt = order.createdAt
+      ? String(order.createdAt)
+      : (normalizeToWibCalendarDate(new Date()) || new Date().toISOString().split("T")[0]);
 
     const costEval = evaluateOrderCostCompleteness(order);
     const isCostVerifiedVal = costEval.isCostVerified ? 1 : 0;
@@ -811,15 +814,28 @@ export class DbOrderRepository {
     const existing = this.getByOrderNo(orderNo);
     if (!existing) return false;
 
-    const isCancelled = existing.isCancelled || existing.currentStageName === "Dibatalkan";
+    const isCancelled = existing.isCancelled || existing.currentStageName === "Dibatalkan" || (existing as any).status === "Dibatalkan";
+    if (isCancelled) return false;
+    if ((existing as any).isArchived === 2) return false;
+    if ((existing as any).isArchived === true || Number((existing as any).isArchived) === 1) return true;
+
+    const isAtStage8 =
+      Number(existing.currentStep) === 8 &&
+      existing.currentStageName === "Dokumen Telah Diterima";
+    if (!isAtStage8) {
+      return false;
+    }
+
     const synchronizedJson = {
       ...existing,
       isArchived: true,
-      currentStageName: isCancelled ? "Dibatalkan" : "Selesai (Arsip)",
-      currentStep: isCancelled ? existing.currentStep : 8,
+      currentStageName: "Selesai (Arsip)",
+      currentStep: 8,
     };
 
-    const stmt = db.prepare("UPDATE orders SET is_archived = 1, data_json = ?, updated_at = datetime('now') WHERE order_no = ?");
+    const stmt = db.prepare(
+      "UPDATE orders SET is_archived = 1, data_json = ?, updated_at = datetime('now') WHERE order_no = ? AND is_archived = 0"
+    );
     const res = stmt.run(JSON.stringify(synchronizedJson), orderNo);
     return res.changes > 0;
   }

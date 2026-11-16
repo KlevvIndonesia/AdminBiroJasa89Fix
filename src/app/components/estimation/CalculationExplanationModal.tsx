@@ -23,7 +23,7 @@ import {
   KondisiBerkas,
   WilayahAccId,
 } from "../../../domain/estimation/types";
-import { estimationStore } from "../../data/estimationStore";
+import { estimationStore, resolveTemplateIdByService } from "../../data/estimationStore";
 
 export interface ExplanationItem {
   id: string;
@@ -83,17 +83,7 @@ export function CalculationExplanationModal({
   // Dynamic template resolution
   const activeTemplate = useMemo(() => {
     if (template) return template;
-    let tid = "template-pajak-tahunan-r4";
-    if (isR2 && serviceType.includes("1 Tahun")) tid = "template-pajak-tahunan-r2";
-    else if (!isR2 && serviceType.includes("1 Tahun")) tid = "template-pajak-tahunan-r4";
-    else if (isR2 && serviceType.includes("5 Tahun")) tid = "template-pajak-5-tahunan-r2";
-    else if (!isR2 && serviceType.includes("5 Tahun")) tid = "template-pajak-5-tahunan-r4";
-    else if (isR2 && (serviceType.includes("Balik") || serviceType.includes("BBN"))) tid = "template-bbn-r2";
-    else if (!isR2 && (serviceType.includes("Balik") || serviceType.includes("BBN"))) tid = "template-bbn-r4";
-    else if (isR2 && serviceType.includes("Antar Samsat")) tid = "template-mutasi-antar-samsat-r2";
-    else if (!isR2 && serviceType.includes("Antar Samsat")) tid = "template-mutasi-antar-samsat-r4";
-    else if (isR2 && serviceType.includes("Luar")) tid = "template-mutasi-luar-daerah-r2";
-    else if (!isR2 && serviceType.includes("Luar")) tid = "template-mutasi-luar-daerah-r4";
+    const tid = resolveTemplateIdByService(serviceType, isR2 ? "Motor" : "Mobil");
     return estimationStore.getTemplate(tid);
   }, [template, isR2, serviceType]);
 
@@ -691,7 +681,7 @@ export function CalculationExplanationModal({
                         {item.vehicleTag && (
                           <span
                             className={cn(
-                              "text-[9px] px-1 rounded font-mono font-normal shrink-0",
+                              "text-[11px] px-1 rounded font-mono font-normal shrink-0",
                               item.vehicleTag === "R2"
                                 ? "bg-emerald-500/10 text-emerald-600"
                                 : "bg-blue-500/10 text-blue-600"
@@ -701,7 +691,7 @@ export function CalculationExplanationModal({
                           </span>
                         )}
                       </div>
-                      <span className="text-[10px] text-muted-foreground block truncate mt-0.5">
+                      <span className="text-[11px] text-muted-foreground block truncate mt-0.5">
                         {item.category}
                       </span>
                     </div>
@@ -716,7 +706,7 @@ export function CalculationExplanationModal({
                         Rp {item.currentAmount.toLocaleString("id-ID")}
                       </span>
                       {!item.includesInTotal && (
-                        <span className="text-[9px] text-amber-600 block">Luar Total</span>
+                        <span className="text-[11px] text-amber-600 block">Luar Total</span>
                       )}
                     </div>
                   </button>

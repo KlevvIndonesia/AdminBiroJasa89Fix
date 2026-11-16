@@ -1,4 +1,5 @@
 import { useState, useMemo, useRef } from "react";
+import { getWibTodayString } from "../utils/orderDateUtils";
 import { useNavigate } from "react-router";
 import { motion, AnimatePresence } from "motion/react";
 import { Card } from "./ui/card";
@@ -62,7 +63,6 @@ import { pricingStore, usePricingStore, resolveServiceId, resolveSamsatId } from
 import { documentRepository } from "../../data/repositories/documentRepository";
 import { processDocumentUpload, formatFileSize } from "../utils/fileCompressor";
 import { cn } from "./ui/utils";
-import { APP_CONFIG } from "../config/appConfig";
 import { ActionInlineError } from "./ui/ActionInlineError";
 import { ClassifiedActionError, classifyActionError } from "../utils/actionErrorClassifier";
 import { calculateEstimation } from "../../domain/estimation/estimationEngine";
@@ -443,7 +443,7 @@ export function BuatOrder({
       const estimationInput: EstimationInput = {
         pkbDasar: pkb,
         tanggalJatuhTempo: formData.pkbBerlakuSd || "",
-        tanggalEstimasi: new Date().toISOString().split("T")[0],
+        tanggalEstimasi: getWibTodayString(),
         programSamsat: r4ProgramSamsat,
         kondisiBerkas: r4KondisiBerkas,
         wilayahAccId: r4WilayahAccId,
@@ -492,6 +492,7 @@ export function BuatOrder({
 
       const cetakSkpAmount = r4Result.items.find((i) => i.id === "cetak-skp")?.amount || 0;
       const jasaAmount = r4Result.items.find((i) => i.id === "jasa")?.amount ?? effectiveJasa;
+      const samsatCostTotal = r4Result.totalPkb + r4Result.totalDendaPkb + r4Result.totalSwdkllj + r4Result.totalDendaSwdkllj + cetakSkpAmount + r4Result.totalInsidental;
       const grandTotal = r4Result.totalEstimasi + courierFee + totalKustomFees;
 
       const snapshot: any = {
@@ -502,11 +503,11 @@ export function BuatOrder({
         metodeLayanan: formData.metodeLayanan,
         biayaJasa: jasaAmount,
         biayaPengurusanKhusus: isKhusus ? effectiveJasa : undefined,
-        biayaSamsat: cetakSkpAmount,
+        biayaSamsat: samsatCostTotal,
         biayaAntarJemput: courierFee,
         pkb: r4Result.totalPkb + r4Result.totalDendaPkb,
         swdkllj: r4Result.totalSwdkllj,
-        dendaSwdkllj: r4Result.totalDendaSwdkllj + cetakSkpAmount + r4Result.totalInsidental,
+        dendaSwdkllj: r4Result.totalDendaSwdkllj,
         totalEstimasi: grandTotal,
         breakdown,
         createdAt: new Date().toISOString(),
@@ -514,12 +515,12 @@ export function BuatOrder({
 
       return {
         biayaJasa: jasaAmount,
-        biayaSamsat: cetakSkpAmount,
+        biayaSamsat: samsatCostTotal,
         biayaAntarJemput: courierFee,
         subtotalLayanan: r4Result.totalAdminDanJasa + r4Result.totalInsidental + courierFee + totalKustomFees,
         pkb: r4Result.totalPkb + r4Result.totalDendaPkb,
         swdkllj: r4Result.totalSwdkllj,
-        dendaSwdkllj: r4Result.totalDendaSwdkllj + cetakSkpAmount + r4Result.totalInsidental,
+        dendaSwdkllj: r4Result.totalDendaSwdkllj,
         total: grandTotal,
         breakdown,
         snapshot,
@@ -564,7 +565,7 @@ export function BuatOrder({
       const estimationInput: EstimationInput = {
         pkbDasar: pkb,
         tanggalJatuhTempo: formData.pkbBerlakuSd || "",
-        tanggalEstimasi: new Date().toISOString().split("T")[0],
+        tanggalEstimasi: getWibTodayString(),
         programSamsat: r2ProgramSamsat,
         kondisiBerkas: r2KondisiBerkas,
         wilayahAccId: r2WilayahAccId,
@@ -614,6 +615,7 @@ export function BuatOrder({
       const cetakSkpAmount = r2Result.items.find((i) => i.id === "cetak-skp")?.amount || 0;
       const prosesAccAmount = r2Result.items.find((i) => i.id === "proses-dan-acc-id")?.amount || 0;
       const jasaAmount = r2Result.items.find((i) => i.id === "jasa")?.amount ?? effectiveJasa;
+      const samsatCostTotalR2 = r2Result.totalPkb + r2Result.totalDendaPkb + r2Result.totalSwdkllj + r2Result.totalDendaSwdkllj + cetakSkpAmount + prosesAccAmount + r2Result.totalInsidental;
       const grandTotal = r2Result.totalEstimasi + courierFee + totalKustomFees;
 
       const snapshot: any = {
@@ -624,11 +626,11 @@ export function BuatOrder({
         metodeLayanan: formData.metodeLayanan,
         biayaJasa: jasaAmount,
         biayaPengurusanKhusus: isKhusus ? effectiveJasa : undefined,
-        biayaSamsat: cetakSkpAmount + prosesAccAmount,
+        biayaSamsat: samsatCostTotalR2,
         biayaAntarJemput: courierFee,
         pkb: r2Result.totalPkb + r2Result.totalDendaPkb,
         swdkllj: r2Result.totalSwdkllj,
-        dendaSwdkllj: r2Result.totalDendaSwdkllj + cetakSkpAmount + prosesAccAmount + r2Result.totalInsidental,
+        dendaSwdkllj: r2Result.totalDendaSwdkllj,
         totalEstimasi: grandTotal,
         breakdown,
         createdAt: new Date().toISOString(),
@@ -636,12 +638,12 @@ export function BuatOrder({
 
       return {
         biayaJasa: jasaAmount,
-        biayaSamsat: cetakSkpAmount + prosesAccAmount,
+        biayaSamsat: samsatCostTotalR2,
         biayaAntarJemput: courierFee,
         subtotalLayanan: r2Result.totalAdminDanJasa + r2Result.totalInsidental + courierFee + totalKustomFees,
         pkb: r2Result.totalPkb + r2Result.totalDendaPkb,
         swdkllj: r2Result.totalSwdkllj,
-        dendaSwdkllj: r2Result.totalDendaSwdkllj + cetakSkpAmount + prosesAccAmount + r2Result.totalInsidental,
+        dendaSwdkllj: r2Result.totalDendaSwdkllj,
         total: grandTotal,
         breakdown,
         snapshot,
@@ -694,7 +696,7 @@ export function BuatOrder({
       const estimationInput: EstimationInput = {
         pkbDasar: pkb,
         tanggalJatuhTempo: formData.pkbBerlakuSd || "",
-        tanggalEstimasi: new Date().toISOString().split("T")[0],
+        tanggalEstimasi: getWibTodayString(),
         programSamsat: extProgramSamsat,
         kondisiBerkas: extKondisiBerkas,
         wilayahAccId: extWilayahAccId,
@@ -748,6 +750,7 @@ export function BuatOrder({
         .filter((i) => i.category === "ADMIN" || i.category === "PROSES" || i.category === "BBN")
         .reduce((sum, i) => sum + i.amount, 0);
 
+      const samsatCostTotalExt = extResult.totalPkb + extResult.totalDendaPkb + extResult.totalSwdkllj + extResult.totalDendaSwdkllj + prosesAmount + extResult.totalInsidental;
       const grandTotal = extResult.totalEstimasi + courierFee + totalKustomFees;
 
       const snapshot: any = {
@@ -758,11 +761,11 @@ export function BuatOrder({
         metodeLayanan: formData.metodeLayanan,
         biayaJasa: jasaAmount,
         biayaPengurusanKhusus: isKhusus ? effectiveJasa : undefined,
-        biayaSamsat: prosesAmount,
+        biayaSamsat: samsatCostTotalExt,
         biayaAntarJemput: courierFee,
         pkb: extResult.totalPkb + extResult.totalDendaPkb,
         swdkllj: extResult.totalSwdkllj,
-        dendaSwdkllj: extResult.totalDendaSwdkllj + prosesAmount + extResult.totalInsidental,
+        dendaSwdkllj: extResult.totalDendaSwdkllj,
         totalEstimasi: grandTotal,
         breakdown,
         createdAt: new Date().toISOString(),
@@ -770,12 +773,12 @@ export function BuatOrder({
 
       return {
         biayaJasa: jasaAmount,
-        biayaSamsat: prosesAmount,
+        biayaSamsat: samsatCostTotalExt,
         biayaAntarJemput: courierFee,
         subtotalLayanan: extResult.totalAdminDanJasa + extResult.totalInsidental + courierFee + totalKustomFees,
         pkb: extResult.totalPkb + extResult.totalDendaPkb,
         swdkllj: extResult.totalSwdkllj,
-        dendaSwdkllj: extResult.totalDendaSwdkllj + prosesAmount + extResult.totalInsidental,
+        dendaSwdkllj: extResult.totalDendaSwdkllj,
         total: grandTotal,
         breakdown,
         snapshot,
@@ -1258,22 +1261,19 @@ export function BuatOrder({
               [key]: { ...prev[key], fileUrl, documentId: docId },
             }));
           } catch (uploadErr) {
-            if (APP_CONFIG.dataProvider === "api") {
-              const classifiedUploadErr = classifyActionError(uploadErr, { entityLabel: `Dokumen ${item.name || key}` });
-              setDocUploadErrors((prev) => ({
-                ...prev,
-                [key]: `Gagal mengunggah ${item.name || key}: ${classifiedUploadErr.message}`,
-              }));
-              throw classifiedUploadErr;
-            }
-            console.warn(`[BuatOrder] Upload warning for ${key} (mock mode):`, uploadErr);
+            const classifiedUploadErr = classifyActionError(uploadErr, { entityLabel: `Dokumen ${item.name || key}` });
+            setDocUploadErrors((prev) => ({
+              ...prev,
+              [key]: `Gagal mengunggah ${item.name || key}: ${classifiedUploadErr.message}`,
+            }));
+            throw classifiedUploadErr;
           }
         }
         clientDocuments[key] = {
           name: item.attached ? item.name : "",
           status: item.attached ? "Sudah Tersedia" : "Belum Tersedia",
           isOptional: true,
-          updatedAt: item.attached ? new Date().toISOString().split("T")[0] : undefined,
+          updatedAt: item.attached ? getWibTodayString() : undefined,
           fileType: item.fileType || undefined,
           fileUrl: fileUrl || undefined,
           fileSize: item.fileSize || undefined,
@@ -1293,12 +1293,9 @@ export function BuatOrder({
             paymentDocId = uploaded.id;
             setPaymentProof((prev) => ({ ...prev, fileUrl: paymentUrl, documentId: paymentDocId }));
           } catch (uploadErr) {
-            if (APP_CONFIG.dataProvider === "api") {
-              const classifiedProofErr = classifyActionError(uploadErr, { entityLabel: "Bukti pembayaran" });
-              setPaymentProofUploadError(`Gagal mengunggah bukti pembayaran: ${classifiedProofErr.message}`);
-              throw classifiedProofErr;
-            }
-            console.warn("[BuatOrder] Payment proof upload warning (mock mode):", uploadErr);
+            const classifiedProofErr = classifyActionError(uploadErr, { entityLabel: "Bukti pembayaran" });
+            setPaymentProofUploadError(`Gagal mengunggah bukti pembayaran: ${classifiedProofErr.message}`);
+            throw classifiedProofErr;
           }
         }
         buktiBayarPayload = {
@@ -1349,6 +1346,8 @@ export function BuatOrder({
         nominalPkbTerakhir: parseFloat(formData.nominalPkbTerakhir) || 0,
         nominalSwdkllj: parseFloat(formData.nominalSwdkllj) || 143000,
         biayaJasa: cost.biayaJasa,
+        biayaSamsat: (cost as any).biayaSamsat ?? (cost.snapshot as any)?.biayaSamsat ?? 0,
+        biayaAntarJemput: (cost as any).biayaAntarJemput ?? (cost.snapshot as any)?.biayaAntarJemput ?? 0,
         pkb: cost.pkb,
         swdkllj: cost.swdkllj,
         dendaSwdkllj: cost.dendaSwdkllj,
@@ -3426,7 +3425,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("pkb-tertunggak")}
-                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat rumus & cara hitung PKB Tertunggak"
                                   title="Lihat rumus & cara hitung PKB Tertunggak"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3442,7 +3442,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("pajak-baru")}
-                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat rumus & cara hitung Pajak Baru"
                                   title="Lihat rumus & cara hitung Pajak Baru"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3458,7 +3459,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("denda-pkb-tertunggak")}
-                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat rumus & cara hitung Denda PKB Tertunggak"
                                   title="Lihat rumus & cara hitung Denda PKB Tertunggak"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3474,7 +3476,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("denda-pkb-pajak-baru")}
-                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat rumus & cara hitung Denda PKB Pajak Baru"
                                   title="Lihat rumus & cara hitung Denda PKB Pajak Baru"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3505,7 +3508,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("swdkllj-tertunggak")}
-                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat tarif & rumus SWDKLLJ Tertunggak"
                                   title="Lihat tarif & rumus SWDKLLJ Tertunggak"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3521,7 +3525,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("swdkllj-pajak-baru")}
-                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat tarif SWDKLLJ Pajak Baru"
                                   title="Lihat tarif SWDKLLJ Pajak Baru"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3537,7 +3542,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("denda-swdkllj-tertunggak")}
-                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat rumus & tarif Denda SWDKLLJ Tertunggak"
                                   title="Lihat rumus & tarif Denda SWDKLLJ Tertunggak"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3553,7 +3559,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("denda-swdkllj-pajak-baru")}
-                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat aturan Denda SWDKLLJ Pajak Baru"
                                   title="Lihat aturan Denda SWDKLLJ Pajak Baru"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3584,7 +3591,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("cetak-skp")}
-                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat aturan Cetak SKP"
                                   title="Lihat aturan Cetak SKP"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3600,7 +3608,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("jasa")}
-                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat tarif Jasa Biro SUN89"
                                   title="Lihat tarif Jasa Biro SUN89"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3643,7 +3652,8 @@ export function BuatOrder({
                                       <button
                                         type="button"
                                         onClick={() => handleOpenExplanation("insidental")}
-                                        className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer"
+                                        className="text-muted-foreground/60 hover:text-primary transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                        aria-label="Lihat penjelasan biaya insidental"
                                         title="Lihat penjelasan biaya insidental"
                                       >
                                         <HelpCircle className="w-3 h-3" />
@@ -3665,13 +3675,14 @@ export function BuatOrder({
                               <button
                                 type="button"
                                 onClick={() => handleOpenExplanation("acc-id")}
-                                className="text-amber-700/70 dark:text-amber-400/70 hover:text-amber-800 dark:hover:text-amber-300 transition-colors p-0.5 rounded cursor-pointer"
+                                className="text-amber-700/70 dark:text-amber-400/70 hover:text-amber-800 dark:hover:text-amber-300 transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                aria-label="Lihat aturan Biaya ACC ID R4"
                                 title="Lihat aturan Biaya ACC ID R4"
                               >
                                 <HelpCircle className="w-3 h-3" />
                               </button>
                             </span>
-                            <Badge variant="outline" className="text-[9px] bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30">
+                            <Badge variant="outline" className="text-[11px] bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30">
                               Tidak Masuk Total
                             </Badge>
                           </div>
@@ -3787,7 +3798,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("pkb-tertunggak")}
-                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat rumus & cara hitung PKB Tertunggak"
                                   title="Lihat rumus & cara hitung PKB Tertunggak"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3803,7 +3815,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("pajak-baru")}
-                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat rumus & cara hitung Pajak Baru"
                                   title="Lihat rumus & cara hitung Pajak Baru"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3819,7 +3832,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("denda-pkb-tertunggak")}
-                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat rumus & cara hitung Denda PKB Tertunggak"
                                   title="Lihat rumus & cara hitung Denda PKB Tertunggak"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3835,7 +3849,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("denda-pkb-pajak-baru")}
-                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat rumus & cara hitung Denda PKB Pajak Baru"
                                   title="Lihat rumus & cara hitung Denda PKB Pajak Baru"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3866,7 +3881,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("swdkllj-tertunggak")}
-                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat tarif SWDKLLJ Tertunggak"
                                   title="Lihat tarif SWDKLLJ Tertunggak"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3882,7 +3898,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("swdkllj-pajak-baru")}
-                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat tarif SWDKLLJ Pajak Baru"
                                   title="Lihat tarif SWDKLLJ Pajak Baru"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3898,7 +3915,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("denda-swdkllj-tertunggak")}
-                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat rumus Denda SWDKLLJ Tertunggak"
                                   title="Lihat rumus Denda SWDKLLJ Tertunggak"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3914,7 +3932,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("denda-swdkllj-pajak-baru")}
-                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat aturan Denda SWDKLLJ Pajak Baru"
                                   title="Lihat aturan Denda SWDKLLJ Pajak Baru"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3945,7 +3964,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("proses-dan-acc-id")}
-                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat aturan Proses dan ACC ID R2"
                                   title="Lihat aturan Proses dan ACC ID R2"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3961,7 +3981,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("cetak-skp")}
-                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat aturan Cetak SKP"
                                   title="Lihat aturan Cetak SKP"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -3977,7 +3998,8 @@ export function BuatOrder({
                                 <button
                                   type="button"
                                   onClick={() => handleOpenExplanation("jasa")}
-                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer"
+                                  className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label="Lihat tarif Jasa Pengurusan Motor"
                                   title="Lihat tarif Jasa Pengurusan Motor"
                                 >
                                   <HelpCircle className="w-3 h-3" />
@@ -4020,7 +4042,8 @@ export function BuatOrder({
                                       <button
                                         type="button"
                                         onClick={() => handleOpenExplanation("insidental")}
-                                        className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer"
+                                        className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                        aria-label="Lihat penjelasan biaya insidental"
                                         title="Lihat penjelasan biaya insidental"
                                       >
                                         <HelpCircle className="w-3 h-3" />
@@ -4134,7 +4157,8 @@ export function BuatOrder({
                                       <button
                                         type="button"
                                         onClick={() => handleOpenExplanation(item.id)}
-                                        className="text-muted-foreground/60 hover:text-purple-600 transition-colors p-0.5 rounded cursor-pointer"
+                                        className="text-muted-foreground/60 hover:text-purple-600 transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                        aria-label={`Lihat aturan ${item.name}`}
                                         title={`Lihat aturan ${item.name}`}
                                       >
                                         <HelpCircle className="w-3 h-3" />
@@ -4171,7 +4195,8 @@ export function BuatOrder({
                                       <button
                                         type="button"
                                         onClick={() => handleOpenExplanation(item.id)}
-                                        className="text-muted-foreground/60 hover:text-purple-600 transition-colors p-0.5 rounded cursor-pointer"
+                                        className="text-muted-foreground/60 hover:text-purple-600 transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                        aria-label={`Lihat aturan ${item.name}`}
                                         title={`Lihat aturan ${item.name}`}
                                       >
                                         <HelpCircle className="w-3 h-3" />
@@ -4211,7 +4236,8 @@ export function BuatOrder({
                                       <button
                                         type="button"
                                         onClick={() => handleOpenExplanation(item.id)}
-                                        className="text-muted-foreground/60 hover:text-purple-600 transition-colors p-0.5 rounded cursor-pointer"
+                                        className="text-muted-foreground/60 hover:text-purple-600 transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                        aria-label={`Lihat aturan ${item.name}`}
                                         title={`Lihat aturan ${item.name}`}
                                       >
                                         <HelpCircle className="w-3 h-3" />
@@ -4251,7 +4277,8 @@ export function BuatOrder({
                                       <button
                                         type="button"
                                         onClick={() => handleOpenExplanation("jasa")}
-                                        className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer"
+                                        className="text-muted-foreground/60 hover:text-emerald-600 transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                        aria-label="Lihat tarif Jasa Biro"
                                         title="Lihat tarif Jasa Biro"
                                       >
                                         <HelpCircle className="w-3 h-3" />
@@ -4288,7 +4315,8 @@ export function BuatOrder({
                                       <button
                                         type="button"
                                         onClick={() => handleOpenExplanation("insidental")}
-                                        className="text-muted-foreground/60 hover:text-purple-600 transition-colors p-0.5 rounded cursor-pointer"
+                                        className="text-muted-foreground/60 hover:text-purple-600 transition-colors p-0.5 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                        aria-label="Lihat penjelasan biaya insidental"
                                         title="Lihat penjelasan biaya insidental"
                                       >
                                         <HelpCircle className="w-3 h-3" />
@@ -4371,7 +4399,7 @@ export function BuatOrder({
                                 <div className="flex items-center gap-2">
                                   <span className="text-foreground">{item.name}</span>
                                   <span className={cn(
-                                    "text-[9px] px-1.5 py-0.5 rounded font-medium",
+                                    "text-[11px] px-1.5 py-0.5 rounded font-medium",
                                     item.category === "Samsat" ? "bg-amber-500/10 text-amber-600 border border-amber-500/20" :
                                     item.category === "Jasa" ? "bg-blue-500/10 text-blue-600 border border-blue-500/20" :
                                     item.category === "Operasional" ? "bg-emerald-500/10 text-emerald-600 border border-emerald-500/20" :
@@ -4382,12 +4410,12 @@ export function BuatOrder({
                                      item.category === "Operasional" ? "Kurir/Ops" : "Pajak"}
                                   </span>
                                   {item.status === "UNCONFIGURED" && (
-                                    <span className="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-400 border border-amber-500/30">
+                                    <span className="text-[11px] px-1.5 py-0.5 rounded font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-400 border border-amber-500/30">
                                       Belum Dikonfigurasi
                                     </span>
                                   )}
                                   {item.status === "ZERO_EXPLICIT" && (
-                                    <span className="text-[9px] px-1.5 py-0.2 rounded font-medium bg-slate-500/10 text-slate-600 dark:text-slate-400 border border-slate-500/20">
+                                    <span className="text-[11px] px-1.5 py-0.5 rounded font-medium bg-slate-500/10 text-slate-600 dark:text-slate-400 border border-slate-500/20">
                                       Gratis / Rp 0
                                     </span>
                                   )}
@@ -4748,7 +4776,7 @@ export function BuatOrder({
         serviceType={formData.layanan}
         pkbDasar={parseFloat(formData.nominalPkbTerakhir) || 0}
         tanggalJatuhTempo={formData.pkbBerlakuSd || ""}
-        tanggalEstimasi={new Date().toISOString().split("T")[0]}
+        tanggalEstimasi={getWibTodayString()}
         programSamsat={cost.isR2Annual ? r2ProgramSamsat : cost.isExtendedEstimation ? extProgramSamsat : r4ProgramSamsat}
         kondisiBerkas={cost.isR2Annual ? r2KondisiBerkas : cost.isExtendedEstimation ? extKondisiBerkas : r4KondisiBerkas}
         wilayahAccId={cost.isR2Annual ? r2WilayahAccId : cost.isExtendedEstimation ? extWilayahAccId : r4WilayahAccId}
